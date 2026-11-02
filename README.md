@@ -30,8 +30,8 @@ The rendered documentation is at **[embl-mif.github.io/zarrsmith](https://embl-m
 - **Microscope managers** read Luxendo, Opera, SCAPE, Viventis, Zeiss, Evident (Olympus VSI) and OME-Zarr datasets into one lazy (Dask) API with a shared metadata schema. → [Readers and conventions](https://embl-mif.github.io/zarrsmith/readers.html)
 - **OME-Zarr writing**: full export, empty datasets and groups, image and label region updates, any subset of the `tczyx` axes. → [Python API](https://embl-mif.github.io/zarrsmith/python-api.html)
 - **Pyramids and subsetting**: multiscale generation, cropping, channel reordering, metadata updates. → [Python API](https://embl-mif.github.io/zarrsmith/python-api.html)
-- **Mosaics**: raw tiles shown at their stage position and fused into one OME-Zarr image (3D or projection). → [Mosaics](https://embl-mif.github.io/zarrsmith/mosaic.html)
-- **Chromatic shift correction**: the Z offset between channels measured on the sample itself, and a corrected copy with the same layout as the input. → [Chromatic shift correction](https://embl-mif.github.io/zarrsmith/chromatic-shift.html)
+- **Mosaics**: raw tiles shown at their stage position and fused into one OME-Zarr image (3D or projection, one timepoint or a timelapse). → [Mosaics](https://embl-mif.github.io/zarrsmith/mosaic.html)
+- **Chromatic shift correction**: the Z offset between channels measured on the sample itself, on the reference channel and timepoint you choose and applied to every timepoint, and a corrected copy with the same layout as the input. → [Chromatic shift correction](https://embl-mif.github.io/zarrsmith/chromatic-shift.html)
 - **Command line**: one-off and CSV-batch conversion, mosaic fusion and chromatic shift correction. → [Command line](https://embl-mif.github.io/zarrsmith/cli.html)
 - **Napari widgets**: conversion with ROI selection, mosaic fusion, exploration of segmented objects (features plot linked with the viewer). → [Napari plugin](https://embl-mif.github.io/zarrsmith/napari-plugin.html)
 - **Output tuning**: sharding, singleton axes, parallel writing, progress bars. → [Advanced writing options](https://embl-mif.github.io/zarrsmith/advanced.html)
@@ -91,7 +91,7 @@ zarrsmith chromatic-shift -i INPUT_ZARR -z OUTPUT_ZARR -r shift.json   # align c
 | Page | Contents |
 |---|---|
 | [Python API](https://embl-mif.github.io/zarrsmith/python-api.html) | export, empty datasets, axis-aware metadata, labels, region writes |
-| [Mosaics](https://embl-mif.github.io/zarrsmith/mosaic.html) | raw tiles, placement check, fusion options |
+| [Mosaics](https://embl-mif.github.io/zarrsmith/mosaic.html) | raw tiles, placement check, fusion options, timelapses |
 | [Chromatic shift correction](https://embl-mif.github.io/zarrsmith/chromatic-shift.html) | measuring the Z offset between channels, the corrected dataset, checking the result, `zarrsmith chromatic-shift` |
 | [Advanced writing options](https://embl-mif.github.io/zarrsmith/advanced.html) | sharding, singleton axes, parallel writing, progress bar |
 
