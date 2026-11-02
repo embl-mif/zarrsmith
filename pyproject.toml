@@ -21,9 +21,10 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 dependencies = [
+    "aicspylibczi>=4.0.1",
     "async-lru>=2.3.0",
     "bioio>=3.3.0",
-    "bioio-czi>=4.0.0",
+    "bioio-czi>=3.1.0,<4",
     "dask>=2026.3.0",
     "dask-image>=2025.11.0",
     "h5py>=3.16.0",

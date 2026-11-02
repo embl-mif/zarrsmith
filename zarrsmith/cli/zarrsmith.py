@@ -151,7 +151,7 @@ def zarr_convert(
             Default: None
         scene_index : Optional[int]
             Scene index for .czi and .vsi files. \n
-            Default: None (scene 1 for .czi, scene 0 for .vsi)
+            Default: None (the first scene)
         channel_names : Optional[List[str]]
             Name of channels.\n
             Example: \"-cn bf gfp rfp\"\n
@@ -210,9 +210,7 @@ def zarr_convert(
     downscale_factor = _normalize_downscale_factor(downscale_factor)
     
     # --- Figure out chunks dimensions ---
-    if resolved_microscope.lower() == "zeiss":
-        dataset = manager(path=input_path, scene_index=1 if scene_index is None else scene_index)
-    elif resolved_microscope.lower() == "evident":
+    if resolved_microscope.lower() in ("zeiss", "evident"):
         dataset = manager(path=input_path, scene_index=0 if scene_index is None else scene_index)
     else:
         dataset = manager(path=input_path)
@@ -578,7 +576,7 @@ def mosaic_convert(
     print(f"\n--->Using mosaic manager: {reader.__name__} ({resolved})")
     if scene_index is not None and resolved != "zeiss":
         print(f"\tscene_index={scene_index} is ignored for {resolved} mosaics.")
-    options = reader_options(reader, flatfield=flatfield)
+    options = reader_options(reader, flatfield=flatfield, scene_index=scene_index)
     if not flatfield and "flatfield" not in options:
         print(f"\t--no_flatfield is ignored for {resolved} mosaics (no flat-field correction).")
     mosaic = reader(input_path, **options)

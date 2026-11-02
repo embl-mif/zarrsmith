@@ -16,7 +16,7 @@ from ._batch_csv import append_batch_csv
 from ._layout import compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_section, make_title
 from ._log import EmittingStream, make_log_appender
 
-#: Mosaic readers offered in the widget (Zeiss is a placeholder for now).
+#: Mosaic readers offered in the widget.
 MOSAIC_READERS = mos.MOSAIC_READERS
 
 #: Label used in the widgets for tiles without a group.
@@ -89,13 +89,20 @@ def default_output(input_path: Path, projection: Optional[str], ds: Sequence[int
     else:
         kind = ("MIP" if projection == "max" else "SIP") + "_ds" + "-".join(str(v) for v in ds[1:])
     tag = f"_{field}" if field else ""
+    if is_czi(input_path):  # next to the file
+        return input_path.parent / f"{input_path.stem}_{kind}{tag}.ome.zarr"
     return input_path / f"{input_path.name}_{kind}{tag}.ome.zarr"
 
 
+def is_czi(path: Path) -> bool:
+    """A Zeiss acquisition is one file, the others are folders."""
+    return Path(path).suffix.lower() == ".czi"
+
+
 def folder_of(path: Path) -> Path:
-    """Dropped on the acquisition field: a file stands for its folder."""
+    """Dropped on the acquisition field: a file stands for its folder, except a ``.czi``."""
     path = Path(path)
-    return path.parent if path.is_file() else path
+    return path.parent if path.is_file() and not is_czi(path) else path
 
 
 def output_for_drop(path: Path, current: Path) -> Path:
@@ -501,14 +508,15 @@ def mosaic_widget():
     @magicgui(
         call_button="Load tiles",
         microscope={"choices": list(MOSAIC_READERS)},
-        input_path={"widget_type": "FileEdit", "mode": "d", "label": "Acquisition folder"},
+        input_path={"widget_type": "FileEdit", "mode": "d", "label": "Acquisition",
+                    "tooltip": "Acquisition folder (Luxendo, Opera) or .czi file (Zeiss)."},
         flatfield={"label": "Flat-field correction (Opera)",
                    "tooltip": "Correct the tiles with the flat-field profiles stored by Harmony, "
                               "as in the images stitched by Harmony."},
     )
     def load_widget(microscope="luxendo", input_path: Path = Path(), flatfield: bool = True):
-        if not input_path or not Path(input_path).is_dir():
-            print("Select the acquisition folder first.")
+        if not input_path or not (Path(input_path).is_dir() or (is_czi(input_path) and Path(input_path).is_file())):
+            print("Select the acquisition folder or .czi file first.")
             return
         _capture()
         print(f"Scanning {input_path} ...")
@@ -535,6 +543,10 @@ def mosaic_widget():
             _release()
 
         worker.start()
+
+    @load_widget.microscope.changed.connect
+    def _input_mode(microscope):
+        load_widget.input_path.mode = "r" if microscope == "zeiss" else "d"  # what the browse button picks
 
     def _populate(mosaic, input_path: Path):
         channels, groups, fields = mosaic.channels, group_labels(mosaic), mosaic.fields

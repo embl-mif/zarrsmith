@@ -140,7 +140,7 @@ Things to get right:
 
 Reader options other than the path (such as `flatfield`) are passed by the command line and the napari widget only to readers whose constructor accepts them (`reader_options()`).
 
-`ZeissMosaicManager` is a registered placeholder whose `_scan()` raises `NotImplementedError`; implementing `_scan()` is all that is left for it. For data stored as one file per plane, `TiffStackArray` (used by `OperaMosaicManager`) is the counterpart of `H5Array`; its optional `transform` corrects every plane when it is read (e.g. a flat-field).
+For data stored as one file per plane, `TiffStackArray` (used by `OperaMosaicManager`) is the counterpart of `H5Array`, and `CziTileArray` (used by `ZeissMosaicManager`) for planes of one CZI file: both build on `PlaneStackArray`, which you can subclass for other formats. The optional `transform` of `TiffStackArray` corrects every plane when it is read (e.g. a flat-field).
 
 ### Test it
 
