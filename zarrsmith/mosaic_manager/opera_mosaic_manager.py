@@ -311,7 +311,7 @@ class OperaMosaicManager(MosaicManager):
     * ``channel``: the ``ChannelName`` of the index;
     * ``field``: tiles are grouped per well into fields of touching tiles, named
       ``<well>_field<k>`` (``A3_field0``, ``A3_field1``, ...);
-    * ``timepoint``: ``TimepointID - 1`` (mosaics with several timepoints are refused for now);
+    * ``timepoint``: ``TimepointID - 1``;
     * ``attrs``: ``stack`` (``r01c03f01``, the tile id without the channel), ``well``,
       ``row``, ``col``, ``opera_field``, ``channel_id``, ``flatfield`` and ``folder``.
 

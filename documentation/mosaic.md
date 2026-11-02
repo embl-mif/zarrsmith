@@ -14,10 +14,6 @@ A mosaic manager is different from a [microscope manager](readers.md): a `Micros
 
 Every reader first checks that the folder is not another microscope's: a Harmony export (`Images/Index.xml`) opened with `LuxendoMosaicManager`, or a Luxendo acquisition (`*.lux.h5`) opened with `OperaMosaicManager`, stops at once with a `WrongReaderError` naming the right reader. `detect_microscope(path)` returns `"opera"`, `"luxendo"` or `None`; `zarrsmith fuse` uses it when `--microscope` is not given, and the napari widget switches its *Microscope* choice to the detected one.
 
-```{note}
-Mosaics are supported for a **single timepoint** so far. Loading a timelapse stops with an error that says so: several acquisitions of the same stack in one folder, or tiles whose metadata report different timepoints.
-```
-
 A runnable walk-through with synthetic data is in [examples/10_mosaic_fusion.ipynb](https://github.com/embl-mif/zarrsmith/blob/main/examples/10_mosaic_fusion.ipynb).
 
 ## Load and inspect
@@ -77,6 +73,31 @@ Fields are fused **one at a time**. `mosaic.fuse(out)` fuses the first field (`f
 
 `visualize()` gives all tiles of a channel the same contrast, starting at the whole range of the data type (0 to 65535 for uint16), so nothing is read before the tiles appear. The layers of a channel are linked, so changing the contrast or gamma of one tile changes all of them. Pass `contrast_limits={"cFos-647": (100, 2000)}` to set them yourself, or `contrast_limits="auto"` to estimate them from a small sample: a 64³-voxel block from the centre of up to 6 tiles near the middle of each group, about 3 MB of reads per channel (`mosaic.contrast_limits()`), which can be slow on a network drive.
 
+### Timepoints
+
+A mosaic can hold several **timepoints**: `mosaic.tiles` then has the tiles of all of them, and `mosaic.timepoints` lists them. For Luxendo data a timepoint is the JSON `time_point` (or, without one, the order of the numbered acquisitions of a stack, `Cam_bottom_00000`, `Cam_bottom_00001`, ...); for Opera data it is the `TimepointID` of the index.
+
+```python
+mosaic.timepoints                  # [0, 1, 2, 3]
+mosaic.select(timepoint=2)         # the tiles of one timepoint
+mosaic.positions                   # one tile per position, the earliest of each
+
+zm = mosaic.fuse("acq_t.ome.zarr", ds=(4, 8, 8), reference_timepoint=0)
+zm.metadata["axes"]                # 'tczyx'
+
+mosaic.fuse("part.ome.zarr", timepoints=[10, 11, 12])   # some timepoints, on the same grid
+```
+
+Every timepoint is fused with the geometry of one **reference timepoint**: the output grid, the offset of every tile and the transitions between tiles and groups are computed once from its tiles (the first timepoint by default) and applied unchanged to all timepoints. Positions reported at other timepoints are not used, so stage drift and changes of autofocus do not move a tile within the output. Parts of a timelapse fused in separate runs line up, since `reference_timepoint` does not have to be among `timepoints`.
+
+- **The output** has a leading `t` axis: `tczyx`, or `tcyx` for projections, with the timepoints in increasing order. It is not downsampled. Fusing a single timepoint gives no `t` axis. The fused timepoints and the reference are recorded in the root attribute `zarrsmith_fusion`, because step `i` of the `t` axis is the `i`-th fused timepoint and not necessarily timepoint `i`. The metadata does not give the time between timepoints: the output has 1 second per timepoint.
+- **Matching tiles.** A tile at another timepoint belongs to the reference tile with the same channel, group and stack name (`attrs["stack"]`); tiles without a stack name are matched by their order.
+- **A tile missing at some timepoint** (e.g. an interrupted acquisition) stays blank there, with a warning. A tile without a counterpart at the reference timepoint is not fused, also with a warning, so choose as reference a timepoint with all positions.
+- **A tile with another shape, voxel size or unit** than its reference tile cannot be placed the same way: the fusion stops with an error naming it. Leave that timepoint out with `timepoints`.
+- **Fields** are labelled once per position, where it is first seen, so drift over time neither joins nor splits them. `field`, `tiles` and tile ids name the tiles of every timepoint. In `skip`, an id blanks that position at every timepoint and a `Tile` object only at its own timepoint.
+
+`visualize()` shows one layer per position with a time slider, see [Napari](#napari).
+
 ## 3D fusion
 
 ```python
@@ -122,10 +143,12 @@ The projection is computed at full resolution along z and then downsampled in y/
 | `workers` | integer | tiles read in parallel (default 1) |
 | `out_dtype` | dtype | default: input dtype, `float32` for `sum` |
 | `midline_axis` | `"x"`, `"y"`, `"z"` | axis along which `sigmoid` and `midline` separate the groups (default `x`) |
+| `timepoints` | list of timepoints | timepoints to fuse (default: all), see [Timepoints](#timepoints) |
+| `reference_timepoint` | timepoint | timepoint whose tiles set the geometry of every timepoint (default: the first) |
 | `overwrite` | bool | replace an existing output |
 | `temp_dir` | path | where the temporary fused level 0 goes (default: next to the output) |
 
-Every other option of `to_zarr` is passed through unchanged, exactly as for `zarrsmith convert`: `chunks` (in output axis order, `c, z, y, x` or `c, y, x`), `shards`, `shard_target_mb`, `shard_exclude_axes`, `zarr_format`, `ngff_version`, `compressor`, `compressor_level`, `drop_singleton`, `num_workers` (write threads) and `storage_options`. See [Advanced writing options](advanced.md). As with `zarrsmith convert`, a single fused channel is written without its channel axis unless `drop_singleton=False`.
+Every other option of `to_zarr` is passed through unchanged, exactly as for `zarrsmith convert`: `chunks` (in output axis order, `c, z, y, x` or `c, y, x`, after a leading `t` for several timepoints), `shards`, `shard_target_mb`, `shard_exclude_axes`, `zarr_format`, `ngff_version`, `compressor`, `compressor_level`, `drop_singleton`, `num_workers` (write threads) and `storage_options`. See [Advanced writing options](advanced.md). As with `zarrsmith convert`, a single fused channel is written without its channel axis unless `drop_singleton=False`.
 
 ```python
 mosaic.fuse(
@@ -152,13 +175,13 @@ Blend modes:
 - **`sum`**: adds the values, so overlaps show up as brighter bands.
 - **`midline`**: uses `max` within each tile group. Where two groups overlap (for example the left and right illumination sides), the image switches sharply from one group to the other at the middle of their overlap, along `midline_axis`. Each side is then shown where its light sheet is sharpest.
 
-`plan_fusion(mosaic.tiles, ...)` takes the fusion arguments (`ds`, `projection`, `blend`, `channels`, `crop`, `skip`, `out_dtype`, `midline_axis`) and returns the level-0 geometry without reading anything: `plan.summary()`, `plan.shape`, `plan.scale`, `plan.nbytes`.
+`plan_fusion(mosaic.tiles, ...)` takes the fusion arguments (`ds`, `projection`, `blend`, `channels`, `crop`, `skip`, `out_dtype`, `midline_axis`, `timepoints`, `reference_timepoint`) and returns the level-0 geometry without reading anything: `plan.summary()`, `plan.shape`, `plan.scale`, `plan.nbytes`.
 
-The fused output stores a **display window** for every channel (OMERO `window` metadata): the 0.5th to 99.9th percentile of the fused values, ignoring blank areas. Viewers that read it (napari-ome-zarr, Fiji, the *Open result* option of the napari widget) show the result with a usable contrast instead of the whole 0 to 65535 range. Read it with `zarrsmith.mosaic_manager.display_windows(path)`.
+The fused output stores a **display window** for every channel (OMERO `window` metadata): the 0.5th to 99.9th percentile of the fused values of all timepoints, ignoring blank areas. Viewers that read it (napari-ome-zarr, Fiji, the *Open result* option of the napari widget) show the result with a usable contrast instead of the whole 0 to 65535 range. Read it with `zarrsmith.mosaic_manager.display_windows(path)`.
 
 ## How fusion works
 
-1. **Level 0** is fused one region at a time (256 × 256 output voxels in y/x for 3D, 1024 × 1024 for projections, over the full z range) into a temporary zarr. For each region, only the tile voxels that fall inside it are read, downsampled and merged. Memory stays bounded and every full-resolution voxel is read once.
+1. **Level 0** is fused one region at a time (256 × 256 output voxels in y/x for 3D, 1024 × 1024 for projections, over the full z range), at every timepoint, into a temporary zarr. For each region, only the tile voxels that fall inside it are read, downsampled and merged. Memory stays bounded and every full-resolution voxel is read once.
 2. The fused level 0, which is already downsampled and therefore small compared with the raw tiles, is written to the output with ZarrSmith's standard `to_zarr`. Pyramid levels, chunks, shards, compression and singleton axes therefore behave exactly as for any other conversion. The temporary store is then deleted.
 
 With `workers > 1`, the tiles of a region are read in **worker processes** when the tiles allow it (as Luxendo and Opera tiles do). h5py serialises reads within one process, so threads would not speed up reading HDF5 files. Merging and writing stay in the calling process. If worker processes cannot be started, fusion falls back to threads with a warning.
@@ -175,6 +198,8 @@ zarrsmith fuse -i /path/to/2026-10-14_103957 -z acq_MIP.ome.zarr -rds 1 8 8 -p m
 zarrsmith fuse -i /path/to/2026-10-14_103957 -z acq_field1_MIP.ome.zarr -rds 1 8 8 -p max -f field1
 zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_MIP.ome.zarr -p max -f A3_field1        # Opera
 zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_raw.ome.zarr -p max -f A3_field1 -nff   # without flat-field
+zarrsmith fuse -i /path/to/timelapse -z acq_t.ome.zarr -rds 4 8 8 -rtp 0                        # every timepoint, reference 0
+zarrsmith fuse -i /path/to/timelapse -z part.ome.zarr -rds 4 8 8 -tp 10 11 12 -rtp 0            # some timepoints
 ```
 
 The fields are listed when the mosaic is loaded. Without `-f/--fields` (or `-t/--tiles`) the first field is fused. Asking for tiles from several fields prints an error and nothing is fused; in a `--batch` run that row is not done, the other rows still run, and the rows that were not fused are listed at the end.
@@ -186,10 +211,10 @@ The fields are listed when the mosaic is loaded. Without `-f/--fields` (or `-t/-
 `Plugins > ZarrSmith > Mosaic Fusion` opens a widget with three boxes:
 
 1. **Mosaic loading**: choose the microscope and the acquisition folder (browse, or drag and drop it, or any file inside it, from the file explorer), then *Load tiles*. *Flat-field correction (Opera)* (on by default) corrects Opera tiles as Harmony does; other microscopes ignore it. This reads metadata only and adds a **tile map**: a `tile map` shapes layer with one rectangle per stack position, labelled with its stack id, all picked (green). Click a rectangle in the 2D view to unpick it (grey) or pick it again; dragging still pans. *Shift* + drag picks, and *Ctrl* + drag unpicks, every tile that lies even partially in the box shown while you drag (a temporary `tile map box` layer, removed on release) (*Shift* or *Ctrl* + click: one tile). A rectangle stands for that position in every channel and illumination side. Only picked tiles are shown and fused. When the mosaic has several [fields](#fields), each rectangle also shows its field, the log lists the stack positions of every field, and the *fields* selectors of *Show tiles* and *Fuse to OME-Zarr* start on the first field.
-2. **Show tiles**: show the picked tiles of the selected channels, groups and fields as one layer per tile at its stage position, with one linked contrast per channel. A channel starts at the whole range of its data type, so nothing is read before the tiles appear: set the contrast of one tile and the others follow. Every displayed plane reads data from all shown tiles, so show only a few channels or groups at a time. Change the picks on the tile map and click *Show tiles in napari* again to update the view; the contrast you set is kept, and *Remove existing layers* keeps the tile map.
-3. **Fuse to OME-Zarr**: the main fusion options, with a live estimate of the output size. Only the picked tiles of the selected field are fused, and the output fits them. Selecting several fields shows an error in the size estimate, and *Fuse to OME-Zarr* and *Append to batch CSV* then print an error and do nothing. With several fields, the default output name ends with the field, e.g. `<acquisition>_3D_ds4-8-8_field1.ome.zarr`. *Tiles to fuse* can be set to *visible layers only* or *selected layers only*: tiles whose layer is hidden (eye icon off) or not selected in the layer list are then left blank (the output keeps its size), and *Blank in all channels* also blanks that position in the other channels. Picked tiles that are not shown in napari are fused normally. The output path follows the parameters (for example `<acquisition>_3D_ds4-8-8.ome.zarr`) until you type your own; dropping a folder on the output field writes the result inside that folder. When fusion finishes, the result can be opened directly (the tile map is then hidden, since the result is not placed at the stage position).
+2. **Show tiles**: show the picked tiles of the selected channels, groups and fields as one layer per tile at its stage position, with one linked contrast per channel. A channel starts at the whole range of its data type, so nothing is read before the tiles appear: set the contrast of one tile and the others follow. Every displayed plane reads data from all shown tiles, so show only a few channels or groups at a time. Change the picks on the tile map and click *Show tiles in napari* again to update the view; the contrast you set is kept, and *Remove existing layers* keeps the tile map. A mosaic with several timepoints opens on the first timepoint, and the **T slider** at the bottom of the image scrolls through time, each tile at the position of its first timepoint. Only the planes displayed at the current timepoint are read. A timepoint without that tile shows as blank.
+3. **Fuse to OME-Zarr**: the main fusion options, with a live estimate of the output size. For a mosaic with several timepoints, *Timepoints* selects those to fuse (all by default) and *Reference timepoint* the one whose geometry they all use (the first by default). Only the picked tiles of the selected field are fused, and the output fits them. Selecting several fields shows an error in the size estimate, and *Fuse to OME-Zarr* and *Append to batch CSV* then print an error and do nothing. With several fields, the default output name ends with the field, e.g. `<acquisition>_3D_ds4-8-8_field1.ome.zarr`. *Tiles to fuse* can be set to *visible layers only* or *selected layers only*: tiles whose layer is hidden (eye icon off) or not selected in the layer list are then left blank (the output keeps its size), and *Blank in all channels* also blanks that position in the other channels. Picked tiles that are not shown in napari are fused normally. The output path follows the parameters (for example `<acquisition>_3D_ds4-8-8.ome.zarr`) until you type your own; dropping a folder on the output field writes the result inside that folder. When fusion finishes, the result can be opened directly, on its first timepoint (the tile map is then hidden, since the result is not placed at the stage position).
 
-4. **Batch CSV export**: *Append to batch CSV* adds the current settings, including the picked tiles (`tiles` column) and the tiles left blank, as a row of a CSV file. Run the file later, for example on a workstation close to the data, with `zarrsmith fuse --batch mosaic_batch.csv`.
+4. **Batch CSV export**: *Append to batch CSV* adds the current settings, including the picked tiles (`tiles` column), the timepoints and the tiles left blank, as a row of a CSV file. Run the file later, for example on a workstation close to the data, with `zarrsmith fuse --batch mosaic_batch.csv`.
 
 Loading and fusion run in the background, and their progress is shown in the log at the bottom.
 

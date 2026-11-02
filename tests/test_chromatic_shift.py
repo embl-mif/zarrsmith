@@ -317,3 +317,110 @@ def test_correct_chromatic_shift_one_call(tmp_path, store):
 
     shifts = out.root.attrs[PROVENANCE_KEY]["shifts"]
     np.testing.assert_allclose(shifts, _expected_shifts(), atol=0.25 * SPACING[0])
+
+
+# ----------------------------------------------------------------------
+# timepoints
+# ----------------------------------------------------------------------
+
+#: Content displacement per channel at each timepoint: the realignment changed between them.
+TIMELAPSE_DISPLACEMENTS = ((0.0, 2.6, -1.3), (0.0, -2.0, 3.0))
+
+
+def _write_timelapse(path, shape=(48, 96, 96)):
+    arr = np.stack([_synthetic_sample(shape, d, seed=i) for i, d in enumerate(TIMELAPSE_DISPLACEMENTS)])
+    metadata = {
+        "axes": "tczyx",
+        "scales": [SPACING],
+        "units": ("micrometer",) * 3,
+        "channel_names": ["ch0", "ch1", "ch2"],
+        "channel_colors": ["FF0000", "00FF00", "0000FF"],
+    }
+    writer = mm.ArrayManager(da.from_array(arr, chunks=(1, 1, 8, 32, 32)), metadata)
+    writer.build_pyramid(num_levels=3, downscale_factor=(1, 2, 2))
+    writer.to_zarr(str(path), ngff_version="0.5", compressor="blosc", progress=False, overwrite=True,
+                   shards=None)
+    return arr, mm.ZarrManager(str(path), mode="r")
+
+
+@pytest.fixture(scope="module")
+def timelapse(tmp_path_factory):
+    return _write_timelapse(tmp_path_factory.mktemp("timelapse") / "t.ome.zarr")
+
+
+@pytest.mark.parametrize("timepoint", [0, 1])
+def test_estimate_measures_the_chosen_timepoint(timelapse, timepoint):
+    _, z = timelapse
+    assert z.metadata["axes"] == "tczyx"
+    report = z.estimate_chromatic_shift(timepoint=timepoint, max_shift=10.0)
+    assert report["timepoint"] == timepoint
+    expected = [-d * SPACING[0] for d in TIMELAPSE_DISPLACEMENTS[timepoint]]
+    np.testing.assert_allclose(report["shifts"], expected, atol=0.25 * SPACING[0])
+
+
+def test_estimate_timepoint_and_reference_channel_together(timelapse):
+    _, z = timelapse
+    report = z.estimate_chromatic_shift(reference_channel=1, timepoint=1, max_shift=20.0)
+    d = TIMELAPSE_DISPLACEMENTS[1]
+    expected = [-(v - d[1]) * SPACING[0] for v in d]
+    assert report["reference_channel"] == 1 and report["shifts"][1] == 0.0
+    np.testing.assert_allclose(report["shifts"], expected, atol=0.25 * SPACING[0])
+
+
+def test_estimate_refuses_a_timepoint_that_does_not_exist(timelapse, store):
+    _, z = timelapse
+    with pytest.raises(ValueError, match=r"timepoint=2 is out of range for 2 timepoint"):
+        z.estimate_chromatic_shift(timepoint=2)
+    with pytest.raises(ValueError, match=r"timepoint=-1 is out of range"):
+        z.estimate_chromatic_shift(timepoint=-1)
+    # without a t axis, asking for another timepoint is an error instead of being ignored
+    with pytest.raises(ValueError, match=r"timepoint=1 is out of range for 1 timepoint.*no 't'"):
+        store.estimate_chromatic_shift(timepoint=1)
+    assert store.estimate_chromatic_shift(timepoint=0, max_shift=10.0, refine_level=None)["timepoint"] is None
+
+
+def test_apply_gives_every_timepoint_the_same_shift(timelapse, tmp_path):
+    arr, z = timelapse
+    out = z.apply_chromatic_shift(tmp_path / "out.zarr", [0.0, 4.0, -2.0], order=0, extent="same", progress=False)
+    assert out.metadata["axes"] == "tczyx"
+    data = np.asarray(out.data[0])
+    assert data.shape == arr.shape
+    for t in range(2):
+        np.testing.assert_array_equal(data[t, 0], arr[t, 0])
+        np.testing.assert_array_equal(data[t, 1, 2:], arr[t, 1, :-2])
+        np.testing.assert_array_equal(data[t, 2, :-1], arr[t, 2, 1:])
+
+
+def test_correct_records_the_timepoint_it_measured(timelapse, tmp_path):
+    arr, z = timelapse
+    out = z.correct_chromatic_shift(tmp_path / "out.zarr", 0, timepoint=1, max_shift=10.0, progress=False)
+    record = out.root.attrs[PROVENANCE_KEY]
+    assert record["estimate"]["timepoint"] == 1 and record["estimate"]["reference_channel"] == 0
+    assert out.data[0].shape[0] == arr.shape[0]
+    # timepoint 1, whose shift was measured, is now aligned; timepoint 0 moved by the same amount
+    residual = out.estimate_chromatic_shift(timepoint=1, max_shift=10.0)
+    np.testing.assert_allclose(residual["shifts"], [0.0, 0.0, 0.0], atol=0.25 * SPACING[0])
+    moved = out.estimate_chromatic_shift(timepoint=0, max_shift=20.0)
+    expected = [-(a - b) * SPACING[0] for a, b in zip(TIMELAPSE_DISPLACEMENTS[0], TIMELAPSE_DISPLACEMENTS[1])]
+    np.testing.assert_allclose(moved["shifts"], expected, atol=0.25 * SPACING[0])
+
+
+def test_correct_a_fused_timelapse(tmp_path):
+    """The whole path: tiles at several timepoints, fused, then corrected on one timepoint."""
+    from zarrsmith.mosaic_manager import Tile, fuse_tiles
+
+    tiles = []
+    for t, displacements in enumerate(TIMELAPSE_DISPLACEMENTS):
+        sample = _synthetic_sample(displacements=displacements, seed=t)
+        for c, name in enumerate(("ch0", "ch1", "ch2")):
+            tiles.append(Tile(sample[c], (0, 0, 0), SPACING, name, None, t, {"stack": "s"}))
+    fused = fuse_tiles(tiles, tmp_path / "fused.zarr", blend="max", levels=3, downscale_factor=(1, 2, 2), progress=False)
+    assert fused.metadata["axes"] == "tczyx"
+
+    report = fused.estimate_chromatic_shift(reference_channel=0, timepoint=1, max_shift=10.0)
+    expected = [-d * SPACING[0] for d in TIMELAPSE_DISPLACEMENTS[1]]
+    np.testing.assert_allclose(report["shifts"], expected, atol=0.25 * SPACING[0])
+    out = fused.apply_chromatic_shift(tmp_path / "out.zarr", report, progress=False)
+    assert out.root.attrs["zarrsmith_fusion"]["timepoints"] == [0, 1]  # the fusion record is kept
+    assert out.root.attrs[PROVENANCE_KEY]["estimate"]["timepoint"] == 1
+

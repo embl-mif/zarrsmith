@@ -10,7 +10,7 @@ import numpy as np
 
 from .fields import fields_of, label_fields
 from .tiff_array import TiffStackArray
-from .tile import Tile
+from .tile import Tile, first_of_series, series_keys
 
 if TYPE_CHECKING:
     import napari
@@ -18,16 +18,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("zarrsmith")
 
 _COLORMAPS = ("green", "magenta", "cyan", "yellow", "red", "blue")
-
-
-def single_timepoint_error(found: str) -> NotImplementedError:
-    """Error (also logged as a warning) for mosaics with more than one timepoint."""
-    message = (
-        "Timelapse mosaics are not supported yet: mosaic loading and fusion are implemented "
-        f"for a single timepoint so far. Found: {found}."
-    )
-    logger.warning(message)
-    return NotImplementedError(message)
 
 
 def _centre_block(shape: Sequence[int], block: int) -> Tuple[slice, ...]:
@@ -79,7 +69,8 @@ def _link_layers(groups) -> None:
 def _prefetch_planes(viewer, shown, workers: int = 8) -> None:
     """Read ahead, in threads, the plane napari is about to show of every ``(layer, tile)``
     whose data supports it (one file per plane, often on a network drive, read one by
-    one by napari otherwise). Only in a 2D view with the tiles' z axis sliced."""
+    one by napari otherwise). Only in a 2D view with the tiles' z axis sliced. A ``tile``
+    is ``None`` when its layer shows nothing at the current timepoint."""
     from concurrent.futures import ThreadPoolExecutor
 
     dims = viewer.dims
@@ -87,9 +78,9 @@ def _prefetch_planes(viewer, shown, workers: int = 8) -> None:
         return
     jobs = []
     for layer, t in shown:
-        prefetch = getattr(t.data, "prefetch", None)
+        prefetch = getattr(t.data, "prefetch", None) if t is not None else None
         if prefetch is not None:
-            z = layer.world_to_data(dims.point)[0]
+            z = layer.world_to_data(dims.point)[-3]
             jobs.append((prefetch, int(np.clip(np.round(z), 0, t.shape[0] - 1))))  # as napari rounds
     if jobs:
         with ThreadPoolExecutor(min(workers, len(jobs))) as pool:
@@ -114,6 +105,10 @@ class MosaicManager(ABC):
     fuses the first field by default; pick another with
     ``mosaic.fuse(out, field="field1")``. Tiles of several fields are never fused
     together: that raises a :class:`~zarrsmith.mosaic_manager.fields.MultipleFieldsError`.
+
+    A mosaic can hold several **timepoints** (:attr:`timepoints`): :attr:`tiles` then
+    has the tiles of all of them. :meth:`fuse` places every timepoint with the geometry
+    of one reference timepoint and :meth:`visualize` adds a time slider.
     """
 
     def __init__(self, path: str | Path):
@@ -125,17 +120,7 @@ class MosaicManager(ABC):
         self.tiles: List[Tile] = self._scan()
         if not self.tiles:
             raise FileNotFoundError(f"No tiles found in {self.path}.")
-        self._check_single_timepoint()
         label_fields(self.tiles)
-
-    def _check_single_timepoint(self) -> None:
-        """Refuse timelapses: loading and fusion handle one timepoint so far.
-
-        Readers already give every tile its ``timepoint``; supporting timelapses
-        means removing this check and making the fusion loop over :attr:`timepoints`.
-        """
-        if len(self.timepoints) > 1:
-            raise single_timepoint_error(f"tiles at timepoints {self.timepoints} in {self.path}")
 
     @abstractmethod
     def _scan(self) -> List[Tile]:
@@ -154,6 +139,12 @@ class MosaicManager(ABC):
     def timepoints(self) -> List[int]:
         """Timepoints of the tiles, sorted (``[0]`` for a single timepoint)."""
         return sorted({t.timepoint for t in self.tiles})
+
+    @property
+    def positions(self) -> List[Tile]:
+        """One tile per acquired position: the earliest of each (all of them for a
+        single timepoint), in mosaic order."""
+        return [self.tiles[i] for i in sorted(set(first_of_series(self.tiles)))]
 
     @property
     def groups(self) -> List[Optional[str]]:
@@ -176,9 +167,9 @@ class MosaicManager(ABC):
         return [t for t in self.tiles if t.field in wanted]
 
     def select(self, channel: Optional[str] = None, group: Optional[str] = None,
-               field: Optional[str] = None, **attrs: Any) -> List[Tile]:
-        """Tiles matching ``channel``, ``group``, ``field`` and any ``attrs`` entries,
-        e.g. ``select(field="field1", stack=1)``."""
+               field: Optional[str] = None, timepoint: Optional[int] = None, **attrs: Any) -> List[Tile]:
+        """Tiles matching ``channel``, ``group``, ``field``, ``timepoint`` and any ``attrs``
+        entries, e.g. ``select(field="field1", stack=1)``."""
         out = []
         for t in self.tiles:
             if channel is not None and t.channel != channel:
@@ -186,6 +177,8 @@ class MosaicManager(ABC):
             if group is not None and t.group != group:
                 continue
             if field is not None and t.field != field:
+                continue
+            if timepoint is not None and t.timepoint != timepoint:
                 continue
             if any(t.attrs.get(k) != v for k, v in attrs.items()):
                 continue
@@ -196,22 +189,28 @@ class MosaicManager(ABC):
         """Stable name of a tile, ``"<channel>/<stack>"`` (e.g. ``"cFos-647/1-x00-y00"``).
 
         ``<stack>`` is the reader's stack name (``attrs["stack"]``) or, without
-        one, the tile index. Used to skip tiles from the command line or a batch CSV.
+        one, the index of the earliest tile at that position. The tiles of a position
+        share their id at every timepoint. Used to skip tiles from the command line or
+        a batch CSV.
         """
         key = tile.attrs.get("stack")
-        return f"{tile.channel}/{self.tiles.index(tile) if key is None else key}"
+        if key is None:
+            key = first_of_series(self.tiles)[self.tiles.index(tile)]
+        return f"{tile.channel}/{key}"
 
     def tiles_by_ids(self, ids: Sequence[str]) -> List[Tile]:
-        """Tiles named by ``ids``: ``"<channel>/<stack>"`` for one tile, or ``"<stack>"``
-        for that stack position in every channel. Unknown ids raise ``KeyError``."""
-        by_id = {self.tile_id(t): t for t in self.tiles}
+        """Tiles named by ``ids``: ``"<channel>/<stack>"`` for one tile (at every timepoint),
+        or ``"<stack>"`` for that stack position in every channel. Unknown ids raise ``KeyError``."""
+        by_id: Dict[str, List[Tile]] = {}
         by_stack: Dict[str, List[Tile]] = {}
-        for tid, t in by_id.items():
+        for t in self.tiles:
+            tid = self.tile_id(t)
+            by_id.setdefault(tid, []).append(t)
             by_stack.setdefault(tid.split("/", 1)[1], []).append(t)
         out: List[Tile] = []
         unknown = []
         for i in ids:
-            found = [by_id[i]] if i in by_id else by_stack.get(i)
+            found = by_id.get(i) or by_stack.get(i)
             if not found:
                 unknown.append(i)
                 continue
@@ -222,8 +221,8 @@ class MosaicManager(ABC):
         return out
 
     def bounding_box(self, tiles: Optional[Sequence[Tile]] = None) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
-        """``(min, max)`` corners, ``(z, y, x)``, of ``tiles`` (default: all)."""
-        tiles = list(self.tiles if tiles is None else tiles)
+        """``(min, max)`` corners, ``(z, y, x)``, of ``tiles`` (default: all :attr:`positions`)."""
+        tiles = list(self.positions if tiles is None else tiles)
         lo = np.min([t.extent[0] for t in tiles], axis=0)
         hi = np.max([t.extent[1] for t in tiles], axis=0)
         return tuple(float(v) for v in lo), tuple(float(v) for v in hi)
@@ -250,6 +249,25 @@ class MosaicManager(ABC):
             return da.from_array(t.data, chunks=(1, y, x))
         return da.from_array(t.data, chunks=(min(16, z), min(1024, y), min(1024, x)))
 
+    @classmethod
+    def _lazy_series(cls, series: Dict[int, Tile], timepoints: Sequence[int]) -> da.Array:
+        """``(t, z, y, x)`` array of the tiles of one position over ``timepoints``, read lazily.
+
+        A timepoint without a tile, or whose tile has another shape than the earliest
+        one, is shown as zeros.
+        """
+        first = series[min(series)]
+        blank = da.zeros(first.shape, dtype=first.dtype, chunks=cls._lazy(first).chunksize)
+        frames = []
+        for tp in timepoints:
+            t = series.get(tp)
+            if t is not None and t.shape != first.shape:
+                logger.warning("Tile %s at timepoint %d has shape %s instead of %s: shown as blank.",
+                               t.attrs.get("stack"), tp, t.shape, first.shape)
+                t = None
+            frames.append(blank if t is None else cls._lazy(t))
+        return da.stack(frames)
+
     def contrast_limits(
         self,
         tiles: Optional[Sequence[Tile]] = None,
@@ -264,9 +282,11 @@ class MosaicManager(ABC):
         chunk size of Luxendo tiles), and the given percentiles of those voxels are
         returned as ``(low, high)``. The sampled tiles are the ones closest to the
         centre of each tile group (e.g. each illumination side), where the sample
-        usually is; edge tiles often only show background.
+        usually is; edge tiles often only show background. Only the earliest timepoint
+        of every position is sampled.
         """
         tiles = list(self.tiles if tiles is None else tiles)
+        tiles = [tiles[i] for i in sorted(set(first_of_series(tiles)))]
         limits = {}
         for channel in dict.fromkeys(t.channel for t in tiles):
             picks = _central_tiles([t for t in tiles if t.channel == channel], n_tiles)
@@ -288,6 +308,12 @@ class MosaicManager(ABC):
         All tiles of a channel share one contrast setting, and their layers are
         linked: changing the contrast or gamma of one tile changes all of them.
 
+        When ``tiles`` span several timepoints, each position is one ``(t, z, y, x)``
+        layer, placed where it is at its earliest timepoint, and the napari slider
+        scrolls through time, starting on the first timepoint. Slider step ``i`` is the
+        ``i``-th of the timepoints shown. Only the planes displayed at the current
+        timepoint are read.
+
         Parameters
         ----------
         tiles
@@ -307,7 +333,7 @@ class MosaicManager(ABC):
         """
         import napari
 
-        from ..utils.visualize import units_for_axes
+        from ..utils.visualize import _set_axis_labels, units_for_axes
 
         tiles = list(self.tiles if tiles is None else tiles)
         if contrast_limits == "auto":
@@ -320,24 +346,33 @@ class MosaicManager(ABC):
                 for c, t in {t.channel: t for t in tiles}.items()
             }
         viewer = viewer or napari.Viewer()
-        units = units_for_axes({"axes": "zyx", "units": (self.tiles[0].units,) * 3}, "zyx")
+        timepoints = sorted({t.timepoint for t in tiles})
+        over_time = len(timepoints) > 1
+        axes = "tzyx" if over_time else "zyx"
+        # the same time unit as a fused timelapse (1 second per timepoint, see build_metadata)
+        units = units_for_axes({"axes": axes, "units": (self.tiles[0].units,) * 3,
+                                "time_increment_unit": "second"}, axes)
         extra = {} if units is None else {"units": units}
         names = self.channels
         index = {id(t): i for i, t in enumerate(self.tiles)}
         by_channel: Dict[str, list] = {}
         shown = []
-        for t in tiles:
+        positions: Dict[tuple, Dict[int, Tile]] = {}
+        for key, t in zip(series_keys(tiles), tiles):
+            positions.setdefault(key, {})[t.timepoint] = t
+        for series in positions.values():
+            t = series[min(series)]
             i = index[id(t)]
             limits = (contrast_limits or {}).get(t.channel)
             label = t.attrs.get("stack") or i
             # added hidden: napari would read a plane at z = 0 (on creation) before the
             # one at the current z (on insertion); a hidden layer is read once, when shown
             layer = viewer.add_image(
-                self._lazy(t),
+                self._lazy_series(series, timepoints) if over_time else self._lazy(t),
                 name=f"{t.channel} {t.group or ''} [{label}]".replace("  ", " ")
                 + (f" {t.field}" if len(self.fields) > 1 else ""),
-                scale=t.voxel_size,
-                translate=t.origin,
+                scale=((1.0,) if over_time else ()) + t.voxel_size,
+                translate=((0.0,) if over_time else ()) + t.origin,
                 colormap=_COLORMAPS[names.index(t.channel) % len(_COLORMAPS)],
                 blending="additive",
                 contrast_limits=limits,
@@ -352,8 +387,11 @@ class MosaicManager(ABC):
                 layer.contrast_limits_range = (info.min, info.max)
                 layer.contrast_limits = limits
             by_channel.setdefault(t.channel, []).append(layer)
-            shown.append((layer, t))
+            shown.append((layer, series.get(timepoints[0])))
         _link_layers(by_channel.values())
+        if over_time:  # napari starts the first layer of a viewer in the middle of every axis
+            viewer.dims.set_current_step(viewer.dims.ndim - 4, 0)
+            _set_axis_labels(viewer, tuple(axes), drop_channel=False)
         _prefetch_planes(viewer, shown)
         for layer, _ in shown:
             layer.visible = True
@@ -374,7 +412,8 @@ class MosaicManager(ABC):
         ``field`` is one field name or a list of them (see :meth:`field_tiles`).
         Without ``tiles`` and ``field``, the tiles of the first field. The tiles keep
         the mosaic order. Tiles of several fields are returned as asked, but
-        :func:`~zarrsmith.mosaic_manager.fuse_tiles` refuses them.
+        :func:`~zarrsmith.mosaic_manager.fuse_tiles` refuses them. Tile ids and fields
+        name the tiles of every timepoint.
         """
         if tiles is None and field is None and self.fields:
             field = self.fields[0]
@@ -414,7 +453,11 @@ class MosaicManager(ABC):
             ``tiles`` and ``field``, the first field (:attr:`fields`) is fused.
         skip
             Tiles to leave blank (same forms as ``tiles``): they are not read, but the
-            output keeps the size and position it has with them.
+            output keeps the size and position it has with them. An id blanks that
+            position at every timepoint, a ``Tile`` only at its own timepoint.
+        **kwargs
+            Options of :func:`~zarrsmith.mosaic_manager.fuse_tiles`, among them
+            ``timepoints`` and ``reference_timepoint`` for a mosaic with several timepoints.
 
         Tiles of more than one field are not fused: a
         :class:`~zarrsmith.mosaic_manager.fields.MultipleFieldsError` is raised.

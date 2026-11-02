@@ -21,7 +21,7 @@ The widgets are built to be docked on any side of the napari window, or floated,
 
 ## Mosaic Fusion
 
-`Plugins > ZarrSmith > Mosaic Fusion` loads the raw tiles of a mosaic, shows them as one layer per tile at its stage position, and fuses them into an OME-Zarr image in the background, with a live estimate of the output size. See [Mosaics](mosaic.md#napari) for details.
+`Plugins > ZarrSmith > Mosaic Fusion` loads the raw tiles of a mosaic, shows them as one layer per tile at its stage position (with a time slider, starting on the first timepoint, for a mosaic with several timepoints), and fuses them into an OME-Zarr image in the background, with a live estimate of the output size. See [Mosaics](mosaic.md#napari) for details.
 
 ![mosaic-demo](mosaic-demo.png)
 
