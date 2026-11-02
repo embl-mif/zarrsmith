@@ -44,7 +44,8 @@ class ZeissManager(MicroscopeManager):
             Desired chunk shape for the output Dask array. Default keeps the native chunking.
         """
         super().__init__(path, chunks)
-        self._image = BioImage(str(self.path), reconstruct_mosaic=True, use_aicspylibczi=False)
+        # Without chunk_dims, bioio-czi puts the whole Z stack in a single chunk.
+        self._image = BioImage(str(self.path), reconstruct_mosaic=True, chunk_dims=["Y", "X"])
         self.scenes = self._image.scenes
 
         if scene_name:  # None and "" both mean "select by index"
