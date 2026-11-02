@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -31,10 +31,11 @@ class Tile:
         e.g. ``"L"``/``"R"`` illumination side. Used by ``blend="sigmoid"`` and ``"midline"``.
     timepoint
         Index of the timepoint the tile belongs to (``0`` for a single timepoint).
-        Mosaics with more than one timepoint are not supported yet:
-        :class:`~zarrsmith.mosaic_manager.MosaicManager` refuses them.
+        Tiles of one position at different timepoints are matched by
+        :func:`series_keys`.
     attrs
-        Free-form, reader specific metadata (stack, grid position, ...).
+        Free-form, reader specific metadata (stack, grid position, ...). ``stack``
+        names the position of the tile, the same at every timepoint.
     units
         Units of ``origin`` and ``voxel_size``.
     field
@@ -78,3 +79,28 @@ class Tile:
         """``(min, max)`` corners of the tile in sample coordinates."""
         end = tuple(o + n * v for o, n, v in zip(self.origin, self.shape, self.voxel_size))
         return self.origin, end
+
+
+def series_keys(tiles: Sequence[Tile]) -> List[tuple]:
+    """Key of every tile, shared by the tiles of one position at different timepoints.
+
+    The key is ``(channel, group, stack, rank)``, with ``stack`` from ``attrs`` and
+    ``rank`` the place of the tile among those that share the rest within its
+    timepoint. Tiles without a ``stack`` are therefore matched by their order.
+    """
+    seen: Dict[tuple, int] = {}
+    keys = []
+    for t in tiles:
+        base = (t.channel, t.group, t.attrs.get("stack"))
+        rank = seen[base + (t.timepoint,)] = seen.get(base + (t.timepoint,), -1) + 1
+        keys.append(base + (rank,))
+    return keys
+
+
+def first_of_series(tiles: Sequence[Tile]) -> List[int]:
+    """For every tile, the index of the earliest tile at the same position (see :func:`series_keys`)."""
+    keys = series_keys(tiles)
+    first: Dict[tuple, int] = {}
+    for i in sorted(range(len(tiles)), key=lambda i: tiles[i].timepoint):
+        first.setdefault(keys[i], i)
+    return [first[k] for k in keys]

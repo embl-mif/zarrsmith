@@ -500,7 +500,7 @@ def _subset_to_crop(subset, channel_names: List[str]):
     """Split a convert-style subset into a fusion crop (z/y/x) and a channel selection (c)."""
     subset = _normalize_subset(subset) or {}
     if "T" in subset:
-        raise ValueError("A mosaic has no time axis: remove t from --subset.")
+        raise ValueError("Choose the timepoints of a mosaic with --timepoints: remove t from --subset.")
     channels = list(channel_names)
     if "C" in subset:
         sel = subset["C"]
@@ -547,6 +547,8 @@ def mosaic_convert(
     fields: Optional[List[str]] = None,
     tiles: Optional[List[str]] = None,
     skip_tiles: Optional[List[str]] = None,
+    timepoints: Optional[List[int]] = None,
+    reference_timepoint: Optional[int] = None,
     midline_axis: str = "x",
     out_dtype: Optional[str] = None,
     read_workers: int = 4,
@@ -563,7 +565,8 @@ def mosaic_convert(
     tiles of these fields (connected groups of touching tiles, ``field0``, ``field1``...);
     without ``tiles`` and ``fields`` the first field is fused. Tiles from several fields
     are not fused: an error is printed and ``False`` returned (``True`` once the output
-    is saved). The other options are those of
+    is saved). ``timepoints`` and ``reference_timepoint`` choose the timepoints to fuse and
+    the one whose geometry they all use. The other options are those of
     :func:`zarrsmith.mosaic_manager.fuse_tiles`: ``read_downsample`` is its ``ds`` and
     ``read_workers`` its ``workers``. ``flatfield`` is passed to readers that correct
     the tiles (Opera); the others ignore it.
@@ -581,6 +584,8 @@ def mosaic_convert(
     mosaic = reader(input_path, **options)
     print(f"{len(mosaic.tiles)} tiles, channels {mosaic.channels}, groups {mosaic.groups}, "
           f"fields {mosaic.fields}")
+    if len(mosaic.timepoints) > 1:
+        print(f"{len(mosaic.timepoints)} timepoints: {mosaic.timepoints}")
     if len(mosaic.fields) > 1:
         for f in mosaic.fields:
             stacks = sorted({mosaic.tile_id(t).split("/", 1)[1] for t in mosaic.field_tiles(f)})
@@ -607,7 +612,8 @@ def mosaic_convert(
     projection = None if projection in (None, "none", "None", "") else projection
     crop, selected = _subset_to_crop(subset, channels or list(dict.fromkeys(t.channel for t in use)))
     plan = plan_fusion(use, ds=ds, projection=projection, blend=blend, channels=selected,
-                       crop=crop, skip=skip, out_dtype=out_dtype, midline_axis=midline_axis)
+                       crop=crop, skip=skip, out_dtype=out_dtype, midline_axis=midline_axis,
+                       timepoints=timepoints, reference_timepoint=reference_timepoint)
     print(f"\n--->Output: {plan.summary()}")
     if plan.error:
         print(f"ERROR: {plan.error}")
@@ -662,6 +668,8 @@ def mosaic_convert(
         out_dtype=out_dtype,
         midline_axis=midline_axis,
         sigmoid_steepness=SIGMOID_STEEPNESS if sigmoid_steepness is None else float(sigmoid_steepness),
+        timepoints=timepoints,
+        reference_timepoint=reference_timepoint,
         overwrite=bool(overwrite),
         temp_dir=temp_dir,
         **write_kwargs,
@@ -709,6 +717,11 @@ def convert_mosaic_batch(args):
         for key in ("channels", "groups", "fields", "tiles", "skip_tiles"):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = str(v[key]).split()
+        # float: pandas reads a number in a column with empty cells as 3.0
+        if "timepoints" in columns and _present(v.get("timepoints")):
+            kwargs["timepoints"] = [int(float(t)) for t in str(v["timepoints"]).split()]
+        if "reference_timepoint" in columns and _present(v.get("reference_timepoint")):
+            kwargs["reference_timepoint"] = int(float(v["reference_timepoint"]))
         if "read_workers" in columns and _present(v.get("read_workers")):
             kwargs["read_workers"] = int(v["read_workers"])
         if "sigmoid_steepness" in columns and _present(v.get("sigmoid_steepness")):
@@ -814,7 +827,8 @@ def chromatic_shift_correct(
         options = {k: v for k, v in estimate_kwargs.items() if k in _ESTIMATE_OPTIONS and v is not None}
         if options.get("refine_level") == "none":
             options["refine_level"] = None
-        print(f"\n--->Estimating the chromatic shift of {input_path} (reference: {names[ref] if ref < len(names) else ref})")
+        print(f"\n--->Estimating the chromatic shift of {input_path} (reference: {names[ref] if ref < len(names) else ref}, "
+              f"timepoint: {options.get('timepoint', 0)})")
         report = z.estimate_chromatic_shift(reference_channel=ref, **options)
         _print_shift_report(report)
 

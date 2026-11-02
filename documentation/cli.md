@@ -67,6 +67,8 @@ The fusion options:
 | `-f`, `--fields` | the field to fuse (groups of touching tiles, `field0`, `field1`, ... listed when the mosaic is loaded); default: the first field. Tiles from several fields are not fused: an error is printed (see [Fields](mosaic.md#fields)) |
 | `-t`, `--tiles` | only fuse these tiles, and fit the output to them: stacks such as `1-x00-y00` (every channel), or `channel/stack` ids |
 | `-st`, `--skip_tiles` | tiles to leave blank (the output keeps its size): `channel/stack` ids such as `cFos-647/1-x00-y00`, or a stack such as `1-x00-y00` for every channel |
+| `-tp`, `--timepoints` | timepoints to fuse (default: all); more than one gives an output with a `t` axis, see [Timepoints](mosaic.md#timepoints) |
+| `-rtp`, `--reference_timepoint` | timepoint whose tiles set the geometry of every timepoint (default: the first) |
 | `-nff`, `--no_flatfield` | Opera: do not apply Harmony's flat-field correction (applied by default, see [Opera](mosaic.md#opera-harmony-exports)) |
 | `-ma`, `--midline_axis` | axis along which `sigmoid`/`midline` separate the tile groups: `x` (default), `y` or `z` |
 | `-od`, `--out_dtype` | output dtype |
@@ -74,9 +76,9 @@ The fusion options:
 | `-td`, `--temp_dir` | folder for the temporary fused level 0 (a local disk is faster) |
 | `-ow`, `--overwrite` | replace an existing output |
 
-Every output option of `convert` is available too, applied to the fused output. Two read differently for a mosaic: `-cs` is given in `C Z Y X` order (`C Y X` for projections), and `-s/--subset` crops the fused output (`z`/`y`/`x` in output voxels, after `-rds`) and selects channels (`c`), e.g. `"z=0:100;y=200:900;c=1"`. `-si` is reserved for Zeiss mosaics (not implemented yet).
+Every output option of `convert` is available too, applied to the fused output. Two read differently for a mosaic: `-cs` is given in `C Z Y X` order (`C Y X` for projections, after `T` for several timepoints), and `-s/--subset` crops the fused output (`z`/`y`/`x` in output voxels, after `-rds`) and selects channels (`c`), e.g. `"z=0:100;y=200:900;c=1"`; timepoints are chosen with `-tp`. `-si` is reserved for Zeiss mosaics (not implemented yet).
 
-The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `fields`, `tiles`, `skip_tiles`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
+The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `fields`, `tiles`, `skip_tiles`, `timepoints`, `reference_timepoint`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
 
 ```text
 input,microscope,output,downsample,projection,blend,num_levels,shards
@@ -110,8 +112,9 @@ zarrsmith chromatic-shift --batch images.csv
 | `-r`, `--report` | save the estimate report (JSON) |
 | `-sf`, `--shifts` | skip the estimate: one shift per channel in the Z unit, or a JSON report |
 | `-rc`, `--reference_channel` | reference channel, as an index or a name (default 0) |
+| `-tp`, `--timepoint` | timepoint the shift is measured on, an index along the `t` axis (default 0); every timepoint gets the same shift |
 | `-mxs`, `--max_shift` | largest shift searched, in the Z unit (default: 10% of the stack depth) |
-| `-tp`, `-cl`, `-rl`, `-nr`, `-cy`, `-mzn`, `-mc`, `-th` | timepoint, coarse level, refine level (`none` skips refinement), number of crops, crop width, `min_z_normal`, `min_correlation`, mask threshold |
+| `-cl`, `-rl`, `-nr`, `-cy`, `-mzn`, `-mc`, `-th` | coarse level, refine level (`none` skips refinement), number of crops, crop width, `min_z_normal`, `min_correlation`, mask threshold |
 | `-fw`, `--fail_on_warning` | exit with an error, writing only the report, when the estimate has warnings |
 | `-e`, `--extent` | `union` (default), `same` or `intersection` |
 | `-o`, `--order` | `1` (linear, default) or `0` (whole planes, values untouched) |

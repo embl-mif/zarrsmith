@@ -304,7 +304,10 @@ def estimate_chromatic_shift(
     reference_channel
         Channel that stays in place; the others are aligned to it.
     timepoint
-        Timepoint used for the estimate when there is a ``t`` axis.
+        Timepoint the shift is measured on, an index along the ``t`` axis. The
+        correction is a single shift per channel, so
+        :func:`write_chromatic_shift_corrected` applies it to every timepoint.
+        Asking for another timepoint than ``0`` needs a ``t`` axis.
     coarse_level
         Level used for the sample mask and the coarse estimate. ``None``
         picks the coarsest level with at least 16 Z planes and 32 pixels in
@@ -353,8 +356,12 @@ def estimate_chromatic_shift(
     n_channels = int(data_levels[0].shape[axes.index("c")])
     if not 0 <= reference_channel < n_channels:
         raise ValueError(f"reference_channel={reference_channel} is out of range for {n_channels} channels.")
-    if "t" in axes and not 0 <= timepoint < data_levels[0].shape[axes.index("t")]:
-        raise ValueError(f"timepoint={timepoint} is out of range.")
+    n_timepoints = int(data_levels[0].shape[axes.index("t")]) if "t" in axes else 1
+    if not 0 <= timepoint < n_timepoints:
+        raise ValueError(
+            f"timepoint={timepoint} is out of range for {n_timepoints} timepoint(s)"
+            + ("." if "t" in axes else f" (axes {''.join(axes)!r} have no 't').")
+        )
     spacings = _zyx_spacings(metadata)
     if max_shift is None:
         max_shift = 0.1 * data_levels[0].shape[axes.index("z")] * spacings[0][0]

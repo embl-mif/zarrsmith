@@ -34,6 +34,19 @@ out = z.correct_chromatic_shift("brain_corrected.ome.zarr", reference_channel=0)
 
 A shift is the displacement applied to that channel: positive values move its content towards higher Z indices. The reference channel always gets `0`. Shifts can also be given by hand, `z.apply_chromatic_shift(out, [0.0, 104.4])`, for example when they were measured on another dataset of the same session.
 
+### Timelapses
+
+For an image with a `t` axis, such as a [fused timelapse](mosaic.md#timepoints), you choose the reference channel and the timepoint the shift is measured on (default `0`). The result is one shift per channel, and **every timepoint gets the same shift**:
+
+```python
+report = z.estimate_chromatic_shift(reference_channel=1, timepoint=5)
+out = z.apply_chromatic_shift("timelapse_corrected.ome.zarr", report)
+
+out = z.correct_chromatic_shift("timelapse_corrected.ome.zarr", reference_channel=1, timepoint=5)
+```
+
+`timepoint` is an index along the `t` axis of the image. A timepoint that does not exist is an error, also on an image without a `t` axis. Choose a timepoint in which the sample is well visible in every channel. If the offset changes during the acquisition, the other timepoints keep part of it: measure a few timepoints and compare their `shifts`.
+
 ## Command line
 
 The same steps are available as `zarrsmith chromatic-shift`, for scripts and pipelines:
@@ -42,6 +55,7 @@ The same steps are available as `zarrsmith chromatic-shift`, for scripts and pip
 zarrsmith chromatic-shift -i brain.ome.zarr -z brain_corrected.ome.zarr -r chromatic_shift.json
 zarrsmith chromatic-shift -i brain.ome.zarr -r chromatic_shift.json                 # only measure
 zarrsmith chromatic-shift -i other.ome.zarr -z other_corrected.ome.zarr -sf chromatic_shift.json
+zarrsmith chromatic-shift -i timelapse.ome.zarr -z corrected.ome.zarr -rc cFos-647 -tp 5   # reference channel and timepoint
 ```
 
 Add `--fail_on_warning` in a pipeline: when the report has warnings, the command exits with an error and writes only the report. Every option, and the `--batch` CSV columns, are in [Command line](cli.md#correct-the-chromatic-shift).
@@ -74,7 +88,7 @@ For example, with level 0 at 2 µm and a pyramid that halves Z at every level, t
 | Option | Default | Meaning |
 |---|---|---|
 | `reference_channel` | `0` | channel that stays in place |
-| `timepoint` | `0` | timepoint used for the estimate (all timepoints get the same shift) |
+| `timepoint` | `0` | timepoint the shift is measured on, an index along the `t` axis (all timepoints get the same shift) |
 | `max_shift` | 10% of the stack depth | largest shift searched, in the Z unit. A wide range is cheap: only the coarse level is affected |
 | `coarse_level` | auto | level for the mask and the coarse step |
 | `refine_level` | `0` | level the crops are read from; `None` skips refinement |
