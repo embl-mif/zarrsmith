@@ -297,6 +297,23 @@ def test_converter_follows_the_scene(converter, czi_path, tmp_path):
     assert convert.x_range.max == OVERLAP_X + SIZE - 1
 
 
+def test_converter_output_follows_the_scene_until_typed(converter, czi_path, single_path, tmp_path):
+    load, convert = converter.visualize_widget, converter.convert_widget
+    load.file_format.value = "zeiss"
+    load.input_path.value = czi_path
+    assert Path(convert.output_path.value) == czi_path.parent / "tile_scan_TR1.zarr"
+    load.scene_index.value = 1
+    assert Path(convert.output_path.value) == czi_path.parent / "tile_scan_P1.zarr"
+
+    typed = tmp_path / "mine.zarr"
+    convert.output_path.value = typed
+    load.scene_index.value = 0
+    assert Path(convert.output_path.value) == typed
+
+    load.input_path.value = single_path  # one scene: no tag; a new file names its output again
+    assert Path(convert.output_path.value) == single_path.parent / "single.zarr"
+
+
 def test_converter_scene_is_limited_to_the_new_file(converter, czi_path, single_path):
     load, convert = converter.visualize_widget, converter.convert_widget
     load.file_format.value = "zeiss"

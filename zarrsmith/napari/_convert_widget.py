@@ -1,3 +1,4 @@
+import re
 import sys
 from pathlib import Path
 
@@ -89,6 +90,14 @@ def _present_range(dataset, axis, requested_range):
     max_idx = _axis_size(dataset, axis) - 1
     start, end = requested_range
     return int(max(0, min(start, max_idx))), int(max(0, min(end, max_idx)))
+
+
+def _scene_tag(dataset, scene_index):
+    """``_TR1`` for a scene of a file with several, so that their outputs differ; else nothing."""
+    scenes = getattr(dataset, "scenes", ())
+    if len(scenes) < 2:
+        return ""
+    return "_" + re.sub(r"[^A-Za-z0-9._-]+", "_", str(scenes[scene_index]))
 
 
 def _set_range_widget(widget, size, enabled=True):
@@ -614,7 +623,7 @@ def convert_widget():
         finally:
             _syncing["z"] = False
 
-    _state = {"dataset": None}
+    _state = {"dataset": None, "auto_output": None}
     _syncing = {"roi": False, "z": False}
 
 
@@ -928,9 +937,9 @@ def convert_widget():
     def _on_scene_change(scene):
         path = make_visualize_widget.input_path.value
         if _state["dataset"] is not None and make_visualize_widget.scene_index.enabled:
-            _load_dataset(Path(path), keep_output=True)  # the output path may be the user's
+            _load_dataset(Path(path), new_scene=True)
 
-    def _load_dataset(path, keep_output=False):
+    def _load_dataset(path, new_scene=False):
         dataset = _open_dataset(path)
 
         for i in dataset.metadata:
@@ -947,9 +956,14 @@ def convert_widget():
         else:
             name = path.name          # directory name as-is
 
-        default_output = path.parent / f"{name}{suffix}.zarr"
-        if not keep_output:
+        tag = _scene_tag(dataset, make_visualize_widget.scene_index.value)
+        default_output = path.parent / f"{name}{tag}{suffix}.zarr"
+        # Follow the scene until the user types a path of their own.
+        follow_output = not new_scene or Path(make_convert_widget.output_path.value) == _state["auto_output"]
+        if follow_output:
             make_convert_widget.output_path.value = default_output
+            _state["auto_output"] = default_output
+        if not new_scene:
             make_batch_csv_widget.batch_csv_path.value = str(default_output.parent / "batch.csv")
         make_batch_csv_widget.enabled = True
 
@@ -995,7 +1009,7 @@ def convert_widget():
         make_convert_widget.channels.value = tuple(channel_names)
         make_convert_widget.channels.enabled = n_channels > 0
 
-        if not keep_output:
+        if follow_output:
             make_convert_widget.output_path.value = default_output
         _update_output_summary()
 
