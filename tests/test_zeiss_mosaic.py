@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import pickle
 import struct
+import sys
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -246,6 +248,63 @@ def test_convert_a_file_with_one_scene(single_path, tmp_path):
     out = tmp_path / "converted.ome.zarr"
     cli.zarr_convert(single_path, out, microscope="zeiss")
     assert mm.ZarrManager(out).data[0].shape[-2:] == (SIZE, SIZE)
+
+
+@pytest.fixture
+def converter(monkeypatch):
+    pytest.importorskip("napari")
+    from napari.components import ViewerModel
+    from qtpy.QtWidgets import QApplication
+
+    from zarrsmith.napari import _convert_widget as convert_module
+
+    QApplication.instance() or QApplication([])
+    # The plugin redirects stdout/stderr into its log box; undo that after the test.
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    viewer = ViewerModel()
+    monkeypatch.setattr(convert_module, "current_viewer", lambda: viewer)
+    widget = convert_module.convert_widget()
+    widget.viewer = viewer
+    yield widget
+    widget.close()
+
+
+def test_converter_follows_the_scene(converter, czi_path, tmp_path):
+    load, convert = converter.visualize_widget, converter.convert_widget
+    load.file_format.value = "zeiss"
+    load.input_path.value = czi_path
+    assert load.scene_index.max == 1  # this file has 2 scenes
+    assert convert.x_range.max == OVERLAP_X + SIZE - 1
+
+    load()
+    assert converter.viewer.layers[0].data.shape[-1] == OVERLAP_X + SIZE
+
+    typed = tmp_path / "mine.zarr"
+    convert.output_path.value = typed
+    load.scene_index.value = 1
+    assert convert.x_range.max == SIZE - 1
+    assert convert.x_range.value == (0, SIZE - 1)  # not the crop of the other scene
+    assert f"x {SIZE} x {SIZE} px" in converter.output_label.text()
+    assert Path(convert.output_path.value) == typed
+
+    load()
+    layer = next(l for l in converter.viewer.layers if l.name not in ("ROI", "Zrange"))
+    assert layer.data.shape[-1] == SIZE
+    assert np.asarray(layer.data[0][0, 0]).max() == plane_value(1, 0, 0, 0, 0)
+
+    load.scene_index.value = 0
+    assert convert.x_range.max == OVERLAP_X + SIZE - 1
+
+
+def test_converter_scene_is_limited_to_the_new_file(converter, czi_path, single_path):
+    load, convert = converter.visualize_widget, converter.convert_widget
+    load.file_format.value = "zeiss"
+    load.input_path.value = czi_path
+    load.scene_index.value = 1
+    load.input_path.value = single_path  # has no scene 1
+    assert load.scene_index.value == 0 and load.scene_index.max == 0
+    assert convert.x_range.max == SIZE - 1
 
 
 def test_zeiss_interval_is_in_seconds_whatever_unit_zen_displays(single_path):
