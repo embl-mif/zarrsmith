@@ -1,3 +1,4 @@
+import re
 import sys
 from pathlib import Path
 
@@ -89,6 +90,14 @@ def _present_range(dataset, axis, requested_range):
     max_idx = _axis_size(dataset, axis) - 1
     start, end = requested_range
     return int(max(0, min(start, max_idx))), int(max(0, min(end, max_idx)))
+
+
+def _scene_tag(dataset, scene_index):
+    """``_TR1`` for a scene of a file with several, so that their outputs differ; else nothing."""
+    scenes = getattr(dataset, "scenes", ())
+    if len(scenes) < 2:
+        return ""
+    return "_" + re.sub(r"[^A-Za-z0-9._-]+", "_", str(scenes[scene_index]))
 
 
 def _set_range_widget(widget, size, enabled=True):
@@ -614,7 +623,7 @@ def convert_widget():
         finally:
             _syncing["z"] = False
 
-    _state = {"dataset": None}
+    _state = {"dataset": None, "auto_output": None}
     _syncing = {"roi": False, "z": False}
 
 
@@ -902,17 +911,36 @@ def convert_widget():
         else: 
             make_visualize_widget.input_path.mode = "r"
 
+    def _open_dataset(path):
+        """Open ``path`` at the scene of the widget, limited to the scenes of this file."""
+        reader = dataset_reader(make_visualize_widget.file_format.value)
+        if make_visualize_widget.file_format.value not in ("zeiss", "evident"):
+            return reader(path)
+
+        scene_widget = make_visualize_widget.scene_index
+        dataset = reader(path, scene_index=0)
+        last = len(dataset.scenes) - 1
+        scene = min(scene_widget.value, last)
+        with scene_widget.changed.blocked():
+            scene_widget.value = scene
+            scene_widget.max = last
+        print(f"Scene {scene} of {dataset.scenes}: {dataset.scenes[scene]}")
+        return dataset if scene == 0 else reader(path, scene_index=scene)
+
     @make_visualize_widget.input_path.changed.connect
     def _on_input_path_change(path):
         if not path:
             return
-        
-        reader = dataset_reader(make_visualize_widget.file_format.value)
+        _load_dataset(path)
 
-        if make_visualize_widget.file_format.value in ("zeiss", "evident"):
-            dataset = reader(path, scene_index=make_visualize_widget.scene_index.value)
-        else:
-            dataset = reader(path)
+    @make_visualize_widget.scene_index.changed.connect
+    def _on_scene_change(scene):
+        path = make_visualize_widget.input_path.value
+        if _state["dataset"] is not None and make_visualize_widget.scene_index.enabled:
+            _load_dataset(Path(path), new_scene=True)
+
+    def _load_dataset(path, new_scene=False):
+        dataset = _open_dataset(path)
 
         for i in dataset.metadata:
             print(f"{i.upper()}: {dataset.metadata[i]}")
@@ -928,9 +956,15 @@ def convert_widget():
         else:
             name = path.name          # directory name as-is
 
-        default_output = path.parent / f"{name}{suffix}.zarr"
-        make_convert_widget.output_path.value = default_output
-        make_batch_csv_widget.batch_csv_path.value = str(default_output.parent / "batch.csv")
+        tag = _scene_tag(dataset, make_visualize_widget.scene_index.value)
+        default_output = path.parent / f"{name}{tag}{suffix}.zarr"
+        # Follow the scene until the user types a path of their own.
+        follow_output = not new_scene or Path(make_convert_widget.output_path.value) == _state["auto_output"]
+        if follow_output:
+            make_convert_widget.output_path.value = default_output
+            _state["auto_output"] = default_output
+        if not new_scene:
+            make_batch_csv_widget.batch_csv_path.value = str(default_output.parent / "batch.csv")
         make_batch_csv_widget.enabled = True
 
 
@@ -975,7 +1009,8 @@ def convert_widget():
         make_convert_widget.channels.value = tuple(channel_names)
         make_convert_widget.channels.enabled = n_channels > 0
 
-        make_convert_widget.output_path.value = default_output
+        if follow_output:
+            make_convert_widget.output_path.value = default_output
         _update_output_summary()
 
         viewer.layers.clear()

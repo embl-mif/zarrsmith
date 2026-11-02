@@ -9,7 +9,7 @@ import dask.array as da
 import numpy as np
 
 from .fields import fields_of, label_fields
-from .tiff_array import TiffStackArray
+from .tiff_array import PlaneStackArray
 from .tile import Tile, first_of_series, series_keys
 
 if TYPE_CHECKING:
@@ -245,7 +245,7 @@ class MosaicManager(ABC):
     @staticmethod
     def _lazy(t: Tile) -> da.Array:
         z, y, x = t.shape
-        if isinstance(t.data, TiffStackArray):  # one file per plane: read whole planes, one at a time
+        if isinstance(t.data, PlaneStackArray):  # stored per plane: read whole planes, one at a time
             return da.from_array(t.data, chunks=(1, y, x))
         return da.from_array(t.data, chunks=(min(16, z), min(1024, y), min(1024, x)))
 

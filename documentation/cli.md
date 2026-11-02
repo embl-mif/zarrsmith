@@ -25,7 +25,7 @@ zarrsmith convert --batch datasets.csv
 |---|---|
 | `-cs`, `--chunk_size` | chunk size, one value per axis of the dataset |
 | `-ms`, `--max_size` | max chunk size in MB (ignored with `-cs`) |
-| `-si`, `--scene_index` | scene of a `.czi` or `.vsi` file |
+| `-si`, `--scene_index` | scene of a `.czi` or `.vsi` file (default: the first scene) |
 | `-cn`, `--channel_names` / `-cc`, `--channel_colors` | names and colours (hex or matplotlib names) of the channels |
 | `-zf`, `--zarr_format` | 2 (NGFF 0.4) or 3 (NGFF 0.5, default) |
 | `-df`, `--downscale_factor` / `-nl`, `--num_levels` | pyramid factor and number of levels (estimated if omitted) |
@@ -58,7 +58,7 @@ The fusion options:
 
 | Flag | Meaning |
 |---|---|
-| `-m`, `--microscope` | `luxendo`, `opera`, `zeiss`; auto-detected for raw Luxendo acquisitions and Opera Harmony exports (`Images/Index.xml`) |
+| `-m`, `--microscope` | `luxendo`, `opera`, `zeiss`; auto-detected for raw Luxendo acquisitions, Opera Harmony exports (`Images/Index.xml`) and Zeiss `.czi` files |
 | `-rds`, `--downsample` | downsampling while reading (block mean): one value or `Z Y X` (default 1) |
 | `-p`, `--projection` | `none` (3D, default), `max` or `sum` |
 | `-b`, `--blend` | `sigmoid` (default), `max`, `sum` or `midline` |
@@ -76,7 +76,7 @@ The fusion options:
 | `-td`, `--temp_dir` | folder for the temporary fused level 0 (a local disk is faster) |
 | `-ow`, `--overwrite` | replace an existing output |
 
-Every output option of `convert` is available too, applied to the fused output. Two read differently for a mosaic: `-cs` is given in `C Z Y X` order (`C Y X` for projections, after `T` for several timepoints), and `-s/--subset` crops the fused output (`z`/`y`/`x` in output voxels, after `-rds`) and selects channels (`c`), e.g. `"z=0:100;y=200:900;c=1"`; timepoints are chosen with `-tp`. `-si` is reserved for Zeiss mosaics (not implemented yet).
+Every output option of `convert` is available too, applied to the fused output. Two read differently for a mosaic: `-cs` is given in `C Z Y X` order (`C Y X` for projections, after `T` for several timepoints), and `-s/--subset` crops the fused output (`z`/`y`/`x` in output voxels, after `-rds`) and selects channels (`c`), e.g. `"z=0:100;y=200:900;c=1"`; timepoints are chosen with `-tp`. `-si` loads one scene of a Zeiss mosaic, ignored for the others.
 
 The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `fields`, `tiles`, `skip_tiles`, `timepoints`, `reference_timepoint`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
 

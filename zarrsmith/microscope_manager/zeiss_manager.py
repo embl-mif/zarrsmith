@@ -1,12 +1,11 @@
 import logging
-import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
 from bioio import BioImage
 
 from .microscope_manager import MicroscopeManager
+from ..utils.czi import czi_distance
 from ..utils.metadata import ChannelInfo, build_metadata
-from ..utils.units import to_micrometers
 
 logger = logging.getLogger("zarrsmith")
 
@@ -85,18 +84,6 @@ class ZeissManager(MicroscopeManager):
             self.chunks = array.chunksize
         return [array.rechunk(self.chunks)]
 
-    @staticmethod
-    def _distance(czi_metadata, axis: str, default: Optional[float] = None) -> float:
-        """Voxel size along ``axis`` in micrometers (CZI stores meters)."""
-        node = czi_metadata.find(f"./Metadata/Scaling/Items/Distance[@Id='{axis}']/Value")
-        if node is None or not node.text:
-            if default is None:
-                raise ValueError(f"CZI metadata has no voxel size for axis {axis}.")
-            warnings.warn(f"CZI metadata has no voxel size for axis {axis}; assuming {default}.", stacklevel=3)
-            return default
-        (um,), _ = to_micrometers((float(node.text),), ("meter",))
-        return um
-
     def _parse_metadata(self) -> Dict[str, Any]:
         """
         Parse metadata of the currently selected scene.
@@ -110,13 +97,13 @@ class ZeissManager(MicroscopeManager):
         md = czi.metadata
 
         scales = (
-            self._distance(md, "Z", default=1.0),
-            self._distance(md, "Y"),
-            self._distance(md, "X"),
+            czi_distance(md, "Z", default=1.0),
+            czi_distance(md, "Y"),
+            czi_distance(md, "X"),
         )
 
+        # In seconds: DefaultUnitFormat is only the unit ZEN displays it in (60 and "min" for 1 minute).
         interval = float(md.findtext(".//TimeSeriesSetup/Interval/TimeSpan/Value") or 1.0)
-        time_unit = md.findtext(".//TimeSeriesSetup/Interval/TimeSpan/DefaultUnitFormat") or "s"
 
         colors = [ch.findtext("Color") for ch in md.findall(".//DisplaySetting/Channels/Channel")]
         channels = [
@@ -131,5 +118,5 @@ class ZeissManager(MicroscopeManager):
             channels=channels,
             dtype=self.data[0].dtype,
             time_increment=interval if interval > 0 else 1.0,
-            time_increment_unit=time_unit,
+            time_increment_unit="s",
         )

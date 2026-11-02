@@ -8,11 +8,11 @@ A mosaic manager is different from a [microscope manager](readers.md): a `Micros
 |---|---|---|
 | `LuxendoMosaicManager` | raw Luxendo acquisitions (`raw/<stack>/Cam_*.lux.h5` + `.json`) | available |
 | `OperaMosaicManager` | Opera Phenix / Operetta Harmony exports (`Images/Index.xml` + one TIFF per plane) | available |
-| `ZeissMosaicManager` | Zeiss CZI tiles | placeholder |
+| `ZeissMosaicManager` | Zeiss tile scans (one `.czi` file) | available |
 
-`LuxendoMosaicManager` and `OperaMosaicManager` are for the **raw** tiles. Data already fused by the vendor software is read with `LuxendoManager` and `OperaManager` (Harmony's `stitchresult/*.ome.tiff`).
+These readers are for the **raw** tiles. Data already fused by the vendor software is read with `LuxendoManager`, `OperaManager` (Harmony's `stitchresult/*.ome.tiff`) and `ZeissManager`.
 
-Every reader first checks that the folder is not another microscope's: a Harmony export (`Images/Index.xml`) opened with `LuxendoMosaicManager`, or a Luxendo acquisition (`*.lux.h5`) opened with `OperaMosaicManager`, stops at once with a `WrongReaderError` naming the right reader. `detect_microscope(path)` returns `"opera"`, `"luxendo"` or `None`; `zarrsmith fuse` uses it when `--microscope` is not given, and the napari widget switches its *Microscope* choice to the detected one.
+Every reader first checks that the folder is not another microscope's: a Harmony export (`Images/Index.xml`) opened with `LuxendoMosaicManager`, or a Luxendo acquisition (`*.lux.h5`) opened with `OperaMosaicManager`, stops at once with a `WrongReaderError` naming the right reader. `detect_microscope(path)` returns `"zeiss"` (a `.czi` file), `"opera"`, `"luxendo"` or `None`; `zarrsmith fuse` uses it when `--microscope` is not given, and the napari widget switches its *Microscope* choice to the detected one.
 
 A runnable walk-through with synthetic data is in [examples/10_mosaic_fusion.ipynb](https://github.com/embl-mif/zarrsmith/blob/main/examples/10_mosaic_fusion.ipynb).
 
@@ -58,6 +58,26 @@ The path is the Harmony export folder, its `Images` folder or the `Index.xml` it
 - **Flat-field correction** (`flatfield=True`, the default). Harmony stores, for every channel, a background profile `P` (a 2D polynomial with a mean of 1) and the mean background level `Mean` (`FlatfieldProfile` in the index, or `FFC_Profile/*.xml`). Every plane is corrected as Harmony does: pixels above the background level, `raw >= Mean·P`, become `raw - Mean·(P - 1)` (the uneven background is removed), darker pixels become `raw / P`, both rounded to the data type. The result matches Harmony's stitched images to within rounding. Channels with an `Identity` profile (e.g. brightfield) are not changed; `mosaic.flatfields` lists the correction of every channel. Pass `flatfield=False` for the raw data.
 
 Planes that Harmony marks as failed are read as zeros.
+
+### Zeiss (tile scans)
+
+`ZeissMosaicManager` reads one `.czi` file, not a folder:
+
+```python
+from zarrsmith import mosaic_manager as mos
+
+mosaic = mos.ZeissMosaicManager("tile_scan.czi")
+mosaic.fields            # ['scene0_TR1', 'scene1_P1']: one field per scene
+mosaic.timepoints        # [0, 1]
+mosaic.fuse("TR1.ome.zarr", field="scene0_TR1", ds=(1, 2, 2))
+
+mos.ZeissMosaicManager("tile_scan.czi", scene_index=1)   # only this scene
+```
+
+- **Fields are scenes.** Every tile region or position of the ZEN experiment is one field, named after its index and name. Tile ids look like `AF488-T2/scene0_TR1-m01`.
+- **Placement.** `y` and `x` come from the pixel coordinates of the tile in the file, which are the stage position rounded to a pixel, and `z` from the `FocusPosition` of its first plane. Tiles are not registered, so the result can differ from the images stitched by ZEN by a few pixels.
+- **Timelapses.** The file records slightly different positions at every timepoint; every timepoint is fused with those of the reference timepoint. The fused output has 1 second per timepoint, like every fused timelapse, not the interval of the experiment.
+- **Files without tiles**, such as the output of ZEN's *Stitching*, are refused: read them with `ZeissManager`.
 
 ### Fields
 

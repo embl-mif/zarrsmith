@@ -28,6 +28,7 @@ class WrongReaderError(ValueError):
 def detect_microscope(path: str | Path) -> Optional[str]:
     """Microscope of the acquisition at ``path``, from its layout, or ``None`` if not recognised.
 
+    * ``"zeiss"``: a ``.czi`` file;
     * ``"opera"``: a Harmony export (``Images/Index.xml``), its ``Images`` folder or the index;
     * ``"luxendo"``: ``*.lux.h5`` files in ``raw/<stack>/``, in ``<stack>/`` or in the folder.
 
@@ -35,6 +36,8 @@ def detect_microscope(path: str | Path) -> Optional[str]:
     for an Opera ``Images`` folder of thousands of files on a network drive).
     """
     path = Path(path)
+    if path.suffix.lower() == ".czi":
+        return "zeiss"
     index = OperaMosaicManager.find_index(path)
     if index is not None and index.name.lower() in {n.lower() for n in INDEX_NAMES}:
         return "opera"

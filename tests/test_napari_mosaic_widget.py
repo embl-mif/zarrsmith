@@ -108,6 +108,24 @@ def test_contrast_limits_sample_tile_centres():
     assert 100 <= low < 110 and 190 < high <= 199
 
 
+def test_czi_acquisition_is_one_file(tmp_path):
+    czi = tmp_path / "scan.czi"
+    czi.write_bytes(b"")
+    assert mw.folder_of(czi) == czi
+    assert mw.default_output(czi, "max", (4, 8, 8)) == tmp_path / "scan_MIP_ds8-8.ome.zarr"
+    assert mw.default_output(czi, None, (1, 2, 2), "scene0_TR1") == tmp_path / "scan_3D_ds1-2-2_scene0_TR1.ome.zarr"
+
+
+def test_zeiss_browses_for_a_file():
+    dock = mw.mosaic_widget()
+    load = dock.load_widget
+    assert load.input_path.mode.value == "d"
+    load.microscope.value = "zeiss"
+    assert load.input_path.mode.value == "r"
+    load.microscope.value = "opera"
+    assert load.input_path.mode.value == "d"
+
+
 def test_drop_helpers(tmp_path):
     f = tmp_path / "a.json"
     f.write_text("{}")

@@ -266,7 +266,7 @@ def _add_zarr_arguments(parser):
     parser.add_argument(
         '-si', '--scene_index',
         required= False,
-        help= 'Scene index for .czi and .vsi files.',
+        help= 'Scene index for .czi and .vsi files. Default: the first scene.',
         type= int
     )
     parser.add_argument(
@@ -421,7 +421,7 @@ def _adapt_zarr_help_for_mosaic(parser):
     helps = {
         '--chunk_size': 'Output chunk size in C Z Y X (C Y X for projections) order, after T for several timepoints.',
         '--max_size': 'Max output chunk size in MB. Ignored if --chunk_size is provided.',
-        '--scene_index': 'Scene index, for Zeiss mosaics (not implemented yet).',
+        '--scene_index': 'Scene of a Zeiss mosaic to load (default: all of them, one field per scene).',
         '--channel_names': 'Names of the output channels. Example: -cn autofluo cfos',
         '--subset': 'Crop the fused output and/or select channels: axis=selection pairs separated by semicolons, '
                     'e.g. "z=0:100;y=200:900;c=1". z/y/x are in output voxels (after --downsample); '
@@ -617,7 +617,7 @@ def _add_fuse_microscope(parser):
         choices=['luxendo', 'opera', 'zeiss'],
         type=str,
         help='Microscope of the mosaic. Leave empty to auto-detect (raw Luxendo acquisitions, Opera Harmony '
-             'exports with Images/Index.xml). Zeiss mosaics are not implemented yet.',
+             'exports with Images/Index.xml, Zeiss .czi files).',
     )
 
 
