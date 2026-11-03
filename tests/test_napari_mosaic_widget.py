@@ -551,3 +551,155 @@ def test_batch_row_flatfield():
     assert mw.batch_row(microscope="opera", flatfield=False, **common)["flatfield"] == "false"
     assert mw.batch_row(microscope="opera", flatfield=True, **common)["flatfield"] == "true"
     assert "flatfield" in mw.MOSAIC_BATCH_COLUMNS
+
+
+class _NowWorker:
+    """Stands in for a napari thread worker: runs the function when started, in this thread."""
+
+    class _Signal:
+        def __init__(self):
+            self.slots = []
+
+        def connect(self, slot):
+            self.slots.append(slot)
+            return slot
+
+    def __init__(self, function):
+        self.function = function
+        self.returned, self.errored = self._Signal(), self._Signal()
+
+    def start(self):
+        try:
+            value = self.function()
+        except Exception as e:
+            for slot in self.errored.slots:
+                slot(e)
+        else:
+            for slot in self.returned.slots:
+                slot(value)
+
+
+def _registered_dock(tmp_path, monkeypatch):
+    from .test_mosaic_registration import _grid, _Mosaic, _sample
+
+    tiles, _ = _grid(_sample((1, 300, 400)), 1, 2, 220, 40, {"r0c1": (0, 6, -4)})
+    mosaic = _Mosaic(tiles)
+    monkeypatch.setattr(mw, "_register_worker", lambda m, path, use, kwargs: _NowWorker(
+        lambda: m.register(path, tiles=use, **kwargs)))
+    dock = mw.mosaic_widget()
+    dock.state["mosaic"] = mosaic
+    dock.fuse_widget.ds_z.value = 1  # the tiles have one plane
+    dock.populate(mosaic, tmp_path / "acquisition")
+    dock.load_registration_button.setEnabled(True)  # as after loading in the background
+    dock.register_widget.registration_file.value = tmp_path / "reg.json"
+    dock.register_widget.workers.value = 1
+    return dock, mosaic, [t.origin for t in tiles]
+
+
+def test_register_section_moves_tiles_and_goes_back(app, tmp_path, monkeypatch):
+    dock, mosaic, stage = _registered_dock(tmp_path, monkeypatch)
+    rw = dock.register_widget
+    assert rw.tile_positions.value == "stage"
+    before = dock.plan_label.text()
+
+    rw()
+    assert (tmp_path / "reg.json").exists()
+    assert rw.tile_positions.value == "registered"
+    assert [t.origin for t in mosaic.tiles] != stage
+    assert dock.plan_label.text() != before  # the output size follows the positions
+    registered = [t.origin for t in mosaic.tiles]
+
+    rw.tile_positions.value = "stage"
+    assert [t.origin for t in mosaic.tiles] == stage and dock.plan_label.text() == before
+    rw.tile_positions.value = "registered"
+    assert [t.origin for t in mosaic.tiles] == registered
+
+    rw()  # registering again measures from the stage positions, not from the corrected ones
+    assert [t.origin for t in mosaic.tiles] == registered
+
+
+def test_register_section_loads_a_saved_file_and_reports_failures(app, tmp_path, monkeypatch):
+    dock, mosaic, stage = _registered_dock(tmp_path, monkeypatch)
+    rw = dock.register_widget
+    rw.tile_positions.value = "registered"  # nothing to use yet
+    assert rw.tile_positions.value == "stage"
+
+    dock.load_registration_button.click()  # no file yet: nothing moves
+    assert [t.origin for t in mosaic.tiles] == stage
+
+    rw()
+    registered = [t.origin for t in mosaic.tiles]
+    dock2, mosaic2, _ = _registered_dock(tmp_path, monkeypatch)
+    dock2.load_registration_button.click()
+    assert dock2.register_widget.tile_positions.value == "registered"
+    assert [t.origin for t in mosaic2.tiles] == registered
+
+    for t in mosaic2.tiles:  # another acquisition: refused, and the tiles are at their stage positions
+        t.attrs.pop("stage_origin")
+        t.origin = tuple(v + 500 for v in t.origin)
+    moved = [t.origin for t in mosaic2.tiles]
+    dock2.load_registration_button.click()
+    assert dock2.register_widget.tile_positions.value == "stage"
+    assert [t.origin for t in mosaic2.tiles] == moved
+
+
+def test_register_failure_is_reported_and_leaves_stage_positions(app, tmp_path, monkeypatch):
+    dock, mosaic, stage = _registered_dock(tmp_path, monkeypatch)
+    dock.register_widget()
+    dock.register_widget.max_shift_yx.value = 3.0  # another search range than the file holds
+    dock.register_widget()
+    assert dock.register_widget.tile_positions.value == "stage"
+    assert [t.origin for t in mosaic.tiles] == stage
+    assert dock.register_widget.enabled  # usable again
+
+
+def test_batch_row_names_the_registration_in_use(app, tmp_path, monkeypatch):
+    import pandas as pd
+
+    dock, mosaic, _ = _registered_dock(tmp_path, monkeypatch)
+    dock.state["microscope"] = "luxendo"
+    dock.fuse_widget.output_path.value = tmp_path / "out.ome.zarr"
+    csv = tmp_path / "batch.csv"
+    dock.batch_widget.batch_csv_path.value = csv
+    dock.batch_widget()
+    dock.register_widget()
+    dock.batch_widget()
+    dock.register_widget.tile_positions.value = "stage"
+    dock.batch_widget()
+    column = pd.read_csv(csv, dtype=str).fillna("")["registration"].tolist()
+    assert column == ["", str(tmp_path / "reg.json"), ""]
+
+
+def test_positions_move_the_layers_and_keep_the_picks(app, tmp_path):
+    from napari.components import ViewerModel
+
+    from .test_mosaic_registration import _grid, _Mosaic, _sample
+
+    tiles, _ = _grid(_sample((1, 300, 400)), 1, 2, 220, 40)
+    mosaic = _Mosaic(tiles)
+    viewer = ViewerModel()
+    tile_map = mw.add_tile_map(viewer, mosaic)
+    mw.set_picked(tile_map, [0], False)
+    for i, t in enumerate(mosaic.tiles):
+        viewer.add_image(np.asarray(t.data), translate=t.origin, name=str(i),
+                         metadata={"mosaic_tile": i, "mosaic_tile_id": mosaic.tile_id(t), "mosaic_path": str(mosaic.path)})
+    series = viewer.add_image(np.zeros((2,) + tiles[1].shape), translate=(0.0,) + tiles[1].origin, name="time",
+                              metadata={"mosaic_tile": 1, "mosaic_tile_id": "x/y", "mosaic_path": str(mosaic.path)})
+
+    tiles[1].origin = (0.0, 6.0, tiles[1].origin[2] + 3.0)
+    mw.move_tile_layers(viewer.layers, mosaic)
+    mw.move_tile_map(tile_map, mosaic)
+    assert tuple(viewer.layers["1"].translate) == tiles[1].origin
+    assert tuple(series.translate) == (0.0,) + tiles[1].origin  # the time axis stays
+    assert np.allclose(np.min(tile_map.data[1], axis=0)[-2:], tiles[1].origin[1:])
+    assert list(tile_map.features["picked"]) == [False, True]
+    assert not tile_map.editable
+
+
+def test_registration_file_and_widget_options(tmp_path):
+    assert mw.default_registration_path(tmp_path / "acq").name == "acq_registration.json"
+    assert mw.default_registration_path(tmp_path / "scan.czi") == tmp_path / "scan_registration.json"
+    kwargs = mw.register_kwargs(reference_channel="A", reference_timepoint=1, max_shift_z=2.0, max_shift_yx=6.0,
+                                budget_mb=0.0, workers=3, retry_rejected=True)
+    assert kwargs["max_shift"] == (0.02, 0.06, 0.06) and kwargs["budget_mb"] is None
+    assert kwargs["workers"] == 3 and kwargs["retry_rejected"] is True

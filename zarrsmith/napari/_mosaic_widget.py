@@ -8,9 +8,10 @@ import numpy as np
 from magicgui import magicgui
 from napari import current_viewer
 from napari.qt.threading import thread_worker
-from qtpy.QtWidgets import QLabel, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
 from zarrsmith import mosaic_manager as mos
+from zarrsmith.mosaic_manager import registration as reg_defaults
 from zarrsmith.mosaic_manager.tile import series_keys
 from ._batch_csv import append_batch_csv
 from ._layout import compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_section, make_title
@@ -38,11 +39,14 @@ _MAP_COLORS = {True: ((0.2, 0.9, 0.3, 0.15), (0.2, 0.9, 0.3, 1.0)),
 #: A press that moves more than this (canvas pixels) is a pan, not a click on the tile map.
 _CLICK_TOLERANCE = 4
 
+#: Where tiles are placed: where the stage put them, or where a registration found them.
+TILE_POSITIONS = ("stage", "registered")
+
 #: Columns of the CSV read by ``zarrsmith fuse --batch``.
 MOSAIC_BATCH_COLUMNS = [
     "input", "microscope", "output",
     "downsample", "projection", "blend", "channels", "groups", "fields", "tiles", "skip_tiles",
-    "timepoints", "reference_timepoint", "midline_axis", "out_dtype", "read_workers", "temp_dir", "overwrite", "flatfield",
+    "timepoints", "reference_timepoint", "registration", "midline_axis", "out_dtype", "read_workers", "temp_dir", "overwrite", "flatfield",
     "chunk_size", "max_size(MB)", "scene_index", "zarr_format", "downscale_factor", "subset",
     "channel_colors", "channel_names", "num_levels", "shards", "shard_target_mb", "shard_exclude_axes",
     "drop_singleton", "num_workers",
@@ -187,6 +191,40 @@ def tile_footprints(mosaic) -> dict:
             lo, hi = np.minimum(out[key][0], lo), np.maximum(out[key][1], hi)
         out[key] = np.array([lo, hi])
     return out
+
+
+def default_registration_path(input_path: Path) -> Path:
+    """``<name>_registration.json`` next to the acquisition folder or ``.czi`` file."""
+    input_path = Path(input_path)
+    return input_path.parent / f"{input_path.stem if is_czi(input_path) else input_path.name}_registration.json"
+
+
+def register_kwargs(*, reference_channel, reference_timepoint, max_shift_z: float, max_shift_yx: float,
+                    budget_mb: float, workers: int, retry_rejected: bool) -> dict:
+    """Map the registration widget values onto :meth:`MosaicManager.register` arguments:
+    the search range is given in percent of the tile size, and a budget of 0 means no limit."""
+    return {
+        "reference_channel": reference_channel,
+        "reference_timepoint": reference_timepoint,
+        "max_shift": (max_shift_z / 100, max_shift_yx / 100, max_shift_yx / 100),
+        "budget_mb": float(budget_mb) if budget_mb > 0 else None,
+        "workers": int(workers),
+        "retry_rejected": bool(retry_rejected),
+    }
+
+
+def move_tile_layers(layers, mosaic) -> None:
+    """Put the tile layers of ``mosaic`` shown in napari at the current positions of their tiles."""
+    for layer in tile_layers(layers, mosaic.path):
+        origin = mosaic.tiles[layer.metadata["mosaic_tile"]].origin
+        layer.translate = (0.0,) * (layer.ndim - 3) + tuple(origin)  # a time axis does not move
+
+
+def move_tile_map(layer, mosaic) -> None:
+    """Put the rectangles of a tile map at the current positions of their tiles, keeping the picks."""
+    footprints = tile_footprints(mosaic)
+    layer.data = [footprints[str(stack)] for stack in layer.features["stack"]]
+    refresh_tile_map(layer)
 
 
 def stack_fields(mosaic) -> dict:
@@ -344,7 +382,8 @@ def picked_tiles(mosaic, tiles, picked: Optional[Sequence[str]]):
 def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: Sequence[str],
               skip_ids: Sequence[str], picked: Optional[Sequence[str]] = None,
               all_stacks: Sequence[str] = (), all_fields: Sequence[str] = (),
-              flatfield: Optional[bool] = None, all_timepoints: Sequence[int] = ()) -> dict:
+              flatfield: Optional[bool] = None, all_timepoints: Sequence[int] = (),
+              registration=None) -> dict:
     """One ``zarrsmith fuse --batch`` CSV row from the fusion widget ``values``.
 
     ``picked`` are the stack ids picked on the tile map (``None``: all); the ``tiles``
@@ -354,6 +393,7 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
     the first field. ``flatfield`` is the reader's flat-field option (``None``: the
     reader has none, and the column stays empty). The ``timepoints`` column stays empty
     (every timepoint) when ``values["timepoints"]`` is missing or covers ``all_timepoints``.
+    ``registration`` is the registration file in use (``None``: the stage positions).
     """
     groups = list(values["groups"])
     fields = list(values.get("fields") or ())
@@ -374,6 +414,7 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
         "skip_tiles": " ".join(skip_ids),
         "timepoints": "" if not timepoints or set(timepoints) >= set(all_timepoints) else " ".join(str(t) for t in timepoints),
         "reference_timepoint": "" if reference is None else str(reference),
+        "registration": "" if registration is None else str(Path(registration)),
         "num_levels": str(values["levels"]),
         "read_workers": str(values["workers"]),
         "overwrite": str(bool(values["overwrite"])).lower(),
@@ -413,6 +454,12 @@ def _scan_worker(reader, path, options=None):
 
 
 @thread_worker
+def _register_worker(mosaic, path, tiles, kwargs):
+    """Measure the positions of the tiles in the background and return the registration."""
+    return mosaic.register(path, tiles=tiles, **kwargs)
+
+
+@thread_worker
 def _fuse_worker(tiles, out, kwargs):
     """Run the fusion in the background and return the written dataset."""
     return mos.fuse_tiles(tiles, out, **kwargs)
@@ -446,6 +493,8 @@ def mosaic_widget():
         load_widget.enabled = not busy
         has_mosaic = state["mosaic"] is not None
         show_widget.enabled = has_mosaic and not busy
+        register_widget.enabled = has_mosaic and not busy
+        load_registration_button.setEnabled(has_mosaic and not busy)
         fuse_widget.enabled = has_mosaic and not busy
         batch_widget.enabled = has_mosaic and not busy
         ui["fuse_holder"].setEnabled(has_mosaic and not busy)
@@ -551,6 +600,8 @@ def mosaic_widget():
 
     def _populate(mosaic, input_path: Path):
         fuse_widget.overwrite.value = False  # asked for one output, not for the next one
+        state["registration"] = state["registration_path"] = None  # a new mosaic is at its stage positions
+        _show_positions("stage")
         channels, groups, fields = mosaic.channels, group_labels(mosaic), mosaic.fields
         timepoints = mosaic.timepoints
         fuse_widget.timepoints.choices = timepoints
@@ -567,6 +618,16 @@ def mosaic_widget():
         show_widget.channels.value = channels[:1]  # one channel keeps napari responsive
         fuse_widget.channels.value = channels
         fuse_widget.blend.value = "sigmoid"  # smooth between tiles and between groups
+        register_widget.reference_channel.choices = channels
+        register_widget.reference_channel.value = channels[0]
+        register_widget.reference_timepoint.choices = timepoints
+        register_widget.reference_timepoint.value = timepoints[0]
+        register_widget.fields.choices = fields
+        register_widget.fields.value = fields  # every field; each one is registered on its own
+        register_widget.reference_timepoint.visible = len(timepoints) > 1
+        register_widget.fields.visible = len(fields) > 1
+        register_widget.registration_file.value = default_registration_path(input_path)
+        register_widget.retry_rejected.value = False
         lo, hi = mosaic.bounding_box()
         print(f"{len(mosaic.tiles)} tiles, channels {channels}, groups {groups}, fields {fields}")
         if len(timepoints) > 1:
@@ -629,6 +690,143 @@ def mosaic_widget():
             print(f"Showing tiles failed: {e}")
         finally:
             _release()
+
+    # ----- registration: correct the stage positions from the image data -----
+    @magicgui(
+        call_button="Register tiles",
+        reference_channel={"label": "Reference channel", "widget_type": "ComboBox", "choices": [],
+                           "tooltip": "Channel to match, ideally with structure in the overlaps: "
+                                      "the result holds for every channel."},
+        reference_timepoint={"label": "Reference timepoint", "widget_type": "ComboBox", "choices": [],
+                             "tooltip": "Timepoint to match: the result holds for every timepoint."},
+        fields={"widget_type": "Select", "choices": [], "allow_multiple": True,
+                "tooltip": "Fields to register. Tiles are only matched within their field."},
+        max_shift_z={"label": "Max shift Z (% of tile)", "widget_type": "FloatSpinBox", "min": 0.0, "max": 50.0,
+                     "step": 0.5, "tooltip": "Largest error searched between two tiles. Reads grow with it."},
+        max_shift_yx={"label": "Max shift YX (% of tile)", "widget_type": "FloatSpinBox", "min": 0.0, "max": 50.0,
+                      "step": 0.5, "tooltip": "Largest error searched between two tiles. Reads grow with it."},
+        budget_mb={"label": "Read budget per pair (MB)", "widget_type": "FloatSpinBox", "min": 0.0, "max": 1e6,
+                   "step": 128.0,
+                   "tooltip": "Most raw data read per pair of tiles. 0 reads whole overlaps."},
+        workers={"label": "Workers", "min": 1, "max": 64},
+        retry_rejected={"label": "Measure rejected pairs again", "widget_type": "CheckBox",
+                        "tooltip": "With an existing file: measure again the pairs that were rejected, "
+                                   "e.g. with a larger budget."},
+        registration_file={"widget_type": "FileEdit", "mode": "w", "label": "Registration file", "filter": "*.json",
+                           "tooltip": "Written after every pair: click Register tiles again to continue "
+                                      "an interrupted run."},
+        tile_positions={"label": "Tile positions", "widget_type": "ComboBox", "choices": list(TILE_POSITIONS),
+                        "tooltip": "Where tiles are shown and fused."},
+    )
+    def register_widget(
+        reference_channel=None,
+        reference_timepoint=None,
+        fields=(),
+        max_shift_z=100 * reg_defaults.MAX_SHIFT[0],
+        max_shift_yx=100 * reg_defaults.MAX_SHIFT[1],
+        budget_mb=reg_defaults.BUDGET_MB,
+        workers=4,
+        retry_rejected=False,
+        registration_file: Path = Path(),
+        tile_positions="stage",
+    ):
+        mosaic = state["mosaic"]
+        tiles = picked_tiles(mosaic, select_tiles(mosaic, mosaic.channels, group_labels(mosaic), fields), _picked())
+        _capture()
+        if not tiles:
+            print("No picked tile in the selected fields.")
+            _release()
+            return
+        path = Path(registration_file)
+        _to_stage()  # tiles are measured from their stage positions
+        kwargs = register_kwargs(reference_channel=reference_channel, reference_timepoint=reference_timepoint,
+                                 max_shift_z=max_shift_z, max_shift_yx=max_shift_yx, budget_mb=budget_mb,
+                                 workers=workers, retry_rejected=retry_rejected)
+        planning = {k: kwargs[k] for k in ("reference_channel", "reference_timepoint", "max_shift", "budget_mb")}
+        print(f"Registering: {mos.plan_registration(tiles, **planning).summary()}")
+        worker = _register_worker(mosaic, path, tiles, kwargs)
+        _busy(True)
+
+        @worker.returned.connect
+        def _done(found):
+            print(found.summary())
+            print(f"Saved {path}.")
+            _use_registration(found, path)
+            _busy(False)
+            _release()
+
+        @worker.errored.connect
+        def _failed(err):
+            print(f"Registration failed: {err}")
+            _busy(False)
+            _release()
+
+        worker.start()
+
+    def _show_positions(value: str) -> None:
+        """Show ``value`` in the choice of positions, without acting on the change."""
+        with register_widget.tile_positions.changed.blocked():
+            register_widget.tile_positions.value = value
+
+    def _refresh_positions() -> None:
+        """Update what depends on the tile positions: the layers, the tile map and the output size."""
+        if viewer is not None:
+            move_tile_layers(viewer.layers, state["mosaic"])
+            tile_map = _tile_map()
+            if tile_map is not None:
+                move_tile_map(tile_map, state["mosaic"])
+        _update_plan()
+
+    def _to_stage() -> None:
+        state["mosaic"].clear_registration()
+        _show_positions("stage")
+        _refresh_positions()
+
+    def _use_registration(found, path) -> bool:
+        """Move the tiles to the positions of ``found``; on failure they go to the stage positions."""
+        state["mosaic"].clear_registration()
+        try:
+            state["mosaic"].apply_registration(found)
+        except ValueError as e:
+            state["registration"] = state["registration_path"] = None
+            print(f"Cannot use this registration: {e}")
+            _to_stage()
+            return False
+        state["registration"], state["registration_path"] = found, Path(path)
+        _show_positions("registered")
+        _refresh_positions()
+        print(f"Tile positions: registered ({found.n_used} of {len(found.links)} links used).")
+        return True
+
+    @register_widget.tile_positions.changed.connect
+    def _on_positions(value):
+        _capture()
+        if value == "stage":
+            _to_stage()
+            print("Tile positions: stage.")
+        elif state.get("registration") is None:
+            print("No registration yet: click Register tiles, or Load registration file.")
+            _show_positions("stage")
+        else:
+            _use_registration(state["registration"], state["registration_path"])
+        _release()
+
+    def _load_registration():
+        path = Path(register_widget.registration_file.value)
+        _capture()
+        try:
+            found = mos.Registration.load(path)
+        except (OSError, ValueError, KeyError) as e:
+            print(f"Cannot read {path}: {e}")
+        else:
+            print(found.summary())
+            _use_registration(found, path)
+        finally:
+            _release()
+
+    load_registration_button = QPushButton("Load registration file")
+    load_registration_button.setToolTip("Use a registration saved earlier; reads no pixel data.")
+    load_registration_button.clicked.connect(_load_registration)
 
     # ----- 3. fusion -----
     @magicgui(
@@ -825,7 +1023,9 @@ def mosaic_widget():
                         output=fuse_widget.output_path.value, values=values,
                         all_groups=group_labels(mosaic), skip_ids=skip_ids, picked=_picked(),
                         all_stacks={stack_id(mosaic, t) for t in mosaic.tiles}, all_fields=mosaic.fields,
-                        flatfield=state.get("flatfield"), all_timepoints=mosaic.timepoints)
+                        flatfield=state.get("flatfield"), all_timepoints=mosaic.timepoints,
+                        registration=(state.get("registration_path")
+                                      if register_widget.tile_positions.value == "registered" else None))
         _capture()  # print into this widget's log, not wherever sys.stdout points
         try:
             if not output_allowed(row["output"], overwrite=values["overwrite"], sources=[state["input_path"]]):
@@ -855,6 +1055,11 @@ def mosaic_widget():
         w.native.layout().setSpacing(2)
         w.native.layout().setContentsMargins(0, 0, 0, 0)
 
+    register_widget.fields.native.setMaximumHeight(48)
+    register_widget.native.layout().setSpacing(2)
+    register_widget.native.layout().setContentsMargins(0, 0, 0, 0)
+    register_widget.reference_timepoint.visible = register_widget.fields.visible = False  # until a mosaic is loaded
+
     fuse_widget.timepoints.native.setMaximumHeight(48)
     fuse_widget.timepoints.visible = fuse_widget.reference_timepoint.visible = False  # until a timelapse is loaded
 
@@ -868,6 +1073,8 @@ def mosaic_widget():
     layout.setContentsMargins(4, 4, 4, 4)
     layout.addWidget(make_section(make_title("Mosaic loading:"), load_widget.native))
     layout.addWidget(make_section(make_title("Show tiles:"), show_widget.native))
+    layout.addWidget(make_section(make_title("Register tiles (optional):"), register_widget.native,
+                                  load_registration_button))
     layout.addWidget(make_section(make_title("Fuse to OME-Zarr:"), fuse_widget.native, plan_label,
                                   ui["fuse_holder"]))
     batch_widget.native.layout().setContentsMargins(0, 0, 0, 0)
@@ -879,5 +1086,6 @@ def mosaic_widget():
     # exposed for tests
     dock.load_widget, dock.show_widget, dock.fuse_widget = load_widget, show_widget, fuse_widget
     dock.batch_widget = batch_widget
+    dock.register_widget, dock.load_registration_button = register_widget, load_registration_button
     dock.plan_label, dock.state, dock.populate = plan_label, state, _populate
     return dock

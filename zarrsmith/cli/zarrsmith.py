@@ -14,6 +14,7 @@ from zarrsmith.utils.output_path import output_refusal
 from zarrsmith.cli.__arguments import (
     _parse_arguments,
     parse_bool,
+    parse_budget,
     parse_color,
     parse_downscale_factor,
     parse_shard_exclude_axes_spec,
@@ -585,6 +586,7 @@ def mosaic_convert(
     skip_tiles: Optional[List[str]] = None,
     timepoints: Optional[List[int]] = None,
     reference_timepoint: Optional[int] = None,
+    registration: Optional[str] = None,
     midline_axis: str = "x",
     out_dtype: Optional[str] = None,
     read_workers: int = 4,
@@ -602,7 +604,9 @@ def mosaic_convert(
     without ``tiles`` and ``fields`` the first field is fused. Tiles from several fields
     are not fused: an error is printed and ``False`` returned (``True`` once the output
     is saved). ``timepoints`` and ``reference_timepoint`` choose the timepoints to fuse and
-    the one whose geometry they all use. The other options are those of
+    the one whose geometry they all use. ``registration`` is a file made by
+    :func:`mosaic_register`; if it cannot be used an error is printed and ``False``
+    returned, since fusing at the stage positions is not what was asked. The other options are those of
     :func:`zarrsmith.mosaic_manager.fuse_tiles`: ``read_downsample`` is its ``ds`` and
     ``read_workers`` its ``workers``. ``flatfield`` is passed to readers that correct
     the tiles (Opera); the others ignore it.
@@ -628,6 +632,17 @@ def mosaic_convert(
         for f in mosaic.fields:
             stacks = sorted({mosaic.tile_id(t).split("/", 1)[1] for t in mosaic.field_tiles(f)})
             print(f"\t{f}: {len(stacks)} stack position(s): {' '.join(stacks)}")
+
+    if registration:
+        from zarrsmith.mosaic_manager import Registration
+
+        try:
+            found = Registration.load(registration)
+            mosaic.apply_registration(found)
+        except (OSError, ValueError) as error:
+            print(f"ERROR: cannot use registration {registration}: {error} Nothing is fused.")
+            return False
+        print(f"Tiles at the positions of {registration}: {found.n_used} of {len(found.links)} links used.")
 
     use = mosaic.fusion_tiles(list(tiles) if tiles else None, list(fields) if fields else None)
     if tiles:
@@ -750,7 +765,7 @@ def convert_mosaic_batch(args):
         for key in ("downsample", "read_downsample"):  # read_downsample: the earlier column name
             if key in columns and _present(v.get(key)):
                 kwargs["read_downsample"] = _int_triplet(str(v[key]))
-        for key in ("projection", "blend", "midline_axis", "out_dtype", "temp_dir"):
+        for key in ("projection", "blend", "midline_axis", "out_dtype", "temp_dir", "registration"):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = str(v[key]).strip()
         for key in ("channels", "groups", "fields", "tiles", "skip_tiles"):
@@ -774,8 +789,100 @@ def convert_mosaic_batch(args):
             print(f"WARNING: row skipped: {error}", file=sys.stderr)
             skipped.append(str(v["output"]))
     if not_fused:
-        print(f"ERROR: {len(not_fused)} row(s) not fused (tiles from several fields): {', '.join(not_fused)}")
+        print(f"ERROR: {len(not_fused)} row(s) not fused (see the errors above): {', '.join(not_fused)}")
     _warn_rows_skipped(skipped)
+
+
+# ---------------------------------------------------------------------------
+# Registration of a mosaic: register / register --batch
+# ---------------------------------------------------------------------------
+
+def mosaic_register(
+    input_path,
+    registration,
+    microscope: Optional[str] = None,
+    scene_index: Optional[int] = None,
+    flatfield: bool = True,
+    reference_channel: Optional[str] = None,
+    reference_timepoint: Optional[int] = None,
+    fields: Optional[List[str]] = None,
+    tiles: Optional[List[str]] = None,
+    skip_tiles: Optional[List[str]] = None,
+    read_workers: int = 4,
+    **options,
+):
+    """Register a mosaic into a file for ``zarrsmith fuse -reg`` (CLI helper for ``zarrsmith register``).
+
+    ``fields``, ``tiles`` and ``skip_tiles`` choose the tiles as in :func:`mosaic_convert`,
+    but every field is registered by default. ``read_workers`` is the ``workers`` of
+    :func:`zarrsmith.mosaic_manager.register_tiles`, and ``options`` are its other options.
+    """
+    from zarrsmith.mosaic_manager import plan_registration, reader_options
+
+    reader, resolved = _resolve_mosaic_manager(input_path, microscope)
+    print(f"\n--->Using mosaic manager: {reader.__name__} ({resolved})")
+    mosaic = reader(input_path, **reader_options(reader, flatfield=flatfield, scene_index=scene_index))
+    print(f"{len(mosaic.tiles)} tiles, channels {mosaic.channels}, fields {mosaic.fields}, "
+          f"timepoints {mosaic.timepoints}")
+    chosen = list(tiles) if tiles else None
+    use = mosaic.fusion_tiles(chosen, list(fields) if fields else None) if chosen or fields else list(mosaic.tiles)
+    skipped = {id(t) for t in mosaic.tiles_by_ids(list(skip_tiles))} if skip_tiles else set()
+    use = [t for t in use if id(t) not in skipped]
+    reference = {"reference_channel": reference_channel, "reference_timepoint": reference_timepoint}
+    planning = {k: options[k] for k in ("max_shift", "budget_mb") if k in options}
+    print(f"\n--->{plan_registration(use, **reference, **planning).summary()}")
+    found = mosaic.register(registration, tiles=use, workers=int(read_workers), **reference, **options)
+    print(f"\n{found.summary()}")
+    print(f'Saved {registration}. Use it with: zarrsmith fuse -reg "{registration}" ...')
+    return found
+
+
+def register_single(args):
+    """Runmode to register one mosaic."""
+    kwargs = {k: v for k, v in vars(args).items() if k not in _NOT_CONVERSION_OPTIONS}
+    mosaic_register(**{k: v for k, v in kwargs.items() if v is not None or k == "budget_mb"})
+
+
+def register_batch(args):
+    """Runmode to register every mosaic listed in a CSV file."""
+    print(f"Registering a batch of mosaics from {args.input_file}")
+    database = pd.read_csv(args.input_file)
+    columns = database.columns
+    failed = []
+    for _, v in database.iterrows():
+        print("-" * 20)
+        kwargs: Dict[str, Any] = {"input_path": v["input"], "registration": v["registration"]}
+
+        def given(key):
+            return key in columns and _present(v.get(key))
+
+        for key in ("microscope", "reference_channel"):
+            if given(key):
+                kwargs[key] = str(v[key]).strip()
+        for key in ("fields", "tiles", "skip_tiles"):
+            if given(key):
+                kwargs[key] = str(v[key]).split()
+        # int(float()): pandas reads a number in a column with empty cells as 3.0
+        for key in ("scene_index", "reference_timepoint", "read_workers"):
+            if given(key):
+                kwargs[key] = int(float(v[key]))
+        for key in ("min_ncc", "max_residual"):
+            if given(key):
+                kwargs[key] = float(v[key])
+        for key in ("retry_rejected", "flatfield"):
+            if given(key):
+                kwargs[key] = parse_bool(v[key])
+        if given("max_shift"):
+            kwargs["max_shift"] = [float(f) for f in str(v["max_shift"]).split()]
+        if given("budget_mb"):
+            kwargs["budget_mb"] = parse_budget(v["budget_mb"])
+        try:
+            mosaic_register(**kwargs)
+        except (OSError, ValueError) as error:  # e.g. the file of another registration
+            print(f"ERROR: row not registered: {error}", file=sys.stderr)
+            failed.append(str(v["registration"]))
+    if failed:
+        print(f"ERROR: {len(failed)} row(s) not registered: {', '.join(failed)}")
 
 
 # ---------------------------------------------------------------------------
@@ -960,7 +1067,7 @@ def chromatic_shift_batch(args):
 
 
 def main(argv=None):
-    """Entry point of the ``zarrsmith`` command: ``convert``, ``fuse`` or ``chromatic-shift``."""
+    """Entry point of the ``zarrsmith`` command: ``convert``, ``fuse``, ``register`` or ``chromatic-shift``."""
     args = _parse_arguments(argv)
     if args.renamed_to:
         print(f"Note: `zarrsmith {args.command}` is now `{args.renamed_to}`; the old name still works for now.",
@@ -970,6 +1077,8 @@ def main(argv=None):
         "convert_batch": convert_batch,
         "fuse": convert_mosaic_single,
         "fuse_batch": convert_mosaic_batch,
+        "register": register_single,
+        "register_batch": register_batch,
         "chromatic_shift": chromatic_shift_single,
         "chromatic_shift_batch": chromatic_shift_batch,
     }

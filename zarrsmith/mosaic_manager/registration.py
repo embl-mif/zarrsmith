@@ -5,7 +5,7 @@ one **reference timepoint**; the result is applied to every channel and timepoin
 
 1. **Pairs.** Tiles whose boxes share a face (within the search range) are paired, inside
    one field. Only the overlap of a pair is read, widened by the search range ``max_shift``.
-2. **Measure.** The read per tile is bounded (``budget_mb``), since raw tiles have no pyramid
+2. **Measure.** The read per pair is bounded (``budget_mb``), since raw tiles have no pyramid
    and downsampling does not reduce what is read. A window that does not fit is sampled in
    contiguous, chunk-aligned **slabs** along z (scattered planes would decode the same
    chunks again and again). Small probes first locate the depths where both tiles have
@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import os
+import time
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -57,7 +58,7 @@ FILE_VERSION = 1
 #: Default search range, as a fraction of the tile size per axis (z, y, x): stage errors of
 #: up to 3% on each of two tiles give a relative error of up to 6% in y/x.
 MAX_SHIFT = (0.02, 0.06, 0.06)
-#: Default limit of raw data read per tile, split between its neighbours.
+#: Default limit of raw data read per pair, from its two tiles together.
 BUDGET_MB = 1024.0
 #: Default lowest NCC for a measurement to be trusted. On real data, wrong shifts scored up
 #: to 0.03 and right ones from 0.17.
@@ -87,6 +88,10 @@ _AGREEMENT = 2.0
 _HIGHPASS_SIGMA = 8.0
 #: Weak pull of every tile towards its stage position, relative to a link of NCC 1.
 _STAGE_PULL = 1e-3
+#: Attempts at measuring a pair, and seconds before the second one (doubled after that):
+#: on a network drive a read now and then fails for no lasting reason.
+_READ_ATTEMPTS = 4
+_RETRY_SECONDS = 15.0
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +107,8 @@ def position_id(key: tuple) -> str:
 
 def _max_shift_fractions(max_shift) -> Tuple[float, float, float]:
     """``(z, y, x)`` search range from one fraction of the tile size or three."""
-    values = tuple(float(v) for v in (max_shift if np.ndim(max_shift) else (max_shift,) * 3))
+    values = tuple(float(v) for v in np.ravel(max_shift))
+    values = values * 3 if len(values) == 1 else values
     if len(values) != 3 or min(values) < 0:
         raise ValueError(f"max_shift must be one or three (z, y, x) fractions >= 0, got {max_shift!r}.")
     return values
@@ -156,20 +162,11 @@ def _find_pairs(refs: Dict[str, Tile], fractions) -> List[Tuple[str, str]]:
     return pairs
 
 
-def _neighbours(pairs) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
-    for a, b in pairs:
-        counts[a] = counts.get(a, 0) + 1
-        counts[b] = counts.get(b, 0) + 1
-    return counts
-
-
-def _side_budget(pair, counts, budget_mb: Optional[float]) -> float:
-    """Bytes that may be read from each tile of ``pair``: the budget of the tile with the
-    most neighbours, split between them (no limit without a budget)."""
+def _side_budget(budget_mb: Optional[float]) -> float:
+    """Bytes that may be read from each tile of a pair: half the budget (no limit without one)."""
     if budget_mb is None:
         return math.inf
-    return budget_mb * 1e6 / max(counts[pair[0]], counts[pair[1]])
+    return budget_mb * 1e6 / 2
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +446,19 @@ def _agreeing(estimates: List[dict], min_ncc: float) -> List[dict]:
 
 
 def _measure_pair(job: _PairJob) -> dict:
-    """Measure the shift of one pair (runs in the workers). Returns one entry of ``links``."""
+    """Measure the shift of one pair (runs in the workers), trying again after a failed
+    read. Returns one entry of ``links``."""
+    for attempt in range(_READ_ATTEMPTS):
+        try:
+            return _measure_once(job)
+        except OSError as e:
+            if attempt == _READ_ATTEMPTS - 1:
+                raise
+            logger.warning("Read failed for pair %s - %s, trying again: %s", job.a, job.b, e)
+            time.sleep(_RETRY_SECONDS * 2**attempt)
+
+
+def _measure_once(job: _PairJob) -> dict:
     a, b = job.tile_a, job.tile_b
     voxel = np.array(a.voxel_size)
     size = np.minimum(np.array(a.shape) * voxel, np.array(b.shape) * voxel)
@@ -726,7 +735,7 @@ class RegistrationPlan:
 
     def summary(self) -> str:
         """One line with the number of pairs and the data read at most."""
-        budget = "no budget" if self.budget_mb is None else f"budget {self.budget_mb:.0f} MB per tile"
+        budget = "no budget" if self.budget_mb is None else f"budget {self.budget_mb:.0f} MB per pair"
         return (f"{self.positions} positions, {len(self.pairs)} pairs in channel {self.reference_channel!r} at "
                 f"timepoint {self.reference_timepoint}: reads at most {self.limit_gb:.1f} GB ({budget}; "
                 f"{self.full_gb:.1f} GB for whole overlaps)")
@@ -744,7 +753,6 @@ def plan_registration(
     fractions = _max_shift_fractions(max_shift)
     refs, channel, timepoint = _reference_tiles(tiles, reference_channel, reference_timepoint)
     pairs = _find_pairs(refs, fractions)
-    counts = _neighbours(pairs)
     full = limit = 0.0
     for pair in pairs:
         a, b = refs[pair[0]], refs[pair[1]]
@@ -752,7 +760,7 @@ def plan_registration(
         lo, hi = _box(a, b, size * np.array(fractions))
         sides = [_read_cost(t, _crop(t, lo, hi, (1, 1, 1)), (1, 1, 1)) for t in (a, b)]
         full += sum(sides)
-        limit += sum(min(s, _side_budget(pair, counts, budget_mb)) for s in sides)
+        limit += sum(min(s, _side_budget(budget_mb)) for s in sides)
     return RegistrationPlan(len(refs), pairs, channel, timepoint, fractions, budget_mb, full / 1e9, limit / 1e9)
 
 
@@ -820,9 +828,9 @@ def register_tiles(
         ``(z, y, x)``. Reads grow with it. The z axis is not searched for tiles of less
         than 16 planes, which are matched on their maximum projection in y/x only.
     budget_mb
-        Most raw data read per tile, split between its neighbours (``None``: whole
-        overlaps). Reading stops earlier when two slabs of a pair agree. The budget of the
-        first slab of a pair can be exceeded when no thinner slab is possible.
+        Most raw data read per pair, from its two tiles together (``None``: whole
+        overlaps). Reading stops earlier when two slabs of a pair agree. A very small budget
+        can be exceeded: every depth gets a probe, and every pair reads at least one slab.
     min_ncc
         Lowest NCC (on the background-subtracted images) at which a measurement is trusted.
     max_residual
@@ -847,13 +855,15 @@ def register_tiles(
     if executor not in ("auto", "process", "thread"):
         raise ValueError("executor must be 'auto', 'process' or 'thread'.")
     fractions = _max_shift_fractions(max_shift)
+    if any("stage_origin" in t.attrs for t in tiles):
+        raise ValueError("Tiles must be at their stage positions to be registered: "
+                         "call mosaic.clear_registration() first.")
     refs, channel, timepoint = _reference_tiles(tiles, reference_channel, reference_timepoint)
     pairs = _find_pairs(refs, fractions)
-    counts = _neighbours(pairs)
     first = next(iter(refs.values()))
     settings = {"max_shift": list(fractions), "min_ncc": float(min_ncc), "max_residual": float(max_residual),
                 "budget_mb": budget_mb, "ds": None if ds is None else [int(v) for v in ds]}
-    positions = {name: list(t.attrs.get("stage_origin", t.origin)) for name, t in refs.items()}
+    positions = {name: list(t.origin) for name, t in refs.items()}
     identity = {"positions": positions, "reference_channel": channel, "reference_timepoint": timepoint}
 
     save_to = Path(save_to)
@@ -872,7 +882,7 @@ def register_tiles(
         reg.links = [link for link in reg.links if (link["a"], link["b"]) not in rejected]
     done = {(link["a"], link["b"]) for link in reg.links}
 
-    jobs = [_PairJob(a, b, refs[a], refs[b], fractions, _side_budget((a, b), counts, budget_mb), float(min_ncc),
+    jobs = [_PairJob(a, b, refs[a], refs[b], fractions, _side_budget(budget_mb), float(min_ncc),
                      None if ds is None else tuple(int(v) for v in ds))
             for a, b in pairs if (a, b) not in done]
     logger.info("Registering %d pairs (%d done) of %d positions, channel %r, timepoint %d",

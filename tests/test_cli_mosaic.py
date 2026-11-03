@@ -240,3 +240,87 @@ def test_fuse_one_field(two_fields, tmp_path, monkeypatch, capsys):
     img = mm.ZarrManager(str(tmp_path / "f0.ome.zarr")).data[0].compute()
     assert img.shape[-1] == (28 + 32) // 2  # the skipped tile keeps its place
     assert img[..., :8].min() == 10 and img[..., -2:].max() == 0
+
+
+def _measured(path, shift):
+    """Make a registration file report ``shift`` (z, y, x) on its first link, without real data."""
+    content = json.loads(path.read_text())
+    link = content["links"][0]
+    link.update(signal=True, estimates=[{"shift": list(shift), "voxel": [3.0, 2.0, 2.0], "ncc": 0.9,
+                                         "ncc_stage": 0.1, "z": [0, 8], "structure": None}])
+    content["shifts"] = {name: [0.0, 0.0, 0.0] for name in content["positions"]}
+    path.write_text(json.dumps(content))
+
+
+def test_register_writes_a_file_that_fuse_uses(acquisition, tmp_path, monkeypatch, capsys):
+    reg = tmp_path / "reg.json"
+    _run(monkeypatch, "register", "-i", str(acquisition), "-r", str(reg), "-rc", "GFP", "-rw", "1", "-ms", "0.3")
+    saved = json.loads(reg.read_text())
+    assert saved["reference_channel"] == "GFP" and len(saved["positions"]) == 4
+    assert "links" in capsys.readouterr().out
+
+    stage = tmp_path / "stage.ome.zarr"
+    _run(monkeypatch, "fuse", "-i", str(acquisition), "-z", str(stage), "-p", "max", "-sh", "none", "-ch", "GFP")
+    _measured(reg, (0.0, 8.0, 0.0))  # 4 voxels of y between two tiles
+    moved = tmp_path / "moved.ome.zarr"
+    _run(monkeypatch, "fuse", "-i", str(acquisition), "-z", str(moved), "-p", "max", "-sh", "none", "-ch", "GFP",
+         "-reg", str(reg))
+    assert "links used" in capsys.readouterr().out
+    assert mm.ZarrManager(str(stage)).metadata["size"][0][-2] == 16
+    assert mm.ZarrManager(str(moved)).metadata["size"][0][-2] == 20
+
+
+def test_fuse_stops_when_the_registration_cannot_be_used(acquisition, tmp_path, monkeypatch, capsys):
+    out = tmp_path / "x.ome.zarr"
+    with pytest.raises(SystemExit) as stopped:
+        _run(monkeypatch, "fuse", "-i", str(acquisition), "-z", str(out), "-reg", str(tmp_path / "missing.json"))
+    assert stopped.value.code == 1
+    assert "Nothing is fused" in capsys.readouterr().out and not out.exists()
+
+    reg = tmp_path / "reg.json"
+    _run(monkeypatch, "register", "-i", str(acquisition), "-r", str(reg), "-rw", "1")
+    content = json.loads(reg.read_text())
+    content["positions"] = {name: [v + 500 for v in stage] for name, stage in content["positions"].items()}
+    reg.write_text(json.dumps(content))
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "fuse", "-i", str(acquisition), "-z", str(out), "-reg", str(reg))
+    assert "another acquisition" in capsys.readouterr().out and not out.exists()
+
+
+def test_register_options_and_required_arguments(acquisition, tmp_path, monkeypatch, capsys):
+    reg = tmp_path / "reg.json"
+    _run(monkeypatch, "register", "-i", str(acquisition), "-r", str(reg), "-ms", "0.05", "-bm", "none", "-rw", "1",
+         "--min_ncc", "0.3", "-st", "1-x00-y00")
+    saved = json.loads(reg.read_text())
+    assert saved["settings"]["max_shift"] == [0.05, 0.05, 0.05]
+    assert saved["settings"]["budget_mb"] is None and saved["settings"]["min_ncc"] == 0.3
+    assert len(saved["positions"]) == 3  # the skipped stack is left out
+
+    with pytest.raises(ValueError, match="another registration"):
+        _run(monkeypatch, "register", "-i", str(acquisition), "-r", str(reg), "-ms", "0.01", "-st", "1-x00-y00")
+    for argv in (["register"], ["register", "-i", str(acquisition)], ["register", "--batch", __file__, "-r", "x"],
+                 ["register", "-i", str(acquisition), "-r", "x", "-bm", "-1"]):
+        with pytest.raises(SystemExit):
+            _run(monkeypatch, *argv)
+
+
+def test_register_and_fuse_batches(acquisition, tmp_path, monkeypatch, capsys):
+    reg = tmp_path / "reg.json"
+    bad = tmp_path / "bad.json"
+    pd.DataFrame({"input": [str(acquisition), str(acquisition)], "registration": [str(reg), str(bad)],
+                  "reference_channel": ["RFP", "nope"], "max_shift": ["0.3", ""], "budget_mb": ["none", "512"],
+                  "read_workers": [1, 1]}).to_csv(tmp_path / "register.csv", index=False)
+    _run(monkeypatch, "register", "--batch", str(tmp_path / "register.csv"))
+    captured = capsys.readouterr()
+    assert json.loads(reg.read_text())["reference_channel"] == "RFP"
+    assert "1 row(s) not registered" in captured.out  # the other row still ran
+
+    _measured(reg, (0.0, 8.0, 0.0))
+    used, unusable = tmp_path / "used.ome.zarr", tmp_path / "unusable.ome.zarr"
+    pd.DataFrame({"input": [str(acquisition), str(acquisition)], "output": [str(unusable), str(used)],
+                  "registration": [str(tmp_path / "missing.json"), str(reg)], "projection": ["max", "max"],
+                  "shards": ["none", "none"], "channels": ["GFP", "GFP"]}).to_csv(tmp_path / "fuse.csv", index=False)
+    _run(monkeypatch, "fuse", "--batch", str(tmp_path / "fuse.csv"))
+    assert "1 row(s) not fused" in capsys.readouterr().out
+    assert not unusable.exists()
+    assert mm.ZarrManager(str(used)).metadata["size"][0][-2] == 20

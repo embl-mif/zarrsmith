@@ -116,6 +116,9 @@ def test_reference_channel_and_timepoint_apply_to_all(tmp_path):
     mosaic.apply_registration(reg)
     moved = {(t.channel, t.timepoint): t.origin for t in tiles if t.attrs["stack"] == "r0c1"}
     assert len(set(moved.values())) == 1
+    with pytest.raises(ValueError, match="stage positions"):  # measured from where the stage put them
+        mosaic.register(tmp_path / "again.json", progress=False)
+    mosaic.clear_registration()
     with pytest.raises(ValueError, match="Reference channel"):
         mosaic.register(tmp_path / "other.json", reference_channel="C", progress=False)
     with pytest.raises(ValueError, match="Reference timepoint"):
@@ -259,12 +262,12 @@ def test_budget_limits_reads_and_slabs_find_the_signal(tmp_path):
     b = sample[:, :, 100:]
     tiles = [mos.Tile(a, (0, 0, 0), (1, 1, 1), "A", attrs={"stack": "a"}),
              mos.Tile(b, (0, 0, 103), (1, 1, 1), "A", attrs={"stack": "b"})]
-    plan = mos.plan_registration(tiles, budget_mb=6)
+    plan = mos.plan_registration(tiles, budget_mb=12)
     assert plan.limit_gb < plan.full_gb
-    reg = mos.register_tiles(tiles, tmp_path / "reg.json", budget_mb=6, progress=False)
+    reg = mos.register_tiles(tiles, tmp_path / "reg.json", budget_mb=12, progress=False)
     link = reg.links[0]
     assert link["slabs_available"] > 1
-    assert link["read_mb"] < 2 * 6 * 1.5
+    assert link["read_mb"] <= 12 * 1.5
     assert all(e["z"][0] >= 320 for e in link["estimates"])
     assert reg.n_used == 1
     assert abs((reg.shifts["|b|0"][2] - reg.shifts["|a|0"][2]) - (-3)) < 0.5
@@ -277,14 +280,21 @@ def test_structure_tells_tissue_from_noise():
     assert _structure(_sample((64, 64, 64))) > 3
 
 
+def test_budget_is_per_pair_whatever_the_neighbours():
+    tiles, _ = _grid(_sample((512, 400, 400)), 2, 2, 220, 40)
+    plan = mos.plan_registration(tiles, budget_mb=2)
+    assert len(plan.pairs) == 4
+    assert plan.limit_gb == pytest.approx(4 * 2 / 1e3)  # 2 MB for each of the 4 pairs
+
+
 def test_no_signal_stops_after_the_probes(tmp_path):
     rng = np.random.default_rng(3)
     noise = rng.normal(500, 5, (512, 128, 256)).astype(np.uint16)
     tiles = [mos.Tile(noise[:, :, :160], (0, 0, 0), (1, 1, 1), "A", attrs={"stack": "a"}),
              mos.Tile(noise[:, :, 100:], (0, 0, 100), (1, 1, 1), "A", attrs={"stack": "b"})]
-    reg = mos.register_tiles(tiles, tmp_path / "reg.json", budget_mb=6, progress=False)
+    reg = mos.register_tiles(tiles, tmp_path / "reg.json", budget_mb=12, progress=False)
     assert reg.links[0]["signal"] is False and reg.links[0]["slabs_tried"] == 0
-    assert reg.links[0]["read_mb"] < 6
+    assert reg.links[0]["read_mb"] < 12
     assert "no signal" in reg.summary()
 
 
@@ -295,9 +305,35 @@ def test_slabs_without_a_match_still_respect_the_budget(tmp_path, monkeypatch):
     tiles = [mos.Tile(sample[:, :, :160], (0, 0, 0), (1, 1, 1), "A", attrs={"stack": "a"}),
              mos.Tile(sample[:, :, 100:], (0, 0, 100), (1, 1, 1), "A", attrs={"stack": "b"})]
     monkeypatch.setattr(module, "_match", lambda *args: None)
-    reg = mos.register_tiles(tiles, tmp_path / "reg.json", budget_mb=6, progress=False)
+    reg = mos.register_tiles(tiles, tmp_path / "reg.json", budget_mb=12, progress=False)
     assert 1 <= reg.links[0]["slabs_tried"] < reg.links[0]["slabs_available"]
-    assert reg.links[0]["read_mb"] <= 2 * 6 * 1.5
+    assert reg.links[0]["read_mb"] <= 12 * 1.5
+
+
+def test_failed_reads_are_tried_again(tmp_path, monkeypatch):
+    from zarrsmith.mosaic_manager import registration as module
+
+    sample = _sample((1, 300, 400))
+    tiles, _ = _grid(sample, 1, 2, 220, 40, {"r0c1": (0, 4, -3)})
+    real = module._measure_once
+    failures = [OSError("network"), OSError("network")]
+
+    def flaky(job):
+        if failures:
+            raise failures.pop()
+        return real(job)
+
+    monkeypatch.setattr(module, "_measure_once", flaky)
+    monkeypatch.setattr(module, "_RETRY_SECONDS", 0.0)
+    assert mos.register_tiles(tiles, tmp_path / "reg.json", progress=False).n_used == 1
+    assert not failures
+
+    def broken(job):
+        raise OSError("gone")
+
+    monkeypatch.setattr(module, "_measure_once", broken)
+    with pytest.raises(OSError, match="gone"):
+        mos.register_tiles(tiles, tmp_path / "other.json", progress=False)
 
 
 def test_pairs_are_faces_within_one_field():

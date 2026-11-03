@@ -394,6 +394,11 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
         help='Timepoint whose tiles set the geometry (output size, tile positions, transitions): every '
              'timepoint is fused with it. It need not be among --timepoints. Default: the first timepoint.',
     )
+    parser.add_argument(
+        '-reg', '--registration',
+        help='Registration file made by `zarrsmith register`: fuse the tiles at the positions it found. '
+             'If it cannot be used, nothing is fused. Default: the stage positions.',
+    )
     parser.add_argument('-ma', '--midline_axis', choices=['x', 'y', 'z'], default='x',
                         help='Axis along which blend=midline/sigmoid separates the groups.')
     parser.add_argument('-od', '--out_dtype', help='Output dtype, e.g. uint16 or float32. Default: input dtype '
@@ -477,13 +482,15 @@ FUSE_HELP = """\
     reference timepoint (-rtp, default: the first) and every timepoint is fused with it. -tp selects
     the timepoints to fuse.
 
+    Tiles are placed at their stage positions, or at those found by `zarrsmith register` with -reg.
+
     The --batch CSV file has the columns input | microscope | output, plus any of the output columns of
     `zarrsmith convert --batch` (chunk_size | max_size(MB) | zarr_format | downscale_factor | subset | channel_colors |
     channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | drop_singleton | num_workers |
     overwrite)
     and of the fusion columns
     downsample | projection | blend | sigmoid_steepness | channels | groups | fields | tiles | skip_tiles | timepoints |
-    reference_timepoint | midline_axis | out_dtype | read_workers | temp_dir |
+    reference_timepoint | registration | midline_axis | out_dtype | read_workers | temp_dir |
     flatfield (true/false, Opera only, default true), e.g.
       input                  | microscope | output                 | downsample | projection | blend   | num_levels
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_3D.zarr  | 4 8 8      | none       | sigmoid | 3
@@ -491,6 +498,27 @@ FUSE_HELP = """\
     Leave a cell empty for the default. Lists (channels, groups, fields, tiles, skip_tiles, timepoints, channel_names...) are space
     separated.
     The napari "Mosaic Fusion" widget writes such files with "Append to batch CSV".
+"""
+
+REGISTER_HELP = """\
+    Measure the errors of the stage positions of a mosaic from the image data, by matching the overlaps
+    of neighbouring tiles, and save them to a file that `zarrsmith fuse -reg` uses. Only translations
+    are corrected. Registration reads a bounded amount of data from one channel at one timepoint, and
+    the result holds for every channel and timepoint.
+
+    Examples:
+      zarrsmith register -i /path/to/2026-10-14_103957 -r registration.json -rc autofluo-488
+      zarrsmith fuse -i /path/to/2026-10-14_103957 -z out_3D.ome.zarr -rds 4 8 8 -reg registration.json
+      zarrsmith register -i /path/to/2026-10-14_103957 -r registration.json --retry_rejected -bm none
+      zarrsmith register --batch mosaics.csv
+
+    The file is written after every pair: run the same command again to continue an interrupted run.
+    A file with other positions, reference or search range is refused.
+
+    The --batch CSV file has the columns input | microscope | registration, plus any of
+    scene_index | reference_channel | reference_timepoint | fields | tiles | skip_tiles | max_shift | budget_mb |
+    min_ncc | max_residual | retry_rejected | read_workers | flatfield, with the same meaning as the options below.
+    Leave a cell empty for the default; lists are space separated.
 """
 
 CHROMATIC_SHIFT_HELP = """\
@@ -529,6 +557,56 @@ def parse_refine_level(value):
         return int(text)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"Invalid refine level '{value}'. Use a level index or 'none'.") from exc
+
+
+def parse_budget(value):
+    """Read budget in MB, or ``None`` for ``none`` (whole overlaps)."""
+    text = str(value).strip().lower()
+    if text == 'none':
+        return None
+    try:
+        budget = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'Invalid budget {value!r}: give MB or "none".') from None
+    if budget <= 0:
+        raise argparse.ArgumentTypeError(f'Invalid budget {value!r}: it must be positive, or "none".')
+    return budget
+
+
+def _add_register_arguments(parser):
+    """Options of ``zarrsmith register``."""
+    from zarrsmith.mosaic_manager.registration import BUDGET_MB, MAX_RESIDUAL, MAX_SHIFT, MIN_NCC
+
+    group = parser.add_argument_group('Input and output (or --batch)')
+    group.add_argument('-i', '--input_path', type=valid_input_path,
+                       help='Acquisition folder, or .czi file for Zeiss.')
+    group.add_argument('-r', '--registration', type=os.path.abspath,
+                       help='Registration file (.json), written after every pair. If it exists, the run continues from it.')
+    group.add_argument('--batch', metavar='CSV', type=valid_input_path,
+                       help='Run every row of this CSV file instead (see the description above).')
+    parser.add_argument('-rc', '--reference_channel',
+                        help='Channel to match, ideally with structure in the overlaps. Default: the first.')
+    parser.add_argument('-rtp', '--reference_timepoint', type=int, help='Timepoint to match. Default: the first.')
+    parser.add_argument('-f', '--fields', nargs='+', help='Fields to register. Default: all.')
+    parser.add_argument('-t', '--tiles', nargs='+',
+                        help='Only register these tiles: stacks such as 1-x00-y00, or "channel/stack" ids. Default: all.')
+    parser.add_argument('-st', '--skip_tiles', nargs='+',
+                        help='Tiles not to read, e.g. a failed stack. They stay at their stage position.')
+    parser.add_argument('-ms', '--max_shift', nargs='+', type=float, default=list(MAX_SHIFT),
+                        help='Largest error searched between two tiles, as a fraction of the tile size: one value, or Z Y X. '
+                             'Reads grow with it.')
+    parser.add_argument('-bm', '--budget_mb', type=parse_budget, default=BUDGET_MB,
+                        help='Most raw data read per pair of tiles, in MB; "none" reads whole overlaps.')
+    parser.add_argument('--min_ncc', type=float, default=MIN_NCC, help='Lowest match score that is trusted.')
+    parser.add_argument('--max_residual', type=float, default=MAX_RESIDUAL,
+                        help='Links further than this from the solution, in working voxels, are dropped.')
+    parser.add_argument('--retry_rejected', action='store_true',
+                        help='With an existing file: measure again the pairs that were rejected, e.g. with a larger budget.')
+    parser.add_argument('-rw', '--read_workers', type=int, default=4, help='Pairs measured in parallel.')
+    parser.add_argument('-si', '--scene_index', type=int,
+                        help='Scene of a Zeiss mosaic to load (default: all of them, one field per scene).')
+    parser.add_argument('-nff', '--no_flatfield', dest='flatfield', action='store_false',
+                        help='Opera: do not apply the flat-field correction stored by Harmony (applied by default).')
 
 
 def _add_chromatic_shift_arguments(parser):
@@ -651,7 +729,7 @@ def _parse_arguments(argv=None):
         title='Commands',
         description="Run `zarrsmith <command> -h` for the options of a command.",
         dest='command',
-        metavar='{convert,fuse,chromatic-shift}',
+        metavar='{convert,fuse,register,chromatic-shift}',
         required=True,
     )
 
@@ -686,6 +764,18 @@ def _parse_arguments(argv=None):
     _add_input_output(fuse, required=False, input_help='Acquisition folder (for Luxendo: the folder containing raw/; '
                                                        'for Opera: the Harmony export containing Images/).',
                       output_type=os.path.abspath)
+
+    #####################################################################################
+    # register: one mosaic, or a CSV batch
+    register = subparsers.add_parser(
+        'register',
+        help='Measure tile positions of a mosaic from the image data, for `fuse -reg` (or a CSV batch with --batch).',
+        description=textwrap.dedent(REGISTER_HELP),
+        formatter_class=MultilineDefaultsHelpFormatter,
+    )
+    register.set_defaults(mode='register', renamed_to=None)
+    _add_fuse_microscope(register)
+    _add_register_arguments(register)
 
     #####################################################################################
     # chromatic-shift: one OME-Zarr image, or a CSV batch
@@ -736,6 +826,17 @@ def _parse_arguments(argv=None):
             args.input_file = args.batch
         elif args.input_path is None or args.zarr_path is None:
             command.error('the following arguments are required: -i/--input_path and -z/--zarr_path (or --batch CSV)')
+
+    # register: -i and -r, or --batch
+    if args.mode == 'register':
+        command = subparsers.choices['register']
+        if args.batch is not None:
+            if args.input_path is not None or args.registration is not None:
+                command.error('--batch cannot be combined with -i/-r: the CSV file lists them.')
+            args.mode = 'register_batch'
+            args.input_file = args.batch
+        elif args.input_path is None or args.registration is None:
+            command.error('the following arguments are required: -i/--input_path and -r/--registration (or --batch CSV)')
 
     # chromatic-shift: -i (with an optional -z), or --batch
     if args.mode == 'chromatic_shift':

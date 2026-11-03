@@ -120,7 +120,7 @@ Every timepoint is fused with the geometry of one **reference timepoint**: the o
 
 ## Content-based registration
 
-By default tiles are placed at their stage position. `mosaic.register` measures the errors of those positions from the image data, by matching the overlaps of neighbouring tiles. It is optional, and it only corrects translations: not rotation, scale or warping.
+By default tiles are placed at their stage position. `mosaic.register` (or [`zarrsmith register`](cli.md#register-a-mosaic), or the [napari widget](#napari)) measures the errors of those positions from the image data, by matching the overlaps of neighbouring tiles. It is optional, and it only corrects translations: not rotation, scale or warping.
 
 ```python
 from zarrsmith.mosaic_manager import Registration, plan_registration
@@ -154,7 +154,7 @@ mosaic.register("registration.json", retry_rejected=True, budget_mb=None)
 |---|---|---|
 | `reference_channel`, `reference_timepoint` | name, timepoint | what is matched (default: the first of each) |
 | `max_shift` | one fraction, or `(z, y, x)` | largest error searched between two tiles, as a fraction of the tile size (default `(0.02, 0.06, 0.06)`). Reads grow with it |
-| `budget_mb` | MB, or `None` | most raw data read per tile, shared between its neighbours (default 1024). `None` reads whole overlaps |
+| `budget_mb` | MB, or `None` | most raw data read per pair of tiles, from both together (default 1024). `None` reads whole overlaps |
 | `min_ncc` | number | lowest match score trusted (default 0.1) |
 | `max_residual` | number | links further than this from the solution, in working voxels, are dropped (default 2) |
 | `ds` | `(z, y, x)` integers | downsampling of the images matched (default: chosen per pair). It does not reduce what is read |
@@ -262,7 +262,7 @@ Raw tiles usually have no pyramid, so every fusion reads the full-resolution dat
 
 ## Command line
 
-`zarrsmith fuse` fuses one mosaic, or many from a CSV file with `--batch`. Every output option of `zarrsmith convert` is available with the same flags. See [Command line](cli.md#fuse-a-mosaic).
+`zarrsmith fuse` fuses one mosaic, or many from a CSV file with `--batch`. Every output option of `zarrsmith convert` is available with the same flags. See [Command line](cli.md#fuse-a-mosaic). `zarrsmith register` writes a registration file for `-reg`, see [Register a mosaic](cli.md#register-a-mosaic).
 
 ```console
 zarrsmith fuse -i /path/to/2026-10-14_103957 -z acq_3D.ome.zarr -rds 4 8 8 -nl 3
@@ -272,6 +272,8 @@ zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_MIP.ome.zarr -p max -f A3
 zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_raw.ome.zarr -p max -f A3_field1 -nff   # without flat-field
 zarrsmith fuse -i /path/to/timelapse -z acq_t.ome.zarr -rds 4 8 8 -rtp 0                        # every timepoint, reference 0
 zarrsmith fuse -i /path/to/timelapse -z part.ome.zarr -rds 4 8 8 -tp 10 11 12 -rtp 0            # some timepoints
+zarrsmith register -i /path/to/2026-10-14_103957 -r registration.json -rc autofluo-488           # measure positions
+zarrsmith fuse -i /path/to/2026-10-14_103957 -z acq_3D.ome.zarr -rds 4 8 8 -reg registration.json  # and use them
 ```
 
 The fields are listed when the mosaic is loaded. Without `-f/--fields` (or `-t/--tiles`) the first field is fused. Asking for tiles from several fields prints an error and nothing is fused; in a `--batch` run that row is not done, the other rows still run, and the rows that were not fused are listed at the end.
@@ -280,15 +282,16 @@ The fields are listed when the mosaic is loaded. Without `-f/--fields` (or `-t/-
 
 ![mosaic-demo](mosaic-demo.png)
 
-`Plugins > ZarrSmith > Mosaic Fusion` opens a widget with three boxes:
+`Plugins > ZarrSmith > Mosaic Fusion` opens a widget with these boxes:
 
 1. **Mosaic loading**: choose the microscope and the acquisition folder (browse, or drag and drop it, or any file inside it, from the file explorer), then *Load tiles*. *Flat-field correction (Opera)* (on by default) corrects Opera tiles as Harmony does; other microscopes ignore it. This reads metadata only and adds a **tile map**: a `tile map` shapes layer with one rectangle per stack position, labelled with its stack id, all picked (green). Click a rectangle in the 2D view to unpick it (grey) or pick it again; dragging still pans. *Shift* + drag picks, and *Ctrl* + drag unpicks, every tile that lies even partially in the box shown while you drag (a temporary `tile map box` layer, removed on release) (*Shift* or *Ctrl* + click: one tile). A rectangle stands for that position in every channel and illumination side. Only picked tiles are shown and fused. When the mosaic has several [fields](#fields), each rectangle also shows its field, the log lists the stack positions of every field, and the *fields* selectors of *Show tiles* and *Fuse to OME-Zarr* start on the first field.
 2. **Show tiles**: show the picked tiles of the selected channels, groups and fields as one layer per tile at its stage position, with one linked contrast per channel. A channel starts at the whole range of its data type, so nothing is read before the tiles appear: set the contrast of one tile and the others follow. Every displayed plane reads data from all shown tiles, so show only a few channels or groups at a time. Change the picks on the tile map and click *Show tiles in napari* again to update the view; the contrast you set is kept, and *Remove existing layers* keeps the tile map. A mosaic with several timepoints opens on the first timepoint, and the **T slider** at the bottom of the image scrolls through time, each tile at the position of its first timepoint. Only the planes displayed at the current timepoint are read. A timepoint without that tile shows as blank.
-3. **Fuse to OME-Zarr**: the main fusion options, with a live estimate of the output size. For a mosaic with several timepoints, *Timepoints* selects those to fuse (all by default) and *Reference timepoint* the one whose geometry they all use (the first by default). Only the picked tiles of the selected field are fused, and the output fits them. Selecting several fields shows an error in the size estimate, and *Fuse to OME-Zarr* and *Append to batch CSV* then print an error and do nothing. With several fields, the default output name ends with the field, e.g. `<acquisition>_3D_ds4-8-8_field1.ome.zarr`. *Tiles to fuse* can be set to *visible layers only* or *selected layers only*: tiles whose layer is hidden (eye icon off) or not selected in the layer list are then left blank (the output keeps its size), and *Blank in all channels* also blanks that position in the other channels. Picked tiles that are not shown in napari are fused normally. The output path follows the parameters (for example `<acquisition>_3D_ds4-8-8.ome.zarr`) until you type your own; dropping a folder on the output field writes the result inside that folder. When fusion finishes, the result can be opened directly, on its first timepoint (the tile map is then hidden, since the result is not placed at the stage position).
+3. **Register tiles (optional)**: [content-based registration](#content-based-registration). Choose the *Reference channel* (and the *Reference timepoint* and *fields*, when there are several), then *Register tiles*. Only picked tiles are used. The *Registration file* starts next to the acquisition; it is written after every pair, so clicking *Register tiles* again continues an interrupted run, and a file with other settings is refused. When it finishes, the log shows the corrections and the rejected pairs, and the tile map, the layers shown and the output size follow the new positions. *Tile positions* switches between `stage` and `registered` at any time without reading anything, and *Load registration file* uses a file saved earlier. A *Read budget* of 0 reads whole overlaps, and *Measure rejected pairs again* does that for the pairs that failed.
+4. **Fuse to OME-Zarr**: the main fusion options, with a live estimate of the output size. For a mosaic with several timepoints, *Timepoints* selects those to fuse (all by default) and *Reference timepoint* the one whose geometry they all use (the first by default). Only the picked tiles of the selected field are fused, and the output fits them. Selecting several fields shows an error in the size estimate, and *Fuse to OME-Zarr* and *Append to batch CSV* then print an error and do nothing. With several fields, the default output name ends with the field, e.g. `<acquisition>_3D_ds4-8-8_field1.ome.zarr`. *Tiles to fuse* can be set to *visible layers only* or *selected layers only*: tiles whose layer is hidden (eye icon off) or not selected in the layer list are then left blank (the output keeps its size), and *Blank in all channels* also blanks that position in the other channels. Picked tiles that are not shown in napari are fused normally. The output path follows the parameters (for example `<acquisition>_3D_ds4-8-8.ome.zarr`) until you type your own; dropping a folder on the output field writes the result inside that folder. When fusion finishes, the result can be opened directly, on its first timepoint (the tile map is then hidden, since the result is not placed at the stage position).
 
-4. **Batch CSV export**: *Append to batch CSV* adds the current settings, including the picked tiles (`tiles` column), the timepoints and the tiles left blank, as a row of a CSV file. Run the file later, for example on a workstation close to the data, with `zarrsmith fuse --batch mosaic_batch.csv`.
+5. **Batch CSV export**: *Append to batch CSV* adds the current settings, including the picked tiles (`tiles` column), the timepoints, the tiles left blank and the registration in use (`registration` column), as a row of a CSV file. Run the file later, for example on a workstation close to the data, with `zarrsmith fuse --batch mosaic_batch.csv`.
 
-Loading and fusion run in the background, and their progress is shown in the log at the bottom.
+Loading, registration and fusion run in the background, and their progress is shown in the log at the bottom.
 
 ## Adding a mosaic reader
 

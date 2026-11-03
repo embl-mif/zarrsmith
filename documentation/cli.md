@@ -1,16 +1,17 @@
 # Command line
 
-The `zarrsmith` command has three subcommands:
+The `zarrsmith` command has four subcommands:
 
 | Command | Does |
 |---|---|
 | `zarrsmith convert` | convert a dataset to OME-Zarr, or every dataset listed in a CSV file with `--batch` |
 | `zarrsmith fuse` | fuse the raw tiles of a mosaic into one OME-Zarr image, or every mosaic listed in a CSV file with `--batch` |
+| `zarrsmith register` | measure the tile positions of a mosaic from the image data, for `fuse -reg`, or of every mosaic listed in a CSV file with `--batch` |
 | `zarrsmith chromatic-shift` | measure and correct the Z chromatic shift between the channels of an OME-Zarr image, or of every image listed in a CSV file with `--batch` |
 
-`zarrsmith -h` lists them, and `zarrsmith convert -h`, `zarrsmith fuse -h` and `zarrsmith chromatic-shift -h` show every option, examples and the batch CSV columns. `zarrsmith --version` prints the installed version.
+`zarrsmith -h` lists them, and `zarrsmith convert -h`, `zarrsmith fuse -h`, `zarrsmith register -h` and `zarrsmith chromatic-shift -h` show every option, examples and the batch CSV columns. `zarrsmith --version` prints the installed version.
 
-Each command runs either one dataset (`-i INPUT -z OUTPUT`) or a CSV file (`--batch FILE.csv`), never both (`chromatic-shift` can also run with `-i` alone, to only measure). In a batch file, one row is one run and the columns take the place of the options.
+Each command runs either one dataset (`-i INPUT -z OUTPUT`; for `register`, `-i INPUT -r FILE`) or a CSV file (`--batch FILE.csv`), never both (`chromatic-shift` can also run with `-i` alone, to only measure). In a batch file, one row is one run and the columns take the place of the options.
 
 ## Convert a dataset
 
@@ -72,6 +73,7 @@ The fusion options:
 | `-st`, `--skip_tiles` | tiles to leave blank (the output keeps its size): `channel/stack` ids such as `cFos-647/1-x00-y00`, or a stack such as `1-x00-y00` for every channel |
 | `-tp`, `--timepoints` | timepoints to fuse (default: all); more than one gives an output with a `t` axis, see [Timepoints](mosaic.md#timepoints) |
 | `-rtp`, `--reference_timepoint` | timepoint whose tiles set the geometry of every timepoint (default: the first) |
+| `-reg`, `--registration` | file made by [`zarrsmith register`](#register-a-mosaic): place the tiles at the positions it found (default: the stage positions). If it cannot be used, nothing is fused |
 | `-nff`, `--no_flatfield` | Opera: do not apply Harmony's flat-field correction (applied by default, see [Opera](mosaic.md#opera-harmony-exports)) |
 | `-ma`, `--midline_axis` | axis along which `sigmoid`/`midline` separate the tile groups: `x` (default), `y` or `z` |
 | `-od`, `--out_dtype` | output dtype |
@@ -81,13 +83,51 @@ The fusion options:
 
 Every output option of `convert` is available too, applied to the fused output. Two read differently for a mosaic: `-cs` is given in `C Z Y X` order (`C Y X` for projections, after `T` for several timepoints), and `-s/--subset` crops the fused output (`z`/`y`/`x` in output voxels, after `-rds`) and selects channels (`c`), e.g. `"z=0:100;y=200:900;c=1"`; timepoints are chosen with `-tp`. `-si` loads one scene of a Zeiss mosaic, ignored for the others.
 
-The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `fields`, `tiles`, `skip_tiles`, `timepoints`, `reference_timepoint`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
+The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `fields`, `tiles`, `skip_tiles`, `timepoints`, `reference_timepoint`, `registration`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields, or with a registration that cannot be used, is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
 
 ```text
 input,microscope,output,downsample,projection,blend,num_levels,shards
 /path/to/acquisition_1,luxendo,/path/to/acq1_3D.ome.zarr,4 8 8,none,sigmoid,3,auto
 /path/to/acquisition_1,luxendo,/path/to/acq1_MIP.ome.zarr,1 8 8,max,midline,,none
 ```
+
+## Register a mosaic
+
+`register` measures the errors of the stage positions of a mosaic from the image data and saves them to a file that `fuse -reg` uses (see [Content-based registration](mosaic.md#content-based-registration)):
+
+```console
+# measure on one channel: the result holds for every channel and timepoint
+zarrsmith register -i /path/to/2026-10-14_103957 -r registration.json -rc autofluo-488
+
+# fuse with these positions, as many times as needed
+zarrsmith fuse -i /path/to/2026-10-14_103957 -z acq_3D.ome.zarr -rds 4 8 8 -reg registration.json
+
+# measure the pairs that were rejected again, reading their whole overlaps
+zarrsmith register -i /path/to/2026-10-14_103957 -r registration.json --retry_rejected -bm none
+
+# many mosaics from a CSV file
+zarrsmith register --batch mosaics.csv
+```
+
+The file is written after every pair: if a run stops, run the same command again and it continues. A file with other positions, another reference or another search range is refused.
+
+| Flag | Meaning |
+|---|---|
+| `-i`, `--input_path` / `-r`, `--registration` | the acquisition, and the registration file (`.json`) |
+| `-m`, `--microscope` | `luxendo`, `opera`, `zeiss`; auto-detected as for `fuse` |
+| `-rc`, `--reference_channel` | channel to match, ideally with structure in the overlaps (default: the first) |
+| `-rtp`, `--reference_timepoint` | timepoint to match (default: the first) |
+| `-f`, `--fields` | fields to register (default: all) |
+| `-t`, `--tiles` / `-st`, `--skip_tiles` | only register these tiles / do not read these tiles, as for `fuse` |
+| `-ms`, `--max_shift` | largest error searched between two tiles, as a fraction of the tile size: one value or `Z Y X` (default `0.02 0.06 0.06`). Reads grow with it |
+| `-bm`, `--budget_mb` | most raw data read per pair of tiles, in MB (default 1024); `none` reads whole overlaps |
+| `--min_ncc` | lowest match score that is trusted (default 0.1) |
+| `--max_residual` | links further than this from the solution, in working voxels, are dropped (default 2) |
+| `--retry_rejected` | with an existing file: measure again the pairs that were rejected |
+| `-rw`, `--read_workers` | pairs measured in parallel (default 4) |
+| `-si`, `--scene_index` / `-nff`, `--no_flatfield` | as for `fuse` |
+
+The batch CSV has the columns `input`, `microscope`, `registration`, plus any of `scene_index`, `reference_channel`, `reference_timepoint`, `fields`, `tiles`, `skip_tiles`, `max_shift`, `budget_mb`, `min_ncc`, `max_residual`, `retry_rejected`, `read_workers`, `flatfield`. Leave a cell empty for the default; lists are space separated. A row that fails is reported and the other rows still run.
 
 ## Correct the chromatic shift
 
