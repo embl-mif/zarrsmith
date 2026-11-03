@@ -476,6 +476,84 @@ class MosaicManager(ABC):
         ids = [s for s in tiles if isinstance(s, str)]
         return [s for s in tiles if not isinstance(s, str)] + (self.tiles_by_ids(ids) if ids else [])
 
+    # ------------------------------------------------------------------
+    # registration
+    # ------------------------------------------------------------------
+
+    def register(
+        self,
+        save_to: str | Path,
+        tiles: Optional[Sequence["Tile | str"]] = None,
+        field: "str | Sequence[str] | None" = None,
+        skip: Optional[Sequence["Tile | str"]] = None,
+        **kwargs,
+    ):
+        """Measure tile positions from the image data; see
+        :func:`~zarrsmith.mosaic_manager.register_tiles`.
+
+        Tiles stay where they are until the result is given to :meth:`apply_registration`.
+
+        Parameters
+        ----------
+        save_to
+            Registration file, written after every pair; an interrupted run continues from it.
+        tiles, field
+            Only register these tiles or fields, in the forms of :meth:`fuse`. Default: every
+            field. Tiles are only ever matched within their field.
+        skip
+            Tiles not to read, e.g. a failed stack, in the forms of :meth:`fuse`.
+        **kwargs
+            Options of :func:`~zarrsmith.mosaic_manager.register_tiles`, among them
+            ``reference_channel`` and ``reference_timepoint``.
+        """
+        from .registration import register_tiles
+
+        use = self.fusion_tiles(tiles, field) if tiles is not None or field is not None else list(self.tiles)
+        if skip:
+            left_out = {id(t) for t in self._resolve_tiles(skip)}
+            use = [t for t in use if id(t) not in left_out]
+        return register_tiles(use, save_to, **kwargs)
+
+    def apply_registration(self, registration) -> None:
+        """Move the tiles to the positions found by a registration, in memory only.
+
+        Every tile of a position, in every channel and timepoint, gets the same correction
+        to its stage position, so applying twice does not add up. Tiles the registration
+        does not know stay where the stage put them. ``visualize``, ``plan_fusion`` and
+        ``fuse`` then use the new positions; field labels stay as they were when loaded.
+
+        A registration of another acquisition raises ``ValueError``. See :meth:`clear_registration`.
+        """
+        from .registration import position_id
+
+        if not registration.shifts:
+            raise ValueError("This registration has no solution yet: the run was interrupted, "
+                             "run register() again with the same file to finish it.")
+        if not np.allclose(registration.voxel_size, self.tiles[0].voxel_size, rtol=1e-3):
+            raise ValueError(f"This registration has voxel size {tuple(registration.voxel_size)}, the "
+                             f"mosaic {self.tiles[0].voxel_size}: it belongs to another acquisition.")
+        keys = {id(t): position_id(k) for k, t in zip(series_keys(self.tiles), self.tiles)}
+        references = {keys[id(t)]: t for t in self.tiles
+                      if t.channel == registration.reference_channel
+                      and t.timepoint == registration.reference_timepoint}
+        for name, stage in registration.positions.items():
+            t = references.get(name)
+            if t is None or not np.allclose(t.attrs.get("stage_origin", t.origin), stage,
+                                            atol=np.max(t.voxel_size), rtol=0):
+                raise ValueError(f"Position {name!r} of this registration is not in the mosaic at the "
+                                 "same place: it belongs to another acquisition.")
+        for t in self.tiles:
+            shift = registration.shifts.get(keys[id(t)])
+            if shift is not None:
+                stage = t.attrs.setdefault("stage_origin", t.origin)
+                t.origin = tuple(float(s) + float(d) + 0.0 for s, d in zip(stage, shift))
+
+    def clear_registration(self) -> None:
+        """Put every tile back at its stage position (undoes :meth:`apply_registration`)."""
+        for t in self.tiles:
+            stage = t.attrs.pop("stage_origin", None)
+            if stage is not None:
+                t.origin = tuple(stage)
 
     # ------------------------------------------------------------------
     # resources

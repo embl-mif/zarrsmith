@@ -75,7 +75,7 @@ mos.ZeissMosaicManager("tile_scan.czi", scene_index=1)   # only this scene
 ```
 
 - **Fields are scenes.** Every tile region or position of the ZEN experiment is one field, named after its index and name. Tile ids look like `AF488-T2/scene0_TR1-m01`.
-- **Placement.** `y` and `x` come from the pixel coordinates of the tile in the file, which are the stage position rounded to a pixel, and `z` from the `FocusPosition` of its first plane. Tiles are not registered, so the result can differ from the images stitched by ZEN by a few pixels.
+- **Placement.** `y` and `x` come from the pixel coordinates of the tile in the file, which are the stage position rounded to a pixel, and `z` from the `FocusPosition` of its first plane. The result can therefore differ from the images stitched by ZEN by a few pixels. [Registering](#content-based-registration) the tiles brought it to within about a pixel in our test.
 - **Timelapses.** The file records slightly different positions at every timepoint; every timepoint is fused with those of the reference timepoint. The fused output has 1 second per timepoint, like every fused timelapse, not the interval of the experiment.
 - **Files without tiles**, such as the output of ZEN's *Stitching*, are refused: read them with `ZeissManager`.
 
@@ -117,6 +117,58 @@ Every timepoint is fused with the geometry of one **reference timepoint**: the o
 - **Fields** are labelled once per position, where it is first seen, so drift over time neither joins nor splits them. `field`, `tiles` and tile ids name the tiles of every timepoint. In `skip`, an id blanks that position at every timepoint and a `Tile` object only at its own timepoint.
 
 `visualize()` shows one layer per position with a time slider, see [Napari](#napari).
+
+## Content-based registration
+
+By default tiles are placed at their stage position. `mosaic.register` measures the errors of those positions from the image data, by matching the overlaps of neighbouring tiles. It is optional, and it only corrects translations: not rotation, scale or warping.
+
+```python
+from zarrsmith.mosaic_manager import Registration, plan_registration
+
+print(plan_registration(mosaic.tiles, reference_channel="autofluo-488").summary())   # reads no pixels
+
+reg = mosaic.register("registration.json", reference_channel="autofluo-488", workers=4)
+print(reg.summary())                 # corrections, links used and rejected, data read
+
+mosaic.apply_registration(reg)       # every channel and timepoint of a position moves together
+mosaic.fuse("acq_registered.ome.zarr", ds=(4, 8, 8))
+mosaic.clear_registration()          # back to the stage positions
+```
+
+**One channel and timepoint.** Only `reference_channel` (default: the first) at `reference_timepoint` (default: the first) are read, so channels and timepoints add no reads. Choose a channel with structure in the overlaps. The same correction is then applied to all of them.
+
+**The registration file.** `register` needs a file and writes it after every pair, so an interrupted run continues from it when it is run again with the same settings. `apply_registration` only changes `Tile.origin` in memory, so in a new session apply the file again, which reads no pixels:
+
+```python
+mosaic.apply_registration(Registration.load("registration.json"))
+```
+
+A file made from another acquisition is refused. Thresholds can be changed without reading anything, and rejected pairs can be measured again, for example with a larger budget:
+
+```python
+reg.solve(min_ncc=0.3)                                     # reads no pixels; reg.save(...) keeps it
+mosaic.register("registration.json", retry_rejected=True, budget_mb=None)
+```
+
+| Option | Values | Meaning |
+|---|---|---|
+| `reference_channel`, `reference_timepoint` | name, timepoint | what is matched (default: the first of each) |
+| `max_shift` | one fraction, or `(z, y, x)` | largest error searched between two tiles, as a fraction of the tile size (default `(0.02, 0.06, 0.06)`). Reads grow with it |
+| `budget_mb` | MB, or `None` | most raw data read per tile, shared between its neighbours (default 1024). `None` reads whole overlaps |
+| `min_ncc` | number | lowest match score trusted (default 0.1) |
+| `max_residual` | number | links further than this from the solution, in working voxels, are dropped (default 2) |
+| `ds` | `(z, y, x)` integers | downsampling of the images matched (default: chosen per pair). It does not reduce what is read |
+| `field`, `tiles`, `skip` | as for `fuse` | what to register (default: every field). Tiles are only matched within their field |
+| `workers` | integer | pairs measured in parallel (default 1) |
+
+How it works:
+
+1. **Pairs.** Tiles sharing a face are paired, using the overlap given by their stage positions and voxel size. Tiles that only meet at a corner are not.
+2. **Reading.** Raw tiles have no pyramid, so downsampling does not reduce what is read. When the overlap of a pair, widened by `max_shift`, does not fit the budget, it is sampled in contiguous slabs along z that follow the source chunks. Small probes first find the depths where both tiles have structure, so slabs are not spent on empty planes, and a pair without structure stops there. Reading stops as soon as two slabs agree.
+3. **Matching.** Phase correlation proposes shifts, and the normalized cross-correlation (NCC) on the real overlap chooses between them and the stage position, then refines the best one. Slow background is removed first, as it would correlate at any shift. Stacks of fewer than 16 planes are matched on their maximum projection, in y and x only.
+4. **Solving.** A weighted least-squares fit over all pairs gives one correction per position. A weak pull towards the stage position keeps tiles without a reliable match close to it, and pairs that disagree with the others are dropped. `reg.summary()` lists these.
+
+Tiles are placed on whole output voxels, without interpolation, so the alignment of a fusion is accurate to about one output voxel. Every timepoint is fused with the geometry of the reference timepoint, so tiles that really moved between timepoints stay misaligned at the others by that movement; registration does not correct drift over time.
 
 ## 3D fusion
 

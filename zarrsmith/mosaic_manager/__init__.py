@@ -5,6 +5,7 @@ from .czi_array import CziTileArray
 from .fields import MultipleFieldsError, connected_components, label_fields
 from .mosaic import MosaicManager, reader_options
 from .fusion import FusionPlan, display_windows, fuse_tiles, plan_fusion
+from .registration import Registration, RegistrationPlan, plan_registration, register_tiles
 from .luxendo_mosaic_manager import LuxendoMosaicManager
 from .opera_mosaic_manager import OperaFlatfield, OperaMosaicManager
 from .zeiss_mosaic_manager import ZeissMosaicManager
