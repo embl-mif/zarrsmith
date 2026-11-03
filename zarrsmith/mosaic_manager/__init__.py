@@ -1,6 +1,7 @@
 from .tile import Tile
 from .h5_array import H5Array
-from .tiff_array import TiffStackArray
+from .tiff_array import PlaneStackArray, TiffStackArray
+from .czi_array import CziTileArray
 from .fields import MultipleFieldsError, connected_components, label_fields
 from .mosaic import MosaicManager, reader_options
 from .fusion import FusionPlan, display_windows, fuse_tiles, plan_fusion

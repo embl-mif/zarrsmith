@@ -116,3 +116,30 @@ def test_argument_errors(store, tmp_path, monkeypatch):
         _run(monkeypatch, "chromatic-shift", "-z", tmp_path / "out.ome.zarr")  # no input
     with pytest.raises(SystemExit):
         _run(monkeypatch, "chromatic-shift", "--batch", store / "zarr.json", "-i", store)
+
+
+def test_reference_channel_and_timepoint(tmp_path, monkeypatch, capsys):
+    from .test_chromatic_shift import TIMELAPSE_DISPLACEMENTS, _write_timelapse
+
+    _write_timelapse(tmp_path / "t.ome.zarr")
+    report = tmp_path / "shift.json"
+    _run(monkeypatch, "chromatic-shift", "-i", tmp_path / "t.ome.zarr", "-r", report, "-rc", "ch1", "-tp", 1, "-mxs", 20)
+    assert "reference: ch1, timepoint: 1" in capsys.readouterr().out
+    data = json.loads(report.read_text())
+    assert data["reference_channel"] == 1 and data["timepoint"] == 1
+    d = TIMELAPSE_DISPLACEMENTS[1]
+    np.testing.assert_allclose(data["shifts"], [-(v - d[1]) * SPACING[0] for v in d], atol=0.25 * SPACING[0])
+
+    with pytest.raises(ValueError, match="timepoint=5 is out of range"):
+        _run(monkeypatch, "chromatic-shift", "-i", tmp_path / "t.ome.zarr", "-tp", 5)
+
+    # default: timepoint 0; batch rows name the timepoint
+    csv = tmp_path / "batch.csv"
+    pd.DataFrame([
+        {"input": str(tmp_path / "t.ome.zarr"), "report": str(tmp_path / "a.json"), "timepoint": 1, "max_shift": 10},
+        {"input": str(tmp_path / "t.ome.zarr"), "report": str(tmp_path / "b.json"), "max_shift": 10},
+    ]).to_csv(csv, index=False)
+    _run(monkeypatch, "chromatic-shift", "--batch", csv)
+    assert json.loads((tmp_path / "a.json").read_text())["timepoint"] == 1
+    assert json.loads((tmp_path / "b.json").read_text())["timepoint"] == 0
+

@@ -7,47 +7,24 @@ from typing import Callable, Optional, Sequence, Tuple
 import numpy as np
 
 
-class TiffStackArray:
-    """Lazy, picklable ``(z, y, x)`` stack of single-plane TIFF files (one file per plane).
+class PlaneStackArray:
+    """Lazy, picklable ``(z, y, x)`` stack read one whole plane at a time.
 
-    Like :class:`~zarrsmith.mosaic_manager.H5Array`, it holds no open file, so it can be
-    sent to worker processes and needs no ``close()``. Slicing reads only the planes it
-    needs; every plane is decoded in full (``chunks`` is ``(1, y, x)``, which the fusion
-    uses to size its regions).
-
-    Parameters
-    ----------
-    paths
-        One file per plane, in z order. ``None`` marks a missing plane, read as zeros.
-    shape, dtype
-        ``(z, y, x)`` shape and data type, from the metadata (no file is opened).
-    folder
-        Folder of relative ``paths`` (keeps memory low for plates with many planes).
-    transform
-        Optional picklable callable applied to every whole plane after reading (e.g. a
-        flat-field correction). It returns floats, which are rounded and clipped to ``dtype``.
+    Subclasses implement :meth:`_read`. Slicing reads only the planes it needs (``chunks``
+    is ``(1, y, x)``, which the fusion uses to size its regions).
     """
 
     #: Tells ``fuse_tiles(executor="auto")`` that this data can be used in worker processes.
     picklable = True
 
-    def __init__(self, paths: Sequence[Optional[str | Path]], shape, dtype, folder: Optional[str | Path] = None,
-                 transform: Optional[Callable[[np.ndarray], np.ndarray]] = None):
-        self.paths = [None if p is None else str(p) for p in paths]
-        self.folder = None if folder is None else str(folder)
+    def __init__(self, shape, dtype):
         self.shape: Tuple[int, ...] = tuple(int(s) for s in shape)
-        if len(self.shape) != 3 or self.shape[0] != len(self.paths):
-            raise ValueError(f"shape {self.shape} does not match {len(self.paths)} plane file(s).")
+        if len(self.shape) != 3:
+            raise ValueError(f"shape {self.shape} is not (z, y, x).")
         self.dtype = np.dtype(dtype)
         self.ndim = 3
         self.chunks = (1,) + self.shape[1:]
-        self.transform = transform
         self._ready: Optional[Tuple[int, np.ndarray]] = None  # plane read ahead by prefetch()
-
-    def path(self, z: int) -> Optional[str]:
-        """Full path of plane ``z`` (``None`` for a missing plane)."""
-        p = self.paths[z]
-        return p if p is None or self.folder is None else os.path.join(self.folder, p)
 
     def prefetch(self, z: int) -> None:
         """Read plane ``z`` ahead (e.g. in a thread, for many tiles at once). The next
@@ -61,21 +38,7 @@ class TiffStackArray:
         return self._read(z)
 
     def _read(self, z: int) -> np.ndarray:
-        path = self.path(z)
-        if path is None:
-            return np.zeros(self.shape[1:], self.dtype)
-        import tifffile
-
-        plane = tifffile.imread(path)
-        if plane.shape != self.shape[1:]:
-            raise ValueError(f"{path}: plane shape {plane.shape} does not match the metadata {self.shape[1:]}.")
-        if self.transform is None:
-            return plane.astype(self.dtype, copy=False)
-        out = self.transform(plane)
-        if np.issubdtype(self.dtype, np.integer):
-            info = np.iinfo(self.dtype)
-            out = np.clip(np.rint(out), info.min, info.max)
-        return out.astype(self.dtype)
+        raise NotImplementedError
 
     def __getitem__(self, key) -> np.ndarray:
         key = key if isinstance(key, tuple) else (key,)
@@ -100,6 +63,60 @@ class TiffStackArray:
 
     def __len__(self) -> int:
         return self.shape[0]
+
+
+class TiffStackArray(PlaneStackArray):
+    """Lazy, picklable ``(z, y, x)`` stack of single-plane TIFF files (one file per plane).
+
+    Like :class:`~zarrsmith.mosaic_manager.H5Array`, it holds no open file, so it can be
+    sent to worker processes and needs no ``close()``. Slicing reads only the planes it
+    needs; every plane is decoded in full (``chunks`` is ``(1, y, x)``, which the fusion
+    uses to size its regions).
+
+    Parameters
+    ----------
+    paths
+        One file per plane, in z order. ``None`` marks a missing plane, read as zeros.
+    shape, dtype
+        ``(z, y, x)`` shape and data type, from the metadata (no file is opened).
+    folder
+        Folder of relative ``paths`` (keeps memory low for plates with many planes).
+    transform
+        Optional picklable callable applied to every whole plane after reading (e.g. a
+        flat-field correction). It returns floats, which are rounded and clipped to ``dtype``.
+    """
+
+    def __init__(self, paths: Sequence[Optional[str | Path]], shape, dtype, folder: Optional[str | Path] = None,
+                 transform: Optional[Callable[[np.ndarray], np.ndarray]] = None):
+        self.paths = [None if p is None else str(p) for p in paths]
+        self.folder = None if folder is None else str(folder)
+        shape = tuple(int(s) for s in shape)
+        if len(shape) != 3 or shape[0] != len(self.paths):
+            raise ValueError(f"shape {shape} does not match {len(self.paths)} plane file(s).")
+        super().__init__(shape, dtype)
+        self.transform = transform
+
+    def path(self, z: int) -> Optional[str]:
+        """Full path of plane ``z`` (``None`` for a missing plane)."""
+        p = self.paths[z]
+        return p if p is None or self.folder is None else os.path.join(self.folder, p)
+
+    def _read(self, z: int) -> np.ndarray:
+        path = self.path(z)
+        if path is None:
+            return np.zeros(self.shape[1:], self.dtype)
+        import tifffile
+
+        plane = tifffile.imread(path)
+        if plane.shape != self.shape[1:]:
+            raise ValueError(f"{path}: plane shape {plane.shape} does not match the metadata {self.shape[1:]}.")
+        if self.transform is None:
+            return plane.astype(self.dtype, copy=False)
+        out = self.transform(plane)
+        if np.issubdtype(self.dtype, np.integer):
+            info = np.iinfo(self.dtype)
+            out = np.clip(np.rint(out), info.min, info.max)
+        return out.astype(self.dtype)
 
     def __repr__(self) -> str:
         first = next((self.path(z) for z in range(len(self.paths)) if self.paths[z] is not None), None)

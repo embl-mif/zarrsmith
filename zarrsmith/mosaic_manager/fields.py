@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from .tile import Tile
+from .tile import Tile, first_of_series
 
 logger = logging.getLogger("zarrsmith")
 
@@ -39,14 +39,17 @@ def connected_components(tiles: Sequence[Tile], tolerance: Optional[Sequence[flo
     Two tiles touch when their ``(z, y, x)`` boxes (:attr:`Tile.extent`) overlap or
     are less than ``tolerance`` apart on every axis (default: one voxel). Components
     are numbered by their position: by the ``y`` then ``x`` then ``z`` start of their
-    bounding box, so the numbering does not depend on the tile order.
+    bounding box, so the numbering does not depend on the tile order. A position
+    counts once, where it is first seen, and its tiles at later timepoints share its
+    component: stage drift over time neither joins nor splits fields.
     """
-    n = len(tiles)
-    if n == 0:
+    if len(tiles) == 0:
         return []
-    lo = np.array([t.extent[0] for t in tiles], float)
-    hi = np.array([t.extent[1] for t in tiles], float)
-    tol = np.array(tolerance if tolerance is not None else np.max([t.voxel_size for t in tiles], axis=0), float)
+    first = first_of_series(tiles)
+    positions = sorted(set(first))
+    lo = np.array([tiles[i].extent[0] for i in positions], float)
+    hi = np.array([tiles[i].extent[1] for i in positions], float)
+    tol = np.array(tolerance if tolerance is not None else np.max([tiles[i].voxel_size for i in positions], axis=0), float)
 
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import connected_components as _components
@@ -60,7 +63,8 @@ def connected_components(tiles: Sequence[Tile], tolerance: Optional[Sequence[flo
         starts[r] = lo[i] if r not in starts else np.minimum(starts[r], lo[i])
     order = sorted(starts, key=lambda r: (starts[r][1], starts[r][2], starts[r][0]))
     index = {r: k for k, r in enumerate(order)}
-    return [index[r] for r in roots]
+    component = {i: index[r] for i, r in zip(positions, roots)}
+    return [component[i] for i in first]
 
 
 def label_fields(tiles: Sequence[Tile], tolerance: Optional[Sequence[float]] = None) -> List[str]:

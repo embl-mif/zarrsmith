@@ -11,12 +11,13 @@ from napari.qt.threading import thread_worker
 from qtpy.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from zarrsmith import mosaic_manager as mos
+from zarrsmith.mosaic_manager.tile import series_keys
 from ._batch_csv import append_batch_csv
 from ._layout import compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_section, make_title
 from ._log import EmittingStream, make_log_appender
 from ._output_check import output_allowed
 
-#: Mosaic readers offered in the widget (Zeiss is a placeholder for now).
+#: Mosaic readers offered in the widget.
 MOSAIC_READERS = mos.MOSAIC_READERS
 
 #: Label used in the widgets for tiles without a group.
@@ -41,7 +42,7 @@ _CLICK_TOLERANCE = 4
 MOSAIC_BATCH_COLUMNS = [
     "input", "microscope", "output",
     "downsample", "projection", "blend", "channels", "groups", "fields", "tiles", "skip_tiles",
-    "midline_axis", "out_dtype", "read_workers", "temp_dir", "overwrite", "flatfield",
+    "timepoints", "reference_timepoint", "midline_axis", "out_dtype", "read_workers", "temp_dir", "overwrite", "flatfield",
     "chunk_size", "max_size(MB)", "scene_index", "zarr_format", "downscale_factor", "subset",
     "channel_colors", "channel_names", "num_levels", "shards", "shard_target_mb", "shard_exclude_axes",
     "drop_singleton", "num_workers",
@@ -89,13 +90,20 @@ def default_output(input_path: Path, projection: Optional[str], ds: Sequence[int
     else:
         kind = ("MIP" if projection == "max" else "SIP") + "_ds" + "-".join(str(v) for v in ds[1:])
     tag = f"_{field}" if field else ""
+    if is_czi(input_path):  # next to the file
+        return input_path.parent / f"{input_path.stem}_{kind}{tag}.ome.zarr"
     return input_path / f"{input_path.name}_{kind}{tag}.ome.zarr"
 
 
+def is_czi(path: Path) -> bool:
+    """A Zeiss acquisition is one file, the others are folders."""
+    return Path(path).suffix.lower() == ".czi"
+
+
 def folder_of(path: Path) -> Path:
-    """Dropped on the acquisition field: a file stands for its folder."""
+    """Dropped on the acquisition field: a file stands for its folder, except a ``.czi``."""
     path = Path(path)
-    return path.parent if path.is_file() else path
+    return path.parent if path.is_file() and not is_czi(path) else path
 
 
 def output_for_drop(path: Path, current: Path) -> Path:
@@ -170,9 +178,9 @@ def stack_id(mosaic, tile) -> str:
 
 def tile_footprints(mosaic) -> dict:
     """``{stack id: [[y0, x0], [y1, x1]]}``: the y/x rectangle covered by every stack
-    position (all its channels and sides), in sample coordinates."""
+    position (all its channels and sides), in sample coordinates, where it is first seen."""
     out = {}
-    for t in mosaic.tiles:
+    for t in mosaic.positions:
         key = stack_id(mosaic, t)
         lo, hi = np.array(t.extent[0][1:]), np.array(t.extent[1][1:])
         if key in out:
@@ -336,7 +344,7 @@ def picked_tiles(mosaic, tiles, picked: Optional[Sequence[str]]):
 def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: Sequence[str],
               skip_ids: Sequence[str], picked: Optional[Sequence[str]] = None,
               all_stacks: Sequence[str] = (), all_fields: Sequence[str] = (),
-              flatfield: Optional[bool] = None) -> dict:
+              flatfield: Optional[bool] = None, all_timepoints: Sequence[int] = ()) -> dict:
     """One ``zarrsmith fuse --batch`` CSV row from the fusion widget ``values``.
 
     ``picked`` are the stack ids picked on the tile map (``None``: all); the ``tiles``
@@ -344,10 +352,13 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
     column stays empty when ``values["fields"]`` is missing or the mosaic has a single
     field (``all_fields``); otherwise it names the fields, since an empty cell means
     the first field. ``flatfield`` is the reader's flat-field option (``None``: the
-    reader has none, and the column stays empty).
+    reader has none, and the column stays empty). The ``timepoints`` column stays empty
+    (every timepoint) when ``values["timepoints"]`` is missing or covers ``all_timepoints``.
     """
     groups = list(values["groups"])
     fields = list(values.get("fields") or ())
+    timepoints = list(values.get("timepoints") or ())
+    reference = values.get("reference_timepoint")
     return {
         "input": str(Path(input_path)),
         "microscope": microscope,
@@ -361,6 +372,8 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
         "fields": "" if not fields or (len(all_fields) == 1 and set(fields) >= set(all_fields)) else " ".join(fields),
         "tiles": "" if picked is None or set(picked) >= set(all_stacks) else " ".join(picked),
         "skip_tiles": " ".join(skip_ids),
+        "timepoints": "" if not timepoints or set(timepoints) >= set(all_timepoints) else " ".join(str(t) for t in timepoints),
+        "reference_timepoint": "" if reference is None else str(reference),
         "num_levels": str(values["levels"]),
         "read_workers": str(values["workers"]),
         "overwrite": str(bool(values["overwrite"])).lower(),
@@ -384,6 +397,13 @@ def apply_display_windows(layers, windows, dtype) -> None:
             info = np.iinfo(np.dtype(dtype))
             layer.contrast_limits_range = (info.min, info.max)
         layer.contrast_limits = window
+
+
+def show_first_timepoint(viewer, axes: str) -> None:
+    """Put the time slider of ``viewer`` on the first timepoint, for a dataset with ``axes``
+    just added (napari starts the first layer of a viewer in the middle of every axis)."""
+    if "t" in axes:
+        viewer.dims.set_current_step(viewer.dims.ndim - len(axes.replace("c", "")), 0)
 
 
 @thread_worker
@@ -489,14 +509,15 @@ def mosaic_widget():
     @magicgui(
         call_button="Load tiles",
         microscope={"choices": list(MOSAIC_READERS)},
-        input_path={"widget_type": "FileEdit", "mode": "d", "label": "Acquisition folder"},
+        input_path={"widget_type": "FileEdit", "mode": "d", "label": "Acquisition",
+                    "tooltip": "Acquisition folder (Luxendo, Opera) or .czi file (Zeiss)."},
         flatfield={"label": "Flat-field correction (Opera)",
                    "tooltip": "Correct the tiles with the flat-field profiles stored by Harmony, "
                               "as in the images stitched by Harmony."},
     )
     def load_widget(microscope="luxendo", input_path: Path = Path(), flatfield: bool = True):
-        if not input_path or not Path(input_path).is_dir():
-            print("Select the acquisition folder first.")
+        if not input_path or not (Path(input_path).is_dir() or (is_czi(input_path) and Path(input_path).is_file())):
+            print("Select the acquisition folder or .czi file first.")
             return
         _capture()
         print(f"Scanning {input_path} ...")
@@ -524,9 +545,19 @@ def mosaic_widget():
 
         worker.start()
 
+    @load_widget.microscope.changed.connect
+    def _input_mode(microscope):
+        load_widget.input_path.mode = "r" if microscope == "zeiss" else "d"  # what the browse button picks
+
     def _populate(mosaic, input_path: Path):
         fuse_widget.overwrite.value = False  # asked for one output, not for the next one
         channels, groups, fields = mosaic.channels, group_labels(mosaic), mosaic.fields
+        timepoints = mosaic.timepoints
+        fuse_widget.timepoints.choices = timepoints
+        fuse_widget.timepoints.value = timepoints
+        fuse_widget.reference_timepoint.choices = timepoints
+        fuse_widget.reference_timepoint.value = timepoints[0]
+        fuse_widget.timepoints.visible = fuse_widget.reference_timepoint.visible = len(timepoints) > 1
         for w in (show_widget, fuse_widget):
             w.channels.choices = channels
             w.groups.choices = groups
@@ -538,6 +569,9 @@ def mosaic_widget():
         fuse_widget.blend.value = "sigmoid"  # smooth between tiles and between groups
         lo, hi = mosaic.bounding_box()
         print(f"{len(mosaic.tiles)} tiles, channels {channels}, groups {groups}, fields {fields}")
+        if len(timepoints) > 1:
+            print(f"{len(timepoints)} timepoints: {timepoints}. Shown tiles have a time slider, starting on "
+                  f"timepoint {timepoints[0]}; every timepoint is fused with the geometry of the reference timepoint.")
         if len(fields) > 1:
             print(f"{len(fields)} separate fields (groups of touching tiles); {fields[0]} is selected, "
                   "fields are fused one at a time:\n" + field_summary(mosaic))
@@ -586,7 +620,11 @@ def mosaic_widget():
             viewer.reset_view()
             new = [c for c in dict.fromkeys(t.channel for t in tiles) if c not in limits]
             hint = f"; {', '.join(new)} start(s) at the full data range: set the contrast of one tile" if new else ""
-            print(f"Showing {len(tiles)} tiles as separate layers (contrast linked per channel{hint}).")
+            timepoints = sorted({t.timepoint for t in tiles})
+            what = (f"{len(tiles)} tiles" if len(timepoints) < 2 else
+                    f"{len(set(series_keys(tiles)))} tile positions over {len(timepoints)} timepoints "
+                    f"(from timepoint {timepoints[0]}, scroll with the T slider)")
+            print(f"Showing {what} as separate layers (contrast linked per channel{hint}).")
         except Exception as e:
             print(f"Showing tiles failed: {e}")
         finally:
@@ -600,6 +638,11 @@ def mosaic_widget():
         fields={"widget_type": "Select", "choices": [], "allow_multiple": True,
                 "tooltip": "Field to fuse: fields are groups of touching tiles. Fields are fused one at a "
                            "time; tiles from several fields are not fused."},
+        timepoints={"widget_type": "Select", "choices": [], "allow_multiple": True,
+                    "tooltip": "Timepoints to fuse. More than one gives an output with a t axis."},
+        reference_timepoint={"label": "Reference timepoint", "widget_type": "ComboBox", "choices": [],
+                             "tooltip": "Timepoint whose tiles set the geometry (output size, tile positions, "
+                                        "transitions): every timepoint is fused with it."},
         tiles_to_fuse={"label": "Tiles to fuse", "choices": list(TILE_MODES), "value": "all tiles",
                        "tooltip": "Tiles whose layer is hidden (or not selected) are not read and stay blank; "
                                   "the output keeps its full size. Tiles that are not shown are fused."},
@@ -620,6 +663,8 @@ def mosaic_widget():
         channels=(),
         groups=(),
         fields=(),
+        timepoints=(),
+        reference_timepoint=None,
         tiles_to_fuse="all tiles",
         skip_all_channels=False,
         projection="none (3D)",
@@ -640,8 +685,10 @@ def mosaic_widget():
                              workers=workers, overwrite=overwrite)
         skip = _skipped_tiles()
         kwargs["skip"] = skip
+        kwargs.update(_time_options())
         try:
-            plan = mos.plan_fusion(tiles, **{k: kwargs[k] for k in ("channels", "projection", "blend", "ds", "skip")})
+            plan = mos.plan_fusion(tiles, **{k: kwargs[k] for k in ("channels", "projection", "blend", "ds", "skip")},
+                                   **_time_options())
         except ValueError as e:
             print(f"Cannot fuse: {e}")
             return
@@ -657,7 +704,8 @@ def mosaic_widget():
             return
 
         print(f"Fusing {len(plan.tiles)} tiles into {out}: {plan.summary()}")
-        worker = _fuse_worker(plan.tiles, out, kwargs)
+        # all the tiles, not plan.tiles: skipped tiles and the reference timepoint set the geometry
+        worker = _fuse_worker(tiles, out, kwargs)
         _busy(True)
 
         @worker.returned.connect
@@ -672,6 +720,7 @@ def mosaic_widget():
                     tile_map.visible = False
                 zm.visualize(viewer=viewer)
                 apply_display_windows(viewer.layers, mos.display_windows(out), zm.metadata["dtype"])
+                show_first_timepoint(viewer, "".join(zm.metadata["axes"]))
 
         @worker.errored.connect
         def _failed(err):
@@ -700,7 +749,15 @@ def mosaic_widget():
             blend=v["blend"],
             channels=list(v["channels"]),
             skip=_skipped_tiles(),
+            **_time_options(),
         )
+
+    def _time_options() -> dict:
+        """Timepoint options of the fusion (none for a mosaic with a single timepoint)."""
+        if len(state["mosaic"].timepoints) < 2:
+            return {}
+        return {"timepoints": list(fuse_widget.timepoints.value),
+                "reference_timepoint": fuse_widget.reference_timepoint.value}
 
     def _skip_ids() -> list:
         mode = TILE_MODES[fuse_widget.tiles_to_fuse.value]
@@ -735,8 +792,8 @@ def mosaic_widget():
             fuse_widget.output_path.value = new
             state["auto_output"] = new
 
-    for name in ("channels", "groups", "fields", "tiles_to_fuse", "skip_all_channels", "projection", "blend",
-                 "ds_z", "ds_y", "ds_x"):
+    for name in ("channels", "groups", "fields", "timepoints", "reference_timepoint", "tiles_to_fuse",
+                 "skip_all_channels", "projection", "blend", "ds_z", "ds_y", "ds_x"):
         getattr(fuse_widget, name).changed.connect(_update_plan)
     if viewer is not None:
         viewer.layers.selection.events.changed.connect(_update_plan)
@@ -753,6 +810,7 @@ def mosaic_widget():
         values = {name: getattr(fuse_widget, name).value for name in
                   ("channels", "groups", "fields", "projection", "blend", "ds_z", "ds_y", "ds_x",
                    "levels", "workers", "overwrite")}
+        values.update(_time_options())
         try:
             plan = _current_plan()
         except ValueError:
@@ -767,7 +825,7 @@ def mosaic_widget():
                         output=fuse_widget.output_path.value, values=values,
                         all_groups=group_labels(mosaic), skip_ids=skip_ids, picked=_picked(),
                         all_stacks={stack_id(mosaic, t) for t in mosaic.tiles}, all_fields=mosaic.fields,
-                        flatfield=state.get("flatfield"))
+                        flatfield=state.get("flatfield"), all_timepoints=mosaic.timepoints)
         _capture()  # print into this widget's log, not wherever sys.stdout points
         try:
             if not output_allowed(row["output"], overwrite=values["overwrite"], sources=[state["input_path"]]):
@@ -796,6 +854,9 @@ def mosaic_widget():
         w.fields.native.setMaximumHeight(48)
         w.native.layout().setSpacing(2)
         w.native.layout().setContentsMargins(0, 0, 0, 0)
+
+    fuse_widget.timepoints.native.setMaximumHeight(48)
+    fuse_widget.timepoints.visible = fuse_widget.reference_timepoint.visible = False  # until a timelapse is loaded
 
     fuse_button = fuse_widget._call_button.native
     fuse_widget.native.layout().removeWidget(fuse_button)

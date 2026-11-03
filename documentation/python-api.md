@@ -116,7 +116,7 @@ z.write_image_region(
 
 ```python
 z = mm.ZarrManager("input.zarr")
-out = z.correct_chromatic_shift("corrected.zarr", reference_channel=0)
+out = z.correct_chromatic_shift("corrected.zarr", reference_channel=0, timepoint=0)
 ```
 
 See [Chromatic shift correction](chromatic-shift.md) for how the shift is measured, the options and how to check the result.

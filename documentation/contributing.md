@@ -91,7 +91,7 @@ A reader can be tested without real data by writing a small synthetic dataset in
 
 ### Implement the reader
 
-Subclass `MosaicManager` (exported from `zarrsmith.mosaic_manager`) and implement a single hook, `_scan()`, which returns one `Tile` per acquired tile. The base constructor calls it, stops with an error when it returns no tile, and refuses mosaics with more than one timepoint (not supported yet).
+Subclass `MosaicManager` (exported from `zarrsmith.mosaic_manager`) and implement a single hook, `_scan()`, which returns one `Tile` per acquired tile. The base constructor calls it and stops with an error when it returns no tile. A mosaic with several timepoints returns the tiles of all of them.
 
 ```python
 from zarrsmith.mosaic_manager import H5Array, MosaicManager, Tile
@@ -120,14 +120,14 @@ A `Tile` describes one stack and where it sits in the sample:
 | `channel` | dye name; tiles with the same name are fused into one output channel |
 | `group` | optional label of tiles that are fused among themselves first, such as the `L`/`R` illumination side; `blend="sigmoid"` and `blend="midline"` then join the groups across their overlap |
 | `timepoint` | timepoint index (`0` for a single timepoint) |
-| `attrs` | free-form reader metadata (stack name, grid position, ...) |
+| `attrs` | free-form reader metadata (stack name, grid position, ...); `stack` also matches the tiles of a position across timepoints |
 
 Things to get right:
 
 - **Keep loading light.** `_scan()` should read metadata only, never pixel data. Pass `shape` and `dtype` to `H5Array` when the metadata knows them, so no file has to be opened: this matters on network drives (`LuxendoMosaicManager` reads its JSON files in parallel and a single `.h5` header; `OperaMosaicManager` reads its index in one pass and a single TIFF header).
 - **Make tile data picklable for parallel fusion.** `fuse_tiles(workers > 1)` reads tiles in worker processes when the data allows it. `H5Array` opens the file on every read, holds no handle and sets `picklable = True`; use it, or the same pattern, for file-backed tiles. Other data falls back to threads.
 - **Close what you open.** Append open file handles to `self._open_files`; `close()` and the context manager close them.
-- **Name tiles stably.** `tile_id()` (`<channel>/<stack>`) is used by `skip`, the CSV batch `tiles` column and the napari tile map. Set `attrs["stack"]` to the vendor's stack name; without it the id falls back to the tile's index, which changes with the scan order.
+- **Name tiles stably.** `tile_id()` (`<channel>/<stack>`) is used by `skip`, the CSV batch `tiles` column and the napari tile map. Set `attrs["stack"]` to the vendor's stack name, the same at every timepoint: fusion uses it to give all timepoints the geometry of the reference timepoint. Without it the id falls back to the tile's index, which changes with the scan order, and tiles are matched across timepoints by their order, which breaks when a timepoint misses a tile.
 
 `visualize()`, `fuse()`, `plan_fusion()`, `zarrsmith fuse` and the napari widget then work unchanged.
 
@@ -140,7 +140,7 @@ Things to get right:
 
 Reader options other than the path (such as `flatfield`) are passed by the command line and the napari widget only to readers whose constructor accepts them (`reader_options()`).
 
-`ZeissMosaicManager` is a registered placeholder whose `_scan()` raises `NotImplementedError`; implementing `_scan()` is all that is left for it. For data stored as one file per plane, `TiffStackArray` (used by `OperaMosaicManager`) is the counterpart of `H5Array`; its optional `transform` corrects every plane when it is read (e.g. a flat-field).
+For data stored as one file per plane, `TiffStackArray` (used by `OperaMosaicManager`) is the counterpart of `H5Array`, and `CziTileArray` (used by `ZeissMosaicManager`) for planes of one CZI file: both build on `PlaneStackArray`, which you can subclass for other formats. The optional `transform` of `TiffStackArray` corrects every plane when it is read (e.g. a flat-field).
 
 ### Test it
 

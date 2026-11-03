@@ -257,7 +257,7 @@ def _add_zarr_arguments(parser):
     parser.add_argument(
         '-si', '--scene_index',
         required= False,
-        help= 'Scene index for .czi and .vsi files.',
+        help= 'Scene index for .czi and .vsi files. Default: the first scene.',
         type= int
     )
     parser.add_argument(
@@ -384,6 +384,16 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
         help='Tiles to leave blank (not read; the output keeps its full size): "channel/stack" ids such as '
              'cFos-647/1-x00-y00, or a stack such as 1-x00-y00 for every channel.',
     )
+    parser.add_argument(
+        '-tp', '--timepoints', nargs='+', type=int,
+        help='Timepoints to fuse, as listed when the mosaic is loaded. More than one gives an output with a '
+             't axis. Default: all.',
+    )
+    parser.add_argument(
+        '-rtp', '--reference_timepoint', type=int,
+        help='Timepoint whose tiles set the geometry (output size, tile positions, transitions): every '
+             'timepoint is fused with it. It need not be among --timepoints. Default: the first timepoint.',
+    )
     parser.add_argument('-ma', '--midline_axis', choices=['x', 'y', 'z'], default='x',
                         help='Axis along which blend=midline/sigmoid separates the groups.')
     parser.add_argument('-od', '--out_dtype', help='Output dtype, e.g. uint16 or float32. Default: input dtype '
@@ -404,13 +414,13 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
 def _adapt_zarr_help_for_mosaic(parser):
     """Reword the shared output options where they mean something specific for a mosaic."""
     helps = {
-        '--chunk_size': 'Output chunk size in C Z Y X (C Y X for projections) order.',
+        '--chunk_size': 'Output chunk size in C Z Y X (C Y X for projections) order, after T for several timepoints.',
         '--max_size': 'Max output chunk size in MB. Ignored if --chunk_size is provided.',
-        '--scene_index': 'Scene index, for Zeiss mosaics (not implemented yet).',
+        '--scene_index': 'Scene of a Zeiss mosaic to load (default: all of them, one field per scene).',
         '--channel_names': 'Names of the output channels. Example: -cn autofluo cfos',
         '--subset': 'Crop the fused output and/or select channels: axis=selection pairs separated by semicolons, '
                     'e.g. "z=0:100;y=200:900;c=1". z/y/x are in output voxels (after --downsample); '
-                    'slices may not have a step.',
+                    'slices may not have a step. Timepoints are chosen with --timepoints.',
     }
     for action in parser._actions:
         for flag, text in helps.items():
@@ -454,6 +464,7 @@ FUSE_HELP = """\
       zarrsmith fuse -i /path/to/2026-10-14_103957 -z out_MIP.ome.zarr -rds 1 8 8 -p max -b midline
       zarrsmith fuse -i /path/to/2026-10-14_103957 -z field1_MIP.ome.zarr -rds 1 8 8 -p max -f field1 -st 3-x01-y00
       zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_MIP.ome.zarr -p max -f A3_field1
+      zarrsmith fuse -i /path/to/timelapse -z out_t.ome.zarr -rds 4 8 8 -tp 0 1 2 3 -rtp 0
       zarrsmith fuse --batch mosaics.csv
 
     Tiles that touch or overlap form a field (field0, field1, ... ordered by position; for Opera plates
@@ -462,17 +473,22 @@ FUSE_HELP = """\
     are never fused together: an error is printed and the fusion is not done (in a batch, the other
     rows still run). Opera tiles are flat-field corrected as in Harmony, unless -nff is given.
 
+    A mosaic with several timepoints gives an output with a t axis. The geometry comes from one
+    reference timepoint (-rtp, default: the first) and every timepoint is fused with it. -tp selects
+    the timepoints to fuse.
+
     The --batch CSV file has the columns input | microscope | output, plus any of the output columns of
     `zarrsmith convert --batch` (chunk_size | max_size(MB) | zarr_format | downscale_factor | subset | channel_colors |
     channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | drop_singleton | num_workers |
     overwrite)
     and of the fusion columns
-    downsample | projection | blend | sigmoid_steepness | channels | groups | fields | tiles | skip_tiles | midline_axis |
-    out_dtype | read_workers | temp_dir | flatfield (true/false, Opera only, default true), e.g.
+    downsample | projection | blend | sigmoid_steepness | channels | groups | fields | tiles | skip_tiles | timepoints |
+    reference_timepoint | midline_axis | out_dtype | read_workers | temp_dir |
+    flatfield (true/false, Opera only, default true), e.g.
       input                  | microscope | output                 | downsample | projection | blend   | num_levels
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_3D.zarr  | 4 8 8      | none       | sigmoid | 3
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_MIP.zarr | 1 8 8      | max        | midline |
-    Leave a cell empty for the default. Lists (channels, groups, fields, tiles, skip_tiles, channel_names...) are space
+    Leave a cell empty for the default. Lists (channels, groups, fields, tiles, skip_tiles, timepoints, channel_names...) are space
     separated.
     The napari "Mosaic Fusion" widget writes such files with "Append to batch CSV".
 """
@@ -533,7 +549,9 @@ def _add_chromatic_shift_arguments(parser):
                           'from an earlier run.')
     est.add_argument('-rc', '--reference_channel', default='0',
                      help='Reference channel, as an index or a channel name.')
-    est.add_argument('-tp', '--timepoint', default=argparse.SUPPRESS, type=int, help='Timepoint used for the estimate. Default: 0.')
+    est.add_argument('-tp', '--timepoint', default=argparse.SUPPRESS, type=int,
+                     help='Timepoint the shift is measured on, an index along the t axis. Every timepoint is '
+                          'corrected with the same shift. Default: 0.')
     est.add_argument('-mxs', '--max_shift', default=argparse.SUPPRESS, type=float,
                      help='Largest shift searched, in the Z unit. Default: 10%% of the stack depth.')
     est.add_argument('-cl', '--coarse_level', default=argparse.SUPPRESS, type=int,
@@ -598,7 +616,7 @@ def _add_fuse_microscope(parser):
         choices=['luxendo', 'opera', 'zeiss'],
         type=str,
         help='Microscope of the mosaic. Leave empty to auto-detect (raw Luxendo acquisitions, Opera Harmony '
-             'exports with Images/Index.xml). Zeiss mosaics are not implemented yet.',
+             'exports with Images/Index.xml, Zeiss .czi files).',
     )
 
 

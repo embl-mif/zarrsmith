@@ -46,27 +46,30 @@ def _channel_entries(flatfield: bool) -> str:
     return "\n".join(out)
 
 
-def write_export(root, flatfield_in_index: bool = True, plate=(8, 12)):
-    """A tiny Harmony export: ``root/Images/Index.xml`` and one TIFF per plane."""
+def write_export(root, flatfield_in_index: bool = True, plate=(8, 12), timepoints=(1,), z_drift=0.0):
+    """A tiny Harmony export: ``root/Images/Index.xml`` and one TIFF per plane. Every extra
+    timepoint adds 100 to the planes and moves them by ``z_drift`` metres."""
     images = root / "Images"
     images.mkdir(parents=True)
     ids, entries = [], []
     for row, col, field, x, y in FIELDS:
-        for p, z in enumerate(PLANES_Z, start=1):
-            for ch in (1, 2):
-                url = f"r{row:02d}c{col:02d}f{field:02d}p{p:02d}-ch{ch}sk1fk1fl1.tiff"
-                failed = (row, col, field, p, ch) == FAILED
-                if not failed:
-                    tifffile.imwrite(images / url, raw_plane(field, p, ch))
-                image_id = f"{row:02d}{col:02d}K1F{field}P{p}R{ch}"
-                ids.append(f'<Image id="{image_id}" />')
-                entries.append(
-                    f'<Image Version="1"><id>{image_id}</id><State>{"Failed" if failed else "Ok"}</State>'
-                    f"<URL>{url}</URL><Row>{row}</Row><Col>{col}</Col><FieldID>{field}</FieldID>"
-                    f"<PlaneID>{p}</PlaneID><TimepointID>1</TimepointID><ChannelID>{ch}</ChannelID>"
-                    f'<PositionX Unit="m">{x}</PositionX><PositionY Unit="m">{y}</PositionY>'
-                    f'<PositionZ Unit="m">{z}</PositionZ><AbsPositionZ Unit="m">{0.1 + z + field * 1e-5}</AbsPositionZ>'
-                    "</Image>")
+        for t in timepoints:
+            for p, z in enumerate(PLANES_Z, start=1):
+                for ch in (1, 2):
+                    url = f"r{row:02d}c{col:02d}f{field:02d}p{p:02d}-ch{ch}sk{t}fk1fl1.tiff"
+                    failed = (row, col, field, p, ch) == FAILED
+                    if not failed:
+                        tifffile.imwrite(images / url, raw_plane(field, p, ch) + 100 * (t - 1))
+                    image_id = f"{row:02d}{col:02d}K{t}F{field}P{p}R{ch}"
+                    ids.append(f'<Image id="{image_id}" />')
+                    z_t = z + (t - 1) * z_drift
+                    entries.append(
+                        f'<Image Version="1"><id>{image_id}</id><State>{"Failed" if failed else "Ok"}</State>'
+                        f"<URL>{url}</URL><Row>{row}</Row><Col>{col}</Col><FieldID>{field}</FieldID>"
+                        f"<PlaneID>{p}</PlaneID><TimepointID>{t}</TimepointID><ChannelID>{ch}</ChannelID>"
+                        f'<PositionX Unit="m">{x}</PositionX><PositionY Unit="m">{y}</PositionY>'
+                        f'<PositionZ Unit="m">{z_t}</PositionZ><AbsPositionZ Unit="m">{0.1 + z_t + field * 1e-5}</AbsPositionZ>'
+                        "</Image>")
     plates = (f"<Plates><Plate><PlateID>plate</PlateID><PlateRows>{plate[0]}</PlateRows>"
               f"<PlateColumns>{plate[1]}</PlateColumns></Plate></Plates>\n") if plate else ""
     (images / "Index.xml").write_text(

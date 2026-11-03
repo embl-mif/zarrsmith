@@ -748,17 +748,19 @@ class ZarrManager(MicroscopeManager):
     def estimate_chromatic_shift(
         self,
         reference_channel: int = 0,
+        timepoint: int = 0,
         **kwargs,
     ) -> Dict[str, Any]:
         """Estimate the axial (Z) chromatic shift of each channel of the raw image.
 
         The shift is measured on the sample's Z-facing surfaces (top and
         bottom), first on a coarse level and then on crops of a finer level.
-        Keyword arguments are forwarded to
+        ``reference_channel`` stays in place; ``timepoint`` (an index along the
+        ``t`` axis) is the one measured, and :meth:`apply_chromatic_shift` applies
+        the result to every timepoint. Keyword arguments are forwarded to
         :func:`~zarrsmith.utils.chromatic_shift.estimate_chromatic_shift`
-        (``timepoint``, ``coarse_level``, ``refine_level``, ``max_shift``,
-        ``n_regions``, ``crop_yx``, ``min_z_normal``, ``min_correlation``,
-        ``threshold``).
+        (``coarse_level``, ``refine_level``, ``max_shift``, ``n_regions``,
+        ``crop_yx``, ``min_z_normal``, ``min_correlation``, ``threshold``).
 
         Returns a JSON-serializable report whose ``shifts`` entry holds the
         correction per channel in the physical unit of the Z axis; it can be
@@ -770,6 +772,7 @@ class ZarrManager(MicroscopeManager):
             self.raw.data,
             self.raw.metadata,
             reference_channel=reference_channel,
+            timepoint=timepoint,
             **kwargs,
         )
 
@@ -795,6 +798,7 @@ class ZarrManager(MicroscopeManager):
         shifts
             One Z shift per channel in physical units (positive moves content
             towards higher Z), or the report of :meth:`estimate_chromatic_shift`.
+            Every timepoint gets the same shifts.
         extent
             ``"union"`` (default) grows Z so no channel loses data,
             ``"same"`` keeps the input size and ``"intersection"`` crops to
@@ -844,6 +848,7 @@ class ZarrManager(MicroscopeManager):
         path: str | Path,
         reference_channel: int = 0,
         *,
+        timepoint: int = 0,
         extent: str = "union",
         order: int = 1,
         include_groups: bool = True,
@@ -856,15 +861,16 @@ class ZarrManager(MicroscopeManager):
         """Estimate the Z chromatic shift and write the corrected store in one go.
 
         Combines :meth:`estimate_chromatic_shift` (``estimate_kwargs``) and
-        :meth:`apply_chromatic_shift`. The estimate report is stored in the
-        output root attribute ``zarrsmith_chromatic_shift``.
+        :meth:`apply_chromatic_shift`: the shift measured at ``timepoint`` is
+        applied to every timepoint. The estimate report is stored in the output
+        root attribute ``zarrsmith_chromatic_shift``.
         """
         from ..utils.output_path import output_refusal
 
         refusal = output_refusal(path, overwrite=overwrite, sources=[self.path])
         if refusal is not None:
             raise FileExistsError(refusal)
-        report = self.estimate_chromatic_shift(reference_channel, **estimate_kwargs)
+        report = self.estimate_chromatic_shift(reference_channel, timepoint, **estimate_kwargs)
         return self.apply_chromatic_shift(
             path,
             report,
