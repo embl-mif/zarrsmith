@@ -8,6 +8,7 @@ from qtpy.QtWidgets import QWidget, QVBoxLayout
 from skimage.color import rgb2gray
 
 from ._layout import compose_dock
+from ._output_check import warn_user
 
 
 # Define functions that will be used during the export process. 
@@ -64,6 +65,20 @@ def export_contrast_settings(viewer, output_path="contrast_settings.txt"):
 				f.write(f"{layer.name}\t{layer.__class__.__name__}\tN/A\n")
 
 
+def export_stem(layer, view_id):
+    """Start of the name of the files exported for ``layer``, never the name of its source."""
+    name = os.path.basename(layer._source.path)
+    name = name.replace('.zarr', '') if '.zarr' in name else os.path.splitext(name)[0]
+    return name + '-Org-' + view_id
+
+
+def export_files(layers, view_id):
+    """The files of one export: a png per layer, then the merged png, the report and the composite tif."""
+    stem = export_stem(layers[-1], view_id)
+    channels = [export_stem(layer, view_id) + '_' + str(layer) + '.png' for layer in layers]
+    return channels, stem + '_merged.png', stem + '.txt', stem + '_composite.tif'
+
+
 # Define the main function that will be called when the user clicks the "Export Current View" button in the Napari widget. This function will handle exporting the current view of the Napari viewer, including individual channel views, a merged view, and a composite TIFF file.
 def export_widget():
     """Simple Napari widget to export the current view.
@@ -73,27 +88,36 @@ def export_widget():
 
     #global viewer
 
-    @magicgui(call_button="Export Current View",)
-    def _export_widget(View_ID="View-1"):
+    @magicgui(
+        call_button="Export Current View",
+        overwrite={"label": "Overwrite files", "widget_type": "CheckBox", "value": False},
+    )
+    def _export_widget(View_ID="View-1", overwrite=False):
 
         viewer = current_viewer()
 
         # Change to directory where image is located
         os.chdir(os.path.dirname(viewer.layers[0].source.path))
 
+        channel_files, merged_name, report_name, composite_name = export_files(viewer.layers, View_ID)
+        existing = [f for f in (*channel_files, merged_name, report_name, composite_name) if os.path.exists(f)]
+        if existing and not overwrite:
+            warn_user(f"Not exporting: {', '.join(existing)} already exist(s) in {os.getcwd()}. "
+                      "Tick 'Overwrite files' or change View_ID.")
+            return
+        if existing:
+            warn_user(f"Replacing {', '.join(existing)} in {os.getcwd()}.")
+
         input_settings = get_channel_adjustment(viewer)
 
         # Export current channel views.
-        for layer in viewer.layers:
+        for layer, image_name in zip(viewer.layers, channel_files):
 
             # hide all layers
             hide_layers(viewer)
 
             # show only current layer
             layer.visible = True
-
-            # get basename
-            image_name = os.path.basename(layer._source.path).replace('.zarr','-Org-'+View_ID+'_'+str(layer)+'.png')
 
             # take screenshot of current channel view
             img = viewer.screenshot(image_name, canvas_only=True)
@@ -102,11 +126,9 @@ def export_widget():
         show_layers(viewer)
 
         # take screenshot of all channels merged
-        merged_name = image_name.replace('_'+str(layer)+'.png', '_merged.png')
         viewer.screenshot(merged_name, canvas_only=True)
 
         # Export report
-        report_name = merged_name.replace('_merged.png','.txt')
         export_contrast_settings(viewer, report_name)
 
         # Export not adjusted 3D composite
@@ -150,7 +172,7 @@ def export_widget():
         pixels_per_cm = 10000 / pixel_size_um  # 1 cm = 10,000 µm
 
         tiff.imwrite(
-            merged_name.replace('_merged.png', '_composite.tif'),
+            composite_name,
             stack,
             imagej=True,
             resolution=(pixels_per_cm, pixels_per_cm),
@@ -169,5 +191,7 @@ def export_widget():
     layout.addWidget(_export_widget.native)
     layout.addStretch(1)
 
-    return compose_dock(content)
+    dock = compose_dock(content)
+    dock.export_widget = _export_widget  # exposed for tests
+    return dock
 

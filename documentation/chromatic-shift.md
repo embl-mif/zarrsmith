@@ -109,7 +109,7 @@ For example, with level 0 at 2 µm and a pyramid that halves Z at every level, t
 | `order` | `1` (default), `0` | linear interpolation; or round each shift to whole planes, which leaves voxel values untouched |
 | `include_groups` | `True` | also shift image subgroups that have the same channels |
 | `include_labels` | `True` | also write labels; they follow the reference channel and are only padded or cropped |
-| `overwrite`, `num_workers`, `progress` | | as for [`to_zarr`](advanced.md) |
+| `overwrite`, `num_workers`, `progress` | | as for [`to_zarr`](advanced.md); `overwrite` defaults to `False` |
 
 The added or removed planes are rounded to whole planes of the coarsest level, so every pyramid level stays aligned (each level is shifted directly, keeping the input's own downsampling). Planes added below the data move the image origin; ZarrSmith does not write translations in the NGFF metadata, so the output's root attribute `zarrsmith_chromatic_shift` records it instead, together with what was applied:
 

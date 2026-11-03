@@ -35,6 +35,7 @@ import zarr
 
 from ..utils.metadata import ChannelInfo, build_metadata
 from ..utils.ngff import ZarrWriteConfig
+from ..utils.output_path import output_refusal
 from .fields import check_single_field, fields_of, multiple_fields_message
 from .tile import Tile
 
@@ -878,7 +879,9 @@ def fuse_tiles(
         goes from 10% to 90% over the central ``1 - 2 / (1 + 9 ** (1 / s))``
         of the overlap: about 27% for the default 4, 14% for 8, 50% for 2.
     overwrite
-        Replace ``out`` if it exists.
+        Replace ``out`` if it is an existing Zarr store (with a warning, once the
+        fusion has succeeded). Otherwise an existing non-empty ``out`` raises
+        ``FileExistsError``.
     name
         Image name stored in the metadata.
     temp_dir
@@ -940,11 +943,11 @@ def fuse_tiles(
     logger.info("Fusing %d tiles: %s, blend=%s, projection=%s", len(plan.tiles), plan.summary(), blend, projection)
 
     out = Path(out)
-    if out.exists():
-        if not overwrite:
-            raise FileExistsError(f"{out} exists; pass overwrite=True to replace it.")
-        shutil.rmtree(out)
     tmp = Path(temp_dir or out.parent) / f".{out.name}.level0.zarr"
+    # An existing output is only replaced at the end, once the fusion has succeeded.
+    refusal = output_refusal(out, overwrite=overwrite, sources=[tmp])
+    if refusal is not None:
+        raise FileExistsError(refusal)
     if tmp.exists():
         shutil.rmtree(tmp)
 
@@ -1008,7 +1011,7 @@ def fuse_tiles(
         dataset = ArrayManager(da.from_zarr(str(tmp)).rechunk(chunks), metadata)
         dataset.build_pyramid(num_levels=max(1, int(levels)),
                               downscale_factor=_spatial_factor(downscale_factor, flat))
-        dataset.to_zarr(str(out), overwrite=True, progress=progress, **write_options)
+        dataset.to_zarr(str(out), overwrite=overwrite, progress=progress, **write_options)
         # Sensible display range for viewers (the writer's default is the whole dtype range).
         _write_display_windows(out, windows)
         logger.info("Display window per channel: %s", windows)

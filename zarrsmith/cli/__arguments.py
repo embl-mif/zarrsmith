@@ -27,15 +27,6 @@ def valid_input_path(x):
     return None
 
 
-def valid_output_path(x):
-    """Validate that an output path does not already point to an existing file or directory."""
-    if x is not None:
-        if (not os.path.isdir(x)) and (not os.path.isfile(x)):
-            return os.path.abspath(x)
-        raise argparse.ArgumentTypeError(f'Output path {x} is not a valid directory')
-    return None
-
-
 def parse_color(value: str) -> str:
     """A CLI color (6-digit hex code, ``#`` optional, or a matplotlib color name) as ``RRGGBB``;
     see :func:`zarrsmith.utils.colors.parse_color`."""
@@ -350,6 +341,10 @@ def _add_zarr_arguments(parser):
     )
 
 
+_OVERWRITE_HELP = ('Replace an existing output. Without it a non-empty output is refused. Only a Zarr store '
+                   'is ever replaced: any other non-empty folder is refused in all cases.')
+
+
 def _add_mosaic_arguments(parser, legacy: bool = False):
     """Fusion options of ``fuse`` (``legacy``: the old ``mosaic2zarr`` spelling of --overwrite)."""
     parser.add_argument(
@@ -403,7 +398,7 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
         parser.add_argument('-ow', '--overwrite', type=parse_bool, default=False,
                             help='Replace an existing output ("true" or "false").')
     else:
-        parser.add_argument('-ow', '--overwrite', action='store_true', help='Replace an existing output.')
+        parser.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
 
 
 def _adapt_zarr_help_for_mosaic(parser):
@@ -433,7 +428,8 @@ CONVERT_HELP = """\
 
     The --batch CSV file has the columns input | microscope | output, plus any of
     chunk_size | max_size(MB) | scene_index | zarr_format | downscale_factor | subset | channel_colors |
-    channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | drop_singleton | num_workers
+    channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | drop_singleton | num_workers |
+    overwrite
     with the same meaning as the options below, e.g.
       input            | microscope | output          | chunk_size    | zarr_format | downscale_factor | subset             | num_levels | shards
       /path/to/input_1 | opera      | /path/to/zarr_1 | 1 1 2 512 512 | 3           | 1 2 2            | y=10:100:2;x=20:80 | 3          | auto
@@ -443,6 +439,8 @@ CONVERT_HELP = """\
     shard_target_mb only applies to shards=auto (default 1024). shard_exclude_axes defaults to "t c"
     ("none" lets every axis merge). drop_singleton (true/false, default true) removes singleton t/c/z axes.
     num_workers is the number of write threads (default: half of the available cores, capped at 8).
+    overwrite (true/false, default false) replaces an existing output; a row whose output is in the way is
+    skipped with a warning, and the other rows still run.
 """
 
 FUSE_HELP = """\
@@ -466,10 +464,11 @@ FUSE_HELP = """\
 
     The --batch CSV file has the columns input | microscope | output, plus any of the output columns of
     `zarrsmith convert --batch` (chunk_size | max_size(MB) | zarr_format | downscale_factor | subset | channel_colors |
-    channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | drop_singleton | num_workers)
+    channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | drop_singleton | num_workers |
+    overwrite)
     and of the fusion columns
     downsample | projection | blend | sigmoid_steepness | channels | groups | fields | tiles | skip_tiles | midline_axis |
-    out_dtype | read_workers | temp_dir | overwrite | flatfield (true/false, Opera only, default true), e.g.
+    out_dtype | read_workers | temp_dir | flatfield (true/false, Opera only, default true), e.g.
       input                  | microscope | output                 | downsample | projection | blend   | num_levels
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_3D.zarr  | 4 8 8      | none       | sigmoid | 3
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_MIP.zarr | 1 8 8      | max        | midline |
@@ -564,7 +563,7 @@ def _add_chromatic_shift_arguments(parser):
                      help='Also shift image subgroups with the same channels ("true" or "false").')
     out.add_argument('-il', '--include_labels', type=parse_bool, default=True,
                      help='Also write labels, padded or cropped to the new Z extent ("true" or "false").')
-    out.add_argument('-ow', '--overwrite', action='store_true', help='Replace an existing output.')
+    out.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
     out.add_argument('-nw', '--num_workers', default=argparse.SUPPRESS, type=int,
                      help='Number of threads used to write the zarr. Default: half of the available cores, '
                           'capped at 8.')
@@ -648,9 +647,10 @@ def _parse_arguments(argv=None):
     )
     convert.set_defaults(mode='convert', renamed_to=None)
     _add_convert_microscope(convert)
+    convert.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
     _add_zarr_arguments(convert)
     _add_input_output(convert, required=False, input_help='Path to the input dataset (file or folder).',
-                      output_type=valid_output_path)
+                      output_type=os.path.abspath)
 
     #####################################################################################
     # fuse: one mosaic, or a CSV batch
@@ -692,8 +692,9 @@ def _parse_arguments(argv=None):
         p.set_defaults(mode=mode, renamed_to=new)
         if mode == 'convert':
             _add_convert_microscope(p)
+            p.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
             _add_zarr_arguments(p)
-            _add_input_output(p, required=True, input_help='Path to input file.', output_type=valid_output_path)
+            _add_input_output(p, required=True, input_help='Path to input file.', output_type=os.path.abspath)
         elif mode == 'fuse':
             _add_fuse_microscope(p)
             _add_mosaic_arguments(p, legacy=True)
@@ -711,6 +712,8 @@ def _parse_arguments(argv=None):
         if args.batch is not None:
             if args.input_path is not None or args.zarr_path is not None:
                 command.error('--batch cannot be combined with -i/-z: the CSV file lists inputs and outputs.')
+            if args.overwrite:
+                command.error('--batch cannot be combined with --overwrite: use the overwrite column of the CSV file.')
             args.mode += '_batch'
             args.input_file = args.batch
         elif args.input_path is None or args.zarr_path is None:
@@ -722,6 +725,8 @@ def _parse_arguments(argv=None):
         if args.batch is not None:
             if args.input_path is not None or args.zarr_path is not None or args.report is not None:
                 command.error('--batch cannot be combined with -i/-z/-r: the CSV file lists them.')
+            if args.overwrite:
+                command.error('--batch cannot be combined with --overwrite: use the overwrite column of the CSV file.')
             args.mode = 'chromatic_shift_batch'
             args.input_file = args.batch
         elif args.input_path is None:

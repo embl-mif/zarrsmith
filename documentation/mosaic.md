@@ -122,7 +122,7 @@ The projection is computed at full resolution along z and then downsampled in y/
 | `workers` | integer | tiles read in parallel (default 1) |
 | `out_dtype` | dtype | default: input dtype, `float32` for `sum` |
 | `midline_axis` | `"x"`, `"y"`, `"z"` | axis along which `sigmoid` and `midline` separate the groups (default `x`) |
-| `overwrite` | bool | replace an existing output |
+| `overwrite` | bool | replace an existing output, once the fusion has succeeded (see [Existing outputs](advanced.md#existing-outputs)) |
 | `temp_dir` | path | where the temporary fused level 0 goes (default: next to the output) |
 
 Every other option of `to_zarr` is passed through unchanged, exactly as for `zarrsmith convert`: `chunks` (in output axis order, `c, z, y, x` or `c, y, x`), `shards`, `shard_target_mb`, `shard_exclude_axes`, `zarr_format`, `ngff_version`, `compressor`, `compressor_level`, `drop_singleton`, `num_workers` (write threads) and `storage_options`. See [Advanced writing options](advanced.md). As with `zarrsmith convert`, a single fused channel is written without its channel axis unless `drop_singleton=False`.

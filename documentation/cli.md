@@ -33,8 +33,11 @@ zarrsmith convert --batch datasets.csv
 | `-sh`, `-stm`, `-sea` | sharding (see [Advanced writing options](advanced.md)) |
 | `-ds`, `--drop_singleton` | drop size-1 `t`/`c`/`z` axes (default true) |
 | `-nw`, `--num_workers` | write threads |
+| `-ow`, `--overwrite` | replace an existing output (see [Existing outputs](advanced.md#existing-outputs)) |
 
-The batch CSV has the columns `input`, `microscope`, `output`, plus any of `chunk_size`, `max_size(MB)`, `scene_index`, `zarr_format`, `downscale_factor`, `subset`, `channel_colors`, `channel_names`, `num_levels`, `shards`, `shard_target_mb`, `shard_exclude_axes`, `drop_singleton`, `num_workers`. The napari converter writes such rows with *Append to batch CSV*.
+The batch CSV has the columns `input`, `microscope`, `output`, plus any of `chunk_size`, `max_size(MB)`, `scene_index`, `zarr_format`, `downscale_factor`, `subset`, `channel_colors`, `channel_names`, `num_levels`, `shards`, `shard_target_mb`, `shard_exclude_axes`, `drop_singleton`, `num_workers`, `overwrite`. The napari converter writes such rows with *Append to batch CSV*.
+
+An existing non-empty output is refused unless `--overwrite` is given, and only a Zarr store is ever replaced. With `--batch`, overwriting is set per row in the `overwrite` column (`--overwrite` is not accepted); a row whose output is in the way is skipped with a warning, the other rows still run, and the skipped rows are listed at the end. This also applies to `fuse` and `chromatic-shift`.
 
 ## Fuse a mosaic
 
@@ -72,7 +75,7 @@ The fusion options:
 | `-od`, `--out_dtype` | output dtype |
 | `-rw`, `--read_workers` | tiles read in parallel processes (default 4); not to be confused with `-nw` (write threads) |
 | `-td`, `--temp_dir` | folder for the temporary fused level 0 (a local disk is faster) |
-| `-ow`, `--overwrite` | replace an existing output |
+| `-ow`, `--overwrite` | replace an existing output, once the fusion has succeeded |
 
 Every output option of `convert` is available too, applied to the fused output. Two read differently for a mosaic: `-cs` is given in `C Z Y X` order (`C Y X` for projections), and `-s/--subset` crops the fused output (`z`/`y`/`x` in output voxels, after `-rds`) and selects channels (`c`), e.g. `"z=0:100;y=200:900;c=1"`. `-si` is reserved for Zeiss mosaics (not implemented yet).
 
@@ -116,7 +119,7 @@ zarrsmith chromatic-shift --batch images.csv
 | `-e`, `--extent` | `union` (default), `same` or `intersection` |
 | `-o`, `--order` | `1` (linear, default) or `0` (whole planes, values untouched) |
 | `-ig`, `-il` | also write image subgroups / labels (`true` or `false`, default true) |
-| `-ow`, `--overwrite` | replace an existing output |
+| `-ow`, `--overwrite` | replace an existing output and report |
 | `-nw`, `--num_workers` | write threads |
 
 In a pipeline (e.g. a Nextflow process), use `-r` to keep the report next to the output and `--fail_on_warning` so that a doubtful estimate (search limit reached, no usable crop) fails the step instead of producing a wrongly corrected image.

@@ -513,11 +513,14 @@ class ZarrManager(MicroscopeManager):
         metadata: Dict[str, Any],
         is_label: bool = False,
         data_type: str | None = None,
+        overwrite: bool = False,
     ):
         """Create an empty image subgroup or label subgroup and update this manager.
 
         ``metadata['axes']`` may be any unique subset of ``tczyx``. Use
-        ``data_type='label'`` or ``is_label=True`` for label data.
+        ``data_type='label'`` or ``is_label=True`` for label data. A group of that
+        name that already exists raises ``FileExistsError`` unless ``overwrite=True``
+        is given, which deletes it with a warning.
         """
         from ..utils.create_empty_group import create_empty_group as _create_empty_group
 
@@ -530,6 +533,7 @@ class ZarrManager(MicroscopeManager):
             metadata=metadata,
             is_label=is_label,
             data_type=data_type,
+            overwrite=overwrite,
         )
 
         # Read the newly created group back into the in-memory ZarrDataset model.
@@ -778,7 +782,7 @@ class ZarrManager(MicroscopeManager):
         order: int = 1,
         include_groups: bool = True,
         include_labels: bool = True,
-        overwrite: bool = True,
+        overwrite: bool = False,
         num_workers: int | None = None,
         progress: bool = True,
     ) -> "ZarrManager":
@@ -844,7 +848,7 @@ class ZarrManager(MicroscopeManager):
         order: int = 1,
         include_groups: bool = True,
         include_labels: bool = True,
-        overwrite: bool = True,
+        overwrite: bool = False,
         num_workers: int | None = None,
         progress: bool = True,
         **estimate_kwargs,
@@ -855,6 +859,11 @@ class ZarrManager(MicroscopeManager):
         :meth:`apply_chromatic_shift`. The estimate report is stored in the
         output root attribute ``zarrsmith_chromatic_shift``.
         """
+        from ..utils.output_path import output_refusal
+
+        refusal = output_refusal(path, overwrite=overwrite, sources=[self.path])
+        if refusal is not None:
+            raise FileExistsError(refusal)
         report = self.estimate_chromatic_shift(reference_channel, **estimate_kwargs)
         return self.apply_chromatic_shift(
             path,
@@ -916,12 +925,18 @@ class ZarrManager(MicroscopeManager):
         Raw data is written directly to the root group.
         Image groups are written as root-level subgroups.
         Labels are written under /labels.
+
+        An existing non-empty output raises ``FileExistsError`` unless
+        ``overwrite=True`` is given, which replaces a Zarr store with a warning.
+        The output cannot be this store: its data is read lazily from there.
         """
+        from ..utils.output_path import check_output_path
         from ..utils.to_zarr import write_multiscale_to_group
         from ..utils.ngff import ZarrWriteConfig, _resolve_format
 
         cfg = ZarrWriteConfig(**kwargs)
         ngff_version, zarr_format = _resolve_format(cfg)
+        check_output_path(path, overwrite=cfg.overwrite, sources=[self.path])
 
         root = zarr.open_group(
             str(Path(path)),

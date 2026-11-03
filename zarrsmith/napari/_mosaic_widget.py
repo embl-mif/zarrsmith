@@ -14,6 +14,7 @@ from zarrsmith import mosaic_manager as mos
 from ._batch_csv import append_batch_csv
 from ._layout import compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_section, make_title
 from ._log import EmittingStream, make_log_appender
+from ._output_check import output_allowed
 
 #: Mosaic readers offered in the widget (Zeiss is a placeholder for now).
 MOSAIC_READERS = mos.MOSAIC_READERS
@@ -524,6 +525,7 @@ def mosaic_widget():
         worker.start()
 
     def _populate(mosaic, input_path: Path):
+        fuse_widget.overwrite.value = False  # asked for one output, not for the next one
         channels, groups, fields = mosaic.channels, group_labels(mosaic), mosaic.fields
         for w in (show_widget, fuse_widget):
             w.channels.choices = channels
@@ -649,11 +651,11 @@ def mosaic_widget():
             _release()
             return
         out = Path(output_path)
-        if out.exists() and not overwrite:
-            print(f"{out} exists: tick 'Overwrite output' or choose another path.")
+        _capture()
+        if not output_allowed(out, overwrite=overwrite, sources=[state["input_path"]]):
+            _release()
             return
 
-        _capture()
         print(f"Fusing {len(plan.tiles)} tiles into {out}: {plan.summary()}")
         worker = _fuse_worker(plan.tiles, out, kwargs)
         _busy(True)
@@ -768,6 +770,8 @@ def mosaic_widget():
                         flatfield=state.get("flatfield"))
         _capture()  # print into this widget's log, not wherever sys.stdout points
         try:
+            if not output_allowed(row["output"], overwrite=values["overwrite"], sources=[state["input_path"]]):
+                return
             path = append_batch_csv(batch_csv_path, row, MOSAIC_BATCH_COLUMNS)
             only = f", {len(row['tiles'].split())} picked stack position(s)" if row["tiles"] else ""
             blank = f", {len(skip_ids)} tile id(s) left blank" if skip_ids else ""

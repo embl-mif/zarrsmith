@@ -2,6 +2,26 @@
 
 These options control how the OME-Zarr output is laid out and how fast it is written. They are available in the Python API (`to_zarr(...)` keyword arguments), the CLI (flags and batch CSV columns) and the napari converter (the *Additional parameters* panel).
 
+## Existing outputs
+
+ZarrSmith does not replace existing data unless you ask for it. The same rules apply to `to_zarr`, `fuse`, the chromatic shift correction, the CLI and the napari widgets:
+
+| What is at the output path | Default | With `overwrite=True` |
+|---|---|---|
+| nothing, or an empty folder | written | written |
+| a Zarr store | refused (`FileExistsError`) | deleted and replaced, with a warning |
+| a file, or a non-empty folder that is not a Zarr store | refused | refused |
+| the input of this write, or a folder containing it | refused | refused |
+
+```python
+dataset.to_zarr("out.zarr")                   # FileExistsError if out.zarr already holds data
+dataset.to_zarr("out.zarr", overwrite=True)   # replaces the store, with a warning
+```
+
+Replacing a store deletes everything in that folder. The input can never be the output because reading is lazy: `ZarrManager("a.zarr").to_zarr("a.zarr")` would delete the data it is about to read. To change a store in place, use `write_image_region`, `write_label_region` or `create_empty_group` instead.
+
+A warning is also given when the output name does not end in `.zarr` or `.ome.zarr`. The napari widgets refuse such a name.
+
 | Python / CSV column | CLI flag | napari control | Default |
 |---|---|---|---|
 | `shards` | `-sh`, `--shards` | Sharding (zarr v3 only) | `auto` |

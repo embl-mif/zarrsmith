@@ -727,7 +727,7 @@ def write_chromatic_shift_corrected(
     *,
     extent: Extent = "union",
     order: int = 1,
-    overwrite: bool = True,
+    overwrite: bool = False,
     num_workers: int | None = None,
     progress: bool = True,
 ) -> zarr.Group:
@@ -763,7 +763,9 @@ def write_chromatic_shift_corrected(
     )
 
     from .ngff import ZarrWriteConfig, _run_stores
+    from .output_path import check_output_path
 
+    check_output_path(path, overwrite=overwrite, sources=[getattr(source_root.store, "root", None)])
     cfg = ZarrWriteConfig(num_workers=num_workers, progress=progress)
     root = zarr.open_group(
         str(Path(path)),

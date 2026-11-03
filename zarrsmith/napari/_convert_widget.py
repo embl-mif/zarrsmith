@@ -21,6 +21,7 @@ from ._dataset_helpers import dataset_axes as _dataset_axes
 from ._dataset_helpers import scale_for_axes as _scale_for_axes
 from ._dataset_helpers import points_projection_kwargs
 from ._dataset_helpers import units_kwargs as _units_kwargs
+from ._output_check import output_allowed
 
 def conservative_compute_multiscale_level(
     requested_shape,
@@ -115,6 +116,7 @@ BATCH_CSV_COLUMNS = [
     "shard_exclude_axes",
     "drop_singleton",
     "num_workers",
+    "overwrite",
 ]
 
 
@@ -272,6 +274,7 @@ def _run_conversion(
     shard_exclude_axes=None,
     drop_singleton=True,
     num_workers=None,
+    overwrite=False,
     ):
     """Run the conversion pipeline used by the napari worker thread."""
     print("Starting conversion in background thread...")
@@ -339,6 +342,7 @@ def _run_conversion(
         "ngff_version": ngff_version,
         "drop_singleton": bool(drop_singleton),
         "shards": shards,
+        "overwrite": bool(overwrite),
     }
     if num_workers is not None:
         to_zarr_kwargs["num_workers"] = int(num_workers)
@@ -703,6 +707,7 @@ def convert_widget():
         },
 
         output_path={"widget_type": "FileEdit", "mode": "d"},
+        overwrite={"label": "Overwrite output", "widget_type": "CheckBox", "value": False},
     )
     def make_convert_widget(
         t_range=(0,1000),
@@ -726,10 +731,14 @@ def convert_widget():
         drop_singleton=True,
         num_workers=0,
         output_path: FileEdit = None,
+        overwrite=False,
     ):
 
-        reader = dataset_reader(make_visualize_widget.file_format.value)
         path = make_visualize_widget.input_path.value
+        if not output_allowed(output_path, overwrite=overwrite, sources=[path]):
+            return
+
+        reader = dataset_reader(make_visualize_widget.file_format.value)
         scene_index = make_visualize_widget.scene_index.value
         file_format = make_visualize_widget.file_format.value
 
@@ -758,6 +767,7 @@ def convert_widget():
                 shard_exclude_axes=tuple(shard_exclude_axes) if shards_value is not None else None,
                 drop_singleton=bool(drop_singleton),
                 num_workers=int(num_workers) if int(num_workers) > 0 else None,
+                overwrite=bool(overwrite),
             )
         
         _set_convert_enabled(False)
@@ -839,6 +849,11 @@ def convert_widget():
         if dataset is None:
             return
 
+        overwrite = bool(make_convert_widget.overwrite.value)
+        if not output_allowed(make_convert_widget.output_path.value, overwrite=overwrite,
+                              sources=[make_visualize_widget.input_path.value]):
+            return
+
         csv_path = Path(batch_csv_path) if batch_csv_path else None
         if csv_path is None:
             csv_path = Path(make_visualize_widget.input_path.value).parent / "batch.csv"
@@ -878,6 +893,7 @@ def convert_widget():
             ),
             "drop_singleton": str(bool(make_convert_widget.drop_singleton.value)).lower(),
             "num_workers": "" if int(make_convert_widget.num_workers.value) <= 0 else str(int(make_convert_widget.num_workers.value)),
+            "overwrite": str(overwrite).lower(),
         }
         csv_path = _append_batch_csv(csv_path, row)
         print(f"Appended batch row to {csv_path}. Run it with:\n  zarrsmith convert --batch \"{csv_path}\"")
@@ -930,6 +946,7 @@ def convert_widget():
 
         default_output = path.parent / f"{name}{suffix}.zarr"
         make_convert_widget.output_path.value = default_output
+        make_convert_widget.overwrite.value = False  # asked for one output, not for the next one
         make_batch_csv_widget.batch_csv_path.value = str(default_output.parent / "batch.csv")
         make_batch_csv_widget.enabled = True
 
@@ -1135,5 +1152,6 @@ def convert_widget():
     dock = compose_dock(container, bottom=log_section)
     # exposed for tests
     dock.visualize_widget, dock.convert_widget = make_visualize_widget, make_convert_widget
+    dock.batch_csv_widget = make_batch_csv_widget
     dock.output_label = output_label
     return dock

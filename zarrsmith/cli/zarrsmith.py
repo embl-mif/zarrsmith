@@ -10,6 +10,7 @@ import pandas as pd
 import zarrsmith.microscope_manager as mm
 from zarrsmith.utils.axes import metadata_axes, metadata_axis_size
 from zarrsmith.utils.chunks import default_chunk_size, default_num_levels
+from zarrsmith.utils.output_path import output_refusal
 from zarrsmith.cli.__arguments import (
     _parse_arguments,
     parse_bool,
@@ -97,6 +98,24 @@ def _normalize_subset(value):
         "subset must be either a dict of axis selections or a compact subset string"
     )
 
+#: How the refusals of the CLI say to allow overwriting.
+_OVERWRITE_HINT = "pass --overwrite (or fill the overwrite column of a --batch CSV)"
+
+
+def _refuse_output(zarr_path, *, overwrite, input_path=None) -> None:
+    """Stop before any work is done if ``zarr_path`` must not be written to."""
+    refusal = output_refusal(zarr_path, overwrite=bool(overwrite), sources=[input_path], hint=_OVERWRITE_HINT)
+    if refusal is not None:
+        raise FileExistsError(refusal)
+
+
+def _warn_rows_skipped(skipped: List[str]) -> None:
+    """Recap the rows of a batch that were not run because of what is at their output."""
+    if skipped:
+        print(f"WARNING: {len(skipped)} row(s) skipped, nothing was written for them: {', '.join(skipped)}",
+              file=sys.stderr)
+
+
 def _resolve_zarr_manager(input_path: str, microscope: Optional[str] = None):
     """Resolve a manager class from an explicit microscope name or by inspecting the path."""
     names = ", ".join(f'"{key}"' for key in mm.READERS)
@@ -131,6 +150,7 @@ def zarr_convert(
     shard_exclude_axes: Optional[Any] = None,
     drop_singleton: Optional[bool] = True,
     num_workers: Optional[int] = None,
+    overwrite: Optional[bool] = False,
 ):
     """Helper function for CLI to convert a dataset to zarr given some parameters.
 
@@ -202,7 +222,13 @@ def zarr_convert(
             Example: \"-nw 4\"
 
             Default: None (half of the available cores, capped at 8)
+        overwrite : Optional[bool]
+            Replace ``zarr_path`` if it is an existing Zarr store. Otherwise an existing
+            non-empty output raises ``FileExistsError``, before anything is read.
+
+            Default: False
     """
+    _refuse_output(zarr_path, overwrite=overwrite, input_path=input_path)
 
     manager, resolved_microscope = _resolve_zarr_manager(input_path, microscope)
     print(f'\n--->Using manager: {manager.__name__} ({resolved_microscope})')
@@ -308,6 +334,7 @@ def zarr_convert(
         "ngff_version": ngff_version,
         "drop_singleton": drop_singleton,
         "shards": shards,
+        "overwrite": bool(overwrite),
     }
     if num_workers is not None:
         to_zarr_kwargs["num_workers"] = int(num_workers)
@@ -380,6 +407,9 @@ def _batch_row_kwargs(v, columns) -> Dict[str, Any]:
     if "num_workers" in columns and _present(v.get("num_workers")):
         kwargs["num_workers"] = int(v["num_workers"])
 
+    if "overwrite" in columns and _present(v.get("overwrite")):
+        kwargs["overwrite"] = parse_bool(v["overwrite"])
+
     return kwargs
 
 
@@ -398,6 +428,7 @@ def convert_batch(args):
 
     database = pd.read_csv(csv_path)
     print(database)
+    skipped = []
 
     for i, v in database.iterrows():
         print("-" * 20)
@@ -413,7 +444,13 @@ def convert_batch(args):
             **_batch_row_kwargs(v, database.columns),
         }
 
-        zarr_convert(**conv_kwargs)
+        # An output in the way only stops its own row: the others still run.
+        try:
+            zarr_convert(**conv_kwargs)
+        except FileExistsError as error:
+            print(f"WARNING: row skipped: {error}", file=sys.stderr)
+            skipped.append(str(output))
+    _warn_rows_skipped(skipped)
 
 def convert_single(args):
     """Runmode to convert a single image to zarr
@@ -431,6 +468,7 @@ def convert_single(args):
         f'--shards {args.shards} --shard_target_mb {args.shard_target_mb} '
         f'--shard_exclude_axes {args.shard_exclude_axes} '
         f'--drop_singleton {args.drop_singleton} --num_workers {args.num_workers}'
+        f'{" --overwrite" if args.overwrite else ""}'
     )
     print(f'Converting single file.\nRunning through: {cli}')
     exclude = _NOT_CONVERSION_OPTIONS
@@ -571,6 +609,8 @@ def mosaic_convert(
     from zarrsmith.mosaic_manager import fuse_tiles, plan_fusion, reader_options
     from zarrsmith.mosaic_manager.fusion import SIGMOID_STEEPNESS
 
+    _refuse_output(zarr_path, overwrite=overwrite, input_path=input_path)
+
     reader, resolved = _resolve_mosaic_manager(input_path, microscope)
     print(f"\n--->Using mosaic manager: {reader.__name__} ({resolved})")
     if scene_index is not None and resolved != "zeiss":
@@ -692,6 +732,7 @@ def convert_mosaic_batch(args):
     print(database)
     columns = database.columns
     not_fused = []
+    skipped = []
     for _, v in database.iterrows():
         print("-" * 20)
         kwargs = {
@@ -713,14 +754,17 @@ def convert_mosaic_batch(args):
             kwargs["read_workers"] = int(v["read_workers"])
         if "sigmoid_steepness" in columns and _present(v.get("sigmoid_steepness")):
             kwargs["sigmoid_steepness"] = float(v["sigmoid_steepness"])
-        if "overwrite" in columns and _present(v.get("overwrite")):
-            kwargs["overwrite"] = parse_bool(v["overwrite"])
         if "flatfield" in columns and _present(v.get("flatfield")):
             kwargs["flatfield"] = parse_bool(v["flatfield"])
-        if not mosaic_convert(**kwargs):
-            not_fused.append(str(v["output"]))
+        try:
+            if not mosaic_convert(**kwargs):
+                not_fused.append(str(v["output"]))
+        except FileExistsError as error:
+            print(f"WARNING: row skipped: {error}", file=sys.stderr)
+            skipped.append(str(v["output"]))
     if not_fused:
         print(f"ERROR: {len(not_fused)} row(s) not fused (tiles from several fields): {', '.join(not_fused)}")
+    _warn_rows_skipped(skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -798,10 +842,13 @@ def chromatic_shift_correct(
     ``report_path`` when given). ``shifts`` (one value per channel, a report
     dict or the path to a JSON report) skips the estimate. With
     ``fail_on_warning`` a report with warnings stops before anything is
-    written except the report. Returns the report, or the given shifts.
+    written except the report. Returns the report, or the given shifts. An existing
+    output or report raises ``FileExistsError`` unless ``overwrite`` is given.
     """
-    if zarr_path is not None and Path(zarr_path).exists() and not overwrite:
-        raise FileExistsError(f"{zarr_path} already exists; pass --overwrite to replace it.")
+    if zarr_path is not None:
+        _refuse_output(zarr_path, overwrite=overwrite, input_path=input_path)
+    if report_path is not None and Path(report_path).exists() and not overwrite:
+        raise FileExistsError(f"{report_path} already exists; {_OVERWRITE_HINT} to replace it, or choose another path.")
 
     z = mm.ZarrManager(path=str(input_path))
     names = list(z.metadata.get("channel_names") or [])
@@ -821,6 +868,8 @@ def chromatic_shift_correct(
     if report_path is not None:
         import json
 
+        if Path(report_path).exists():
+            print(f"WARNING: replacing the existing report {report_path}", file=sys.stderr)
         Path(report_path).parent.mkdir(parents=True, exist_ok=True)
         Path(report_path).write_text(json.dumps(report, indent=2))
         print(f"Report saved to {report_path}")
@@ -839,7 +888,7 @@ def chromatic_shift_correct(
         order=int(order),
         include_groups=bool(include_groups),
         include_labels=bool(include_labels),
-        overwrite=True,  # an existing output was refused above unless overwrite was asked for
+        overwrite=bool(overwrite),
         num_workers=num_workers,
     )
     print(f"Saved {zarr_path}")
@@ -873,6 +922,7 @@ def chromatic_shift_batch(args):
     def cell(v, key):
         return v.get(key) if key in columns and _present(v.get(key)) else None
 
+    skipped = []
     for _, v in database.iterrows():
         print("-" * 20)
         kwargs: Dict[str, Any] = {"input_path": v["input"], "zarr_path": cell(v, "output")}
@@ -889,7 +939,12 @@ def chromatic_shift_batch(args):
             value = cell(v, key)
             if value is not None:
                 kwargs[key] = parse_bool(value)
-        chromatic_shift_correct(**kwargs)
+        try:
+            chromatic_shift_correct(**kwargs)
+        except FileExistsError as error:
+            print(f"WARNING: row skipped: {error}", file=sys.stderr)
+            skipped.append(str(v["input"]))
+    _warn_rows_skipped(skipped)
 
 
 def main(argv=None):
