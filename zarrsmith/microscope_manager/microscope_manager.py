@@ -111,13 +111,17 @@ class MicroscopeManager(ABC):
             ``compressor_level``, ``overwrite``, ``chunks``, ``shards``,
             ``shard_target_mb``, ``shard_exclude_axes`` or ``drop_singleton``
             (default ``True``: singleton t/c/z axes are removed on write).
+
+        An existing non-empty output raises ``FileExistsError`` unless
+        ``overwrite=True`` is given, which replaces a Zarr store with a warning.
         """
         from ..utils.to_zarr import to_zarr as _to_zarr
         from ..utils.ngff import ZarrWriteConfig
         return _to_zarr(path, 
                       self.data, 
                       self.metadata, 
-                      config=ZarrWriteConfig(**kwargs)
+                      config=ZarrWriteConfig(**kwargs),
+                      sources=[getattr(self, "path", None)],
                       )
 
     def visualize(

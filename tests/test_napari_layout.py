@@ -152,7 +152,7 @@ def test_convert_button_starts_disabled_until_a_dataset_is_loaded(converter):
     assert not convert_button(converter).isEnabled()
 
 
-def test_button_still_runs_the_conversion_and_locks_while_running(converter, app, monkeypatch):
+def test_button_still_runs_the_conversion_and_locks_while_running(converter, app, monkeypatch, tmp_path):
     calls = []
 
     def fake_conversion(**kwargs):
@@ -161,6 +161,7 @@ def test_button_still_runs_the_conversion_and_locks_while_running(converter, app
         return "converted.zarr"
 
     monkeypatch.setattr(convert_module, "_run_conversion", fake_conversion)
+    converter.convert_widget.output_path.value = tmp_path / "converted.zarr"
 
     button = convert_button(converter)
     log = converter.findChild(QTextEdit)

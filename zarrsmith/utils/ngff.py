@@ -61,6 +61,11 @@ class ZarrWriteConfig:
     data_type
         Optional dataset semantic type.  Use ``"intensity"`` for regular image
         intensities or ``"label"`` for integer segmentation/annotation data.
+    overwrite
+        If ``False`` (default), an existing non-empty output raises
+        ``FileExistsError``. If ``True``, an existing Zarr store is deleted and
+        replaced, with a warning; any other non-empty folder is still refused
+        (see :func:`zarrsmith.utils.output_path.output_refusal`).
     chunks
         Requested on-disk chunk shape, overriding whatever chunking the input
         dask arrays already have. One of:
@@ -125,7 +130,7 @@ class ZarrWriteConfig:
 
     ngff_version: Literal["0.4", "0.5"] | None = None
     zarr_format: Literal[2, 3] | None = None
-    overwrite: bool = True
+    overwrite: bool = False
     compute: bool = True
     storage_options: dict[str, Any] | None = None
     compressor: Literal["blosc", "gzip"] | None = None

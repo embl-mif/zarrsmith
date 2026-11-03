@@ -14,6 +14,7 @@ source = mm.ViventisManager("path/to/Position_1")
 source.build_pyramid(num_levels=3)
 
 # Export to OME-Zarr (default: NGFF v0.5 / zarr v3)
+# An existing output is refused; see "Existing outputs" in Advanced writing options
 source.to_zarr("output.zarr")
 
 # Re-open the written zarr dataset

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Iterable, Sequence
 
 import dask.array as da
 import numpy as np
 import zarr
 
 from .axes import normalize_axes, normalize_data_type, spatial_axes_in_order
+from .output_path import check_output_path
 from .ngff import (
     ZarrWriteConfig,
     _build_multiscales,
@@ -120,6 +121,7 @@ def to_zarr(
     metadata: dict,
     *,
     config: ZarrWriteConfig | None = None,
+    sources: Iterable[Any] = (),
 ):
     """Write a pyramid of dask arrays to an OME-Zarr root group.
 
@@ -135,6 +137,8 @@ def to_zarr(
     config : ZarrWriteConfig | None
         Output configuration controlling NGFF version, zarr format, overwrite
         behaviour and compression.
+    sources : iterable of paths
+        Paths ``data_levels`` is read from: the output must not replace them.
     """
     cfg = config or ZarrWriteConfig()
     if not data_levels:
@@ -146,6 +150,7 @@ def to_zarr(
     _validate_metadata(data_levels, effective_metadata, axes)
 
     ngff_version, zarr_format = _resolve_format(cfg)
+    check_output_path(path, overwrite=cfg.overwrite, sources=sources)
     root = zarr.open_group(
         str(Path(path)),
         mode="w" if cfg.overwrite else "w-",

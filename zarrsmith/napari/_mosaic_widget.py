@@ -15,6 +15,7 @@ from zarrsmith.mosaic_manager.tile import series_keys
 from ._batch_csv import append_batch_csv
 from ._layout import compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_section, make_title
 from ._log import EmittingStream, make_log_appender
+from ._output_check import output_allowed
 
 #: Mosaic readers offered in the widget.
 MOSAIC_READERS = mos.MOSAIC_READERS
@@ -549,6 +550,7 @@ def mosaic_widget():
         load_widget.input_path.mode = "r" if microscope == "zeiss" else "d"  # what the browse button picks
 
     def _populate(mosaic, input_path: Path):
+        fuse_widget.overwrite.value = False  # asked for one output, not for the next one
         channels, groups, fields = mosaic.channels, group_labels(mosaic), mosaic.fields
         timepoints = mosaic.timepoints
         fuse_widget.timepoints.choices = timepoints
@@ -696,11 +698,11 @@ def mosaic_widget():
             _release()
             return
         out = Path(output_path)
-        if out.exists() and not overwrite:
-            print(f"{out} exists: tick 'Overwrite output' or choose another path.")
+        _capture()
+        if not output_allowed(out, overwrite=overwrite, sources=[state["input_path"]]):
+            _release()
             return
 
-        _capture()
         print(f"Fusing {len(plan.tiles)} tiles into {out}: {plan.summary()}")
         # all the tiles, not plan.tiles: skipped tiles and the reference timepoint set the geometry
         worker = _fuse_worker(tiles, out, kwargs)
@@ -826,6 +828,8 @@ def mosaic_widget():
                         flatfield=state.get("flatfield"), all_timepoints=mosaic.timepoints)
         _capture()  # print into this widget's log, not wherever sys.stdout points
         try:
+            if not output_allowed(row["output"], overwrite=values["overwrite"], sources=[state["input_path"]]):
+                return
             path = append_batch_csv(batch_csv_path, row, MOSAIC_BATCH_COLUMNS)
             only = f", {len(row['tiles'].split())} picked stack position(s)" if row["tiles"] else ""
             blank = f", {len(skip_ids)} tile id(s) left blank" if skip_ids else ""

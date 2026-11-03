@@ -76,7 +76,8 @@ def test_reference_channel_by_name(store, tmp_path, monkeypatch):
 
 def test_existing_output_needs_overwrite(store, tmp_path, monkeypatch):
     out = tmp_path / "out.ome.zarr"
-    out.mkdir()
+    out.mkdir()  # an empty folder holds nothing to lose
+    _run(monkeypatch, "chromatic-shift", "-i", store, "-z", out, "-sf", 0, 0, 0)
     with pytest.raises(FileExistsError):
         _run(monkeypatch, "chromatic-shift", "-i", store, "-z", out, "-sf", 0, 0, 0)
     _run(monkeypatch, "chromatic-shift", "-i", store, "-z", out, "-sf", 0, 0, 0, "--overwrite")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import zarr
@@ -60,12 +61,15 @@ def create_empty_group(
     shards: Any = None,
     shard_target_mb: float = 1024.0,
     shard_exclude_axes: Any = None,
+    overwrite: bool = False,
 ):
     """Create an empty image subgroup or label subgroup inside an existing root.
 
     The subgroup inherits the root NGFF/zarr version so the hierarchy stays
     internally consistent. When ``is_label`` is ``True`` the group is created
-    below ``labels/`` and the root label registry is updated.
+    below ``labels/`` and the root label registry is updated. An existing group
+    of that name raises ``FileExistsError`` unless ``overwrite`` is ``True``, which
+    deletes it with a warning; an array (such as a pyramid level) is never replaced.
     """
     if not metadata:
         raise ValueError("Metadata is required to create an empty group.")
@@ -99,6 +103,12 @@ def create_empty_group(
 
     parent = root.require_group("labels") if is_label else root
     if group_name in parent:
+        if not isinstance(parent[group_name], zarr.Group):
+            raise FileExistsError(f"{group_name!r} is an array of this dataset, not a group. Choose another name.")
+        if not overwrite:
+            raise FileExistsError(f"Group {group_name!r} already exists; pass overwrite=True to replace it.")
+        warnings.warn(f"Replacing the existing group {group_name!r}: its content is deleted.",
+                      UserWarning, stacklevel=2)
         del parent[group_name]
     grp = parent.create_group(group_name)
 

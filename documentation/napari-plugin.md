@@ -18,6 +18,8 @@ The widgets are built to be docked on any side of the napari window, or floated,
 - Above the button, a line recaps the output at full resolution and follows the T/Z/Y/X ranges, the selected channels and **Drop singleton axes**, for example `3 t x 2 ch x 120 x 1024 x 1024 px (tczyx), 1.51 GB, voxel 2 x 0.65 x 0.65 micrometer`. The size is uncompressed, so the files on disk are usually smaller.
 - The log is a separate pane under a drag handle: drag it taller to see more lines, or shorter to give room to the parameters. Progress bars update a single line instead of filling the log.
 
+Before writing, or appending a row to a batch CSV, the Converter and Mosaic Fusion widgets check the output and show a warning if they refuse it. The name must end in `.zarr` or `.ome.zarr`. If the output already holds data, tick **Overwrite output** to replace it; this replaces a Zarr store only, never any other folder and never the input (see [Existing outputs](advanced.md#existing-outputs)). The box is unticked when another dataset is loaded. The Export widget likewise refuses to replace files from an earlier export unless **Overwrite files** is ticked.
+
 ![napari-demo](napari-demo.png)
 
 ## Mosaic Fusion
