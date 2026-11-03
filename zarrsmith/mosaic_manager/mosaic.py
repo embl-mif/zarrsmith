@@ -377,7 +377,7 @@ class MosaicManager(ABC):
                 blending="additive",
                 contrast_limits=limits,
                 metadata={"mosaic_tile": i, "mosaic_tile_id": self.tile_id(t), "mosaic_field": t.field,
-                          "mosaic_path": str(self.path)},
+                          "mosaic_path": str(self.path), "mosaic_lead": getattr(t.data, "lead", 0)},
                 visible=False,
                 **extra,
             )
@@ -518,13 +518,16 @@ class MosaicManager(ABC):
         """Move the tiles to the positions found by a registration, in memory only.
 
         Every tile of a position, in every channel and timepoint, gets the same correction
-        to its stage position, so applying twice does not add up. Tiles the registration
-        does not know stay where the stage put them. ``visualize``, ``plan_fusion`` and
-        ``fuse`` then use the new positions; field labels stay as they were when loaded.
+        to its stage position, so applying twice does not add up. Only in a field with several
+        groups, the z offset between them is per channel, and the tilt of their planes is
+        removed by moving voxels by whole planes when they are read (nothing is
+        interpolated); such a tile is a few planes deeper. Tiles the registration does not
+        know stay where the stage put them. ``visualize``, ``plan_fusion`` and ``fuse`` then use
+        the new positions; field labels stay as they were when loaded.
 
         A registration of another acquisition raises ``ValueError``. See :meth:`clear_registration`.
         """
-        from .registration import position_id
+        from .registration import TiltedArray, position_id
 
         if not registration.shifts:
             raise ValueError("This registration has no solution yet: the run was interrupted, "
@@ -543,10 +546,14 @@ class MosaicManager(ABC):
                 raise ValueError(f"Position {name!r} of this registration is not in the mosaic at the "
                                  "same place: it belongs to another acquisition.")
         for t in self.tiles:
-            shift = registration.shifts.get(keys[id(t)])
-            if shift is not None:
-                stage = t.attrs.setdefault("stage_origin", t.origin)
-                t.origin = tuple(float(s) + float(d) + 0.0 for s, d in zip(stage, shift))
+            shift, tilt = registration.placement(keys[id(t)], t.channel)
+            if shift is None:
+                continue
+            stage = t.attrs.setdefault("stage_origin", t.origin)
+            data = t.attrs.setdefault("stage_data", t.data)
+            t.data = data if tilt is None else TiltedArray(data, t.voxel_size, tilt)
+            shift = shift - [getattr(t.data, "lead", 0) * t.voxel_size[0], 0, 0]
+            t.origin = tuple(float(s) + float(d) + 0.0 for s, d in zip(stage, shift))
 
     def clear_registration(self) -> None:
         """Put every tile back at its stage position (undoes :meth:`apply_registration`)."""
@@ -554,6 +561,7 @@ class MosaicManager(ABC):
             stage = t.attrs.pop("stage_origin", None)
             if stage is not None:
                 t.origin = tuple(stage)
+                t.data = t.attrs.pop("stage_data", t.data)
 
     # ------------------------------------------------------------------
     # resources

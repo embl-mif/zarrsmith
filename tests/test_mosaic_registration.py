@@ -363,3 +363,280 @@ def test_plan_reads_no_pixels():
         t.data = type("NoRead", (), {"shape": t.shape, "dtype": t.dtype, "__getitem__": lambda s, k: 1 / 0})()
     plan = mos.plan_registration(tiles)
     assert len(plan.pairs) == 4 and "4 pairs" in plan.summary()
+
+
+# ---------------------------------------------------------------------------
+# several groups: tilt inside the tiles, one offset between the groups
+# ---------------------------------------------------------------------------
+
+def _tilted(sample, y0, x0, shape, tilt, z_extra=0):
+    """Tile cut from ``sample`` whose planes are tilted: a voxel at height h shows at plane
+    h + tilt_y * u_y + tilt_x * u_x (u: distance to the tile centre), plus ``z_extra`` planes."""
+    nz, ny, nx = shape
+    rows = np.arange(ny) - (ny - 1) / 2
+    columns = np.arange(nx) - (nx - 1) / 2
+    moves = np.rint(tilt[0] * rows[:, None] + tilt[1] * columns[None, :]).astype(int) + z_extra
+    margin = 12
+    tile = np.empty(shape, sample.dtype)
+    for j in range(ny):
+        for i in range(nx):
+            tile[:, j, i] = sample[margin - moves[j, i]:margin - moves[j, i] + nz, y0 + j, x0 + i]
+    return tile
+
+
+def _two_sides(channels=("A",), tilts=((0.03, 0.0), (-0.01, 0.01)), seed=0, depth=72, errors=None):
+    """Left and right blocks of 3 x 2 tiles, tilted differently. Channel B is ``z_extra`` planes off
+    on the right side only. Returns ``(tiles, sample, truth)``; ``truth`` has the y/x of every stack."""
+    size, step = 120, 90
+    sample = _sample((depth + 24, 3 * step + size, 4 * step + size), seed=seed)
+    tiles, truth = [], {}
+    for channel in channels:
+        extra = 3 if channel == "B" else 0
+        for side, tilt, columns in (("L", tilts[0], (0, 1)), ("R", tilts[1], (2, 3))):
+            for row in range(3):
+                for column in columns:
+                    stack = f"{side}{row}{column}"
+                    y0, x0 = row * step, column * step
+                    error = np.array((errors or {}).get(stack, (0, 0, 0)), float)
+                    tile = _tilted(sample, y0, x0, (depth, size, size), tilt, extra if side == "R" else 0)
+                    tiles.append(mos.Tile(tile, tuple(np.array([0, y0, x0]) + error), (1, 1, 1), channel, group=side,
+                                          attrs={"stack": stack}))
+                    truth[stack] = np.array([0, y0, x0], float)
+    return tiles, sample, truth
+
+
+def _seam_score(mosaic, tiles, a, b, channel="A"):
+    """NCC over the voxels two placed tiles share."""
+    ta = next(t for t in tiles if t.attrs["stack"] == a and t.channel == channel)
+    tb = next(t for t in tiles if t.attrs["stack"] == b and t.channel == channel)
+    lo = np.ceil(np.maximum(ta.extent[0], tb.extent[0])).astype(int)
+    hi = np.floor(np.minimum(ta.extent[1], tb.extent[1])).astype(int)
+
+    def cut(t):
+        start = np.rint(lo - np.array(t.origin)).astype(int)
+        stop = start + hi - lo
+        return np.asarray(t.data[start[0]:stop[0], start[1]:stop[1], start[2]:stop[2]], float)
+
+    x, y = cut(ta), cut(tb)
+    keep = (x > 0) & (y > 0)
+    return float(np.corrcoef(x[keep], y[keep])[0, 1])
+
+
+TWO_SIDE_ERRORS = {"L01": (0, 3, -2), "L10": (0, -2, 2), "R02": (0, 2, 3), "R13": (0, -3, -1), "R22": (0, 1, 2)}
+
+
+def test_tilted_array_moves_columns_by_whole_planes():
+    data = np.arange(1, 8 * 6 * 4 + 1, dtype=np.uint16).reshape(8, 6, 4)
+    tilted = mos.TiltedArray(data, (2.0, 1.0, 1.0), (0.8, 0.0))  # 0.4 planes per row, downwards with y
+    full = tilted[:, :, :]
+    assert full.dtype == data.dtype and full.shape == tilted.shape and tilted.shape[1:] == (6, 4)
+    assert full.shape[0] == 8 + np.ptp(tilted._columns(slice(0, 6), slice(0, 4)))
+    # every voxel value is kept, in its own column, in order and with no interpolation
+    for j in range(6):
+        column = full[:, j, 0]
+        assert np.array_equal(column[column > 0], data[:, j, 0])
+    # the top row moves opposite to the bottom row
+    moves = tilted._columns(slice(0, 6), slice(0, 4))
+    assert moves[0, 0] > 0 > moves[-1, 0]
+    assert np.flatnonzero(full[:, 0, 0])[0] == tilted.lead + moves[0, 0]
+    # any slice equals the same slice of the whole
+    assert np.array_equal(tilted[2:7, 1:5, 1:3], full[2:7, 1:5, 1:3])
+    assert np.array_equal(tilted[3, 2, 1], full[3, 2, 1]) and np.array_equal(tilted[-1, :, 2], full[-1, :, 2])
+    assert np.array_equal(tilted[..., 1], full[..., 1])
+    assert tilted[0:0, :, :].size == 0
+    with pytest.raises(IndexError, match="step"):
+        tilted[::2]
+
+
+def test_tilted_array_can_be_sent_to_workers_and_read_lazily():
+    import pickle
+
+    import dask.array as da
+
+    reads = []
+
+    class Reading(np.ndarray):
+        def __getitem__(self, key):
+            reads.append(key)
+            return super().__getitem__(key)
+
+    data = np.ones((8, 6, 4), np.uint16).view(Reading)
+    tilted = mos.TiltedArray(data, (1, 1, 1), (0.5, 0.0))
+    assert not reads  # nothing is read until it is sliced
+    assert not tilted.picklable  # as its data
+    h5 = type("Picklable", (), {"picklable": True, "shape": (8, 6, 4), "dtype": np.uint16})()
+    assert mos.TiltedArray(h5, (1, 1, 1), (0.5, 0.0)).picklable
+    again = pickle.loads(pickle.dumps(mos.TiltedArray(np.asarray(data), (1, 1, 1), (0.5, 0.0))))
+    assert np.array_equal(again[:, :, :], mos.TiltedArray(np.asarray(data), (1, 1, 1), (0.5, 0.0))[:, :, :])
+    lazy = da.from_array(mos.TiltedArray(np.asarray(data), (1, 1, 1), (0.5, 0.0)), chunks=(4, 3, 2))
+    assert lazy.compute().shape == mos.TiltedArray(data, (1, 1, 1), (0.5, 0.0)).shape
+
+
+def test_tilts_are_found_per_group_and_do_not_add_up(tmp_path):
+    tiles, _, truth = _two_sides(errors=TWO_SIDE_ERRORS)
+    mosaic = _Mosaic(tiles)
+    reg = mosaic.register(tmp_path / "reg.json", max_shift=(0.1, 0.1, 0.1), progress=False)
+    field = tiles[0].field
+    assert reg.tilts[f"{field}|L"][0] == pytest.approx(0.03, abs=0.006)
+    assert reg.tilts[f"{field}|R"][0] == pytest.approx(-0.01, abs=0.006)
+    assert reg.tilts[f"{field}|R"][1] == pytest.approx(0.01, abs=0.006)
+    # z stays at the stage: the offsets between rows came from the tilt and did not build up
+    assert np.max(np.abs(np.array(list(reg.shifts.values()))[:, 0])) < 1.0
+    mosaic.apply_registration(reg)
+    found = {t.attrs["stack"]: np.array(t.origin) for t in tiles}
+    offsets = np.array([found[k][1:] - truth[k][1:] for k in truth])
+    assert np.max(np.abs(offsets - offsets.mean(axis=0))) < 1.0
+    assert "Tilt of block" in reg.summary()
+
+
+def test_seams_between_groups_match_after_registration(tmp_path):
+    tiles, _, _ = _two_sides(errors=TWO_SIDE_ERRORS)
+    mosaic = _Mosaic(tiles)
+    seams = [("L01", "R02"), ("L11", "R12"), ("L21", "R22")]
+    same = [("L00", "L10"), ("R12", "R22")]
+    before = [_seam_score(mosaic, tiles, a, b) for a, b in seams + same]
+    reg = mosaic.register(tmp_path / "reg.json", max_shift=(0.1, 0.1, 0.1), progress=False)
+    mosaic.apply_registration(reg)
+    after = [_seam_score(mosaic, tiles, a, b) for a, b in seams + same]
+    assert min(after) > 0.9, after
+    assert min(after) > max(before), (before, after)
+
+
+def test_every_channel_gets_its_own_z_offset_between_groups(tmp_path):
+    tiles, _, _ = _two_sides(("A", "B"), errors=TWO_SIDE_ERRORS)
+    mosaic = _Mosaic(tiles)
+    reg = mosaic.register(tmp_path / "reg.json", reference_channel="A", max_shift=(0.1, 0.1, 0.1), progress=False)
+    right = f"{tiles[0].field}|R"
+    assert reg.z_offsets[right]["B"] - reg.z_offsets[right]["A"] == pytest.approx(-3, abs=0.6)  # B sits 3 planes higher
+    assert sum(len(v) for v in reg.channel_links.values()) == 3  # the seams, not all pairs
+    mosaic.apply_registration(reg)
+    for channel in "AB":
+        assert _seam_score(mosaic, tiles, "L11", "R12", channel) > 0.9
+    # y and x are the same in all channels
+    origins = {(t.attrs["stack"], t.channel): t.origin for t in tiles}
+    assert origins[("R12", "A")][1:] == origins[("R12", "B")][1:]
+    # a channel without a match falls back on the reference, and says so
+    loaded = mos.Registration.load(tmp_path / "reg.json")
+    assert loaded.z_offsets == reg.z_offsets
+    loaded.channel_links["B"] = [dict(link, estimates=[]) for link in loaded.channel_links["B"]]
+    loaded.solve()
+    assert loaded.z_offsets[right]["B"] == loaded.z_offsets[right]["A"]
+    assert "no trusted match" in loaded.summary()
+
+
+def test_apply_and_clear_with_tilt_restore_the_tiles(tmp_path):
+    tiles, _, _ = _two_sides(errors=TWO_SIDE_ERRORS)
+    mosaic = _Mosaic(tiles)
+    stage = [t.origin for t in tiles]
+    data = [t.data for t in tiles]
+    reg = mosaic.register(tmp_path / "reg.json", max_shift=(0.1, 0.1, 0.1), progress=False)
+    mosaic.apply_registration(reg)
+    assert all(isinstance(t.data, mos.TiltedArray) for t in tiles)
+    once = [t.origin for t in tiles]
+    mosaic.apply_registration(reg)  # the tilt does not stack up
+    assert [t.origin for t in tiles] == once
+    assert all(t.data.data is d for t, d in zip(tiles, data))
+    with pytest.raises(ValueError, match="stage positions"):
+        mosaic.register(tmp_path / "again.json", progress=False)
+    mosaic.clear_registration()
+    assert [t.origin for t in tiles] == stage
+    assert all(t.data is d for t, d in zip(tiles, data))
+    assert not any("stage_data" in t.attrs for t in tiles)
+
+
+def test_fusion_uses_the_tilt_and_keeps_voxel_values(tmp_path):
+    tiles, sample, _ = _two_sides(errors=TWO_SIDE_ERRORS)
+    mosaic = _Mosaic(tiles)
+    reg = mosaic.register(tmp_path / "reg.json", max_shift=(0.1, 0.1, 0.1), progress=False)
+    mosaic.apply_registration(reg)
+    fused = np.asarray(mosaic.fuse(tmp_path / "out.ome.zarr", blend="max", progress=False).data[0])
+    assert fused.ndim == 3 and fused.shape[0] > 72  # a few planes deeper, not resampled
+    assert np.isin(np.unique(fused)[:2000], np.append(np.unique(sample), 0)).all()  # no new values
+    # the seam: a plane through the middle follows the sample, across both sides
+    middle = fused[fused.shape[0] // 2, 40:200, 150:290].astype(float)
+    best = 0.0
+    for z in range(0, sample.shape[0]):
+        for dy in (-2, -1, 0, 1, 2):
+            for dx in (-2, -1, 0, 1, 2):
+                best = max(best, float(np.corrcoef(middle.ravel(),
+                                                   sample[z, 40 + 2 + dy:200 + 2 + dy, 150 + 2 + dx:290 + 2 + dx].ravel())[0, 1]))
+    assert best > 0.7
+
+
+def test_one_group_moves_whole_tiles_without_tilt(tmp_path):
+    sample = _sample((80, 300, 300))
+    tiles, truth = _grid(sample, 1, 2, 180, 60, {"r0c1": (2, 3, -3)})
+    mosaic = _Mosaic(tiles)
+    data = [t.data for t in tiles]
+    reg = mos.register_tiles(tiles, tmp_path / "reg.json", max_shift=(0.1, 0.06, 0.06), progress=False)
+    assert reg.tilts == {} and reg.z_offsets == {}
+    mosaic.apply_registration(reg)
+    assert all(t.data is d for t, d in zip(tiles, data))  # the data is untouched
+    assert _residual_error(tiles, truth) < 0.5
+
+
+def test_tiles_without_a_link_follow_the_trend(tmp_path):
+    # a stage with a wrong scale, as a wrong pixel size gives; one corner tile has nothing to match
+    sample = _sample((1, 620, 620))
+    scale = 0.03
+    errors = {f"r{r}c{c}": (0, -scale * r * 160, -scale * c * 160) for r in range(4) for c in range(4)}
+    tiles, truth = _grid(sample, 4, 4, 220, 60, errors)
+    corner = next(t for t in tiles if t.attrs["stack"] == "r3c3")
+    corner.data = np.full(corner.shape, 500, np.uint16)
+    mosaic = _Mosaic(tiles)
+    reg = mosaic.register(tmp_path / "reg.json", progress=False)
+    mosaic.apply_registration(reg)
+    assert not any(corner_key in key for key in [k for k, o in reg.outcome.items() if o["status"] == "used"]
+                   for corner_key in ("|r3c3|",))
+    assert _residual_error(tiles, truth) < 1.0  # also the corner, far from its stage position
+    assert np.abs(np.array(corner.origin) - np.array(corner.attrs["stage_origin"])).max() > 3
+
+
+def test_fine_pass_measures_at_full_resolution(tmp_path, monkeypatch):
+    from zarrsmith.mosaic_manager import registration as module
+
+    sample = _sample((64, 400, 620), seed=4)
+    a = mos.Tile(sample[:, :, :340], (0, 0, 0), (1, 1, 1), "A", attrs={"stack": "a"})
+    b = mos.Tile(sample[:, :, 240:], (0, 0, 243), (1, 1, 1), "A", attrs={"stack": "b"})
+    monkeypatch.setattr(module, "_WORK_VOXELS", 2**19)  # forces downsampled matching on this small data
+    reg = mos.register_tiles([a, b], tmp_path / "reg.json", progress=False)
+    link = reg.links[0]
+    assert np.max(link["estimates"][0]["voxel"][1:]) > 1
+    assert "fine" in link and link["fine"]["ncc"] > 0.5
+    relative = np.array(reg.shifts["|b|0"]) - np.array(reg.shifts["|a|0"])
+    assert relative[2] == pytest.approx(-3, abs=0.3)
+    # the whole matching stays within the budget, and the pass is skipped when it does not fit
+    assert reg.links[0]["read_mb"] < module.BUDGET_MB
+
+
+def test_fine_pass_is_left_out_at_full_resolution(tmp_path):
+    tiles, _ = _grid(_sample((1, 300, 400)), 1, 2, 220, 40, {"r0c1": (0, 4, -3)})
+    reg = mos.register_tiles(tiles, tmp_path / "reg.json", progress=False)
+    assert "fine" not in reg.links[0]
+
+
+def test_files_of_the_earlier_version(tmp_path):
+    tiles, _ = _grid(_sample((1, 300, 400)), 1, 2, 220, 40, {"r0c1": (0, 4, -3)})
+    path = tmp_path / "reg.json"
+    reg = mos.register_tiles(tiles, path, progress=False)
+    content = json.loads(path.read_text())
+    content["version"] = 1
+    for key in ("fields", "channel_links", "tilts", "z_offsets"):
+        content.pop(key)
+    for link in content["links"]:
+        link.pop("centres"), link.pop("overlap")
+    path.write_text(json.dumps(content))
+    assert mos.Registration.load(path).shifts.keys() == reg.shifts.keys()  # thin tiles of one group still work
+    for name, shift in mos.Registration.load(path).shifts.items():
+        assert shift == pytest.approx(reg.shifts[name])
+
+    tiles, _, _ = _two_sides(errors=TWO_SIDE_ERRORS)
+    path = tmp_path / "groups.json"
+    mos.register_tiles(tiles, path, max_shift=(0.1, 0.1, 0.1), progress=False)
+    content = json.loads(path.read_text())
+    content["version"] = 1
+    for link in content["links"]:
+        link.pop("centres"), link.pop("overlap")
+    path.write_text(json.dumps(content))
+    with pytest.raises(ValueError, match="earlier version"):
+        mos.Registration.load(path)

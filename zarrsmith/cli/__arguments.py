@@ -502,9 +502,10 @@ FUSE_HELP = """\
 
 REGISTER_HELP = """\
     Measure the errors of the stage positions of a mosaic from the image data, by matching the overlaps
-    of neighbouring tiles, and save them to a file that `zarrsmith fuse -reg` uses. Only translations
-    are corrected. Registration reads a bounded amount of data from one channel at one timepoint, and
-    the result holds for every channel and timepoint.
+    of neighbouring tiles, and save them to a file that `zarrsmith fuse -reg` uses. Registration reads
+    a bounded amount of data from one channel at one timepoint, and the result holds for every channel
+    and timepoint. Where tile groups (e.g. left and right illumination) meet, the tilt of each group is
+    removed inside its tiles, and the z offset between the groups is measured per channel.
 
     Examples:
       zarrsmith register -i /path/to/2026-10-14_103957 -r registration.json -rc autofluo-488

@@ -96,7 +96,8 @@ input,microscope,output,downsample,projection,blend,num_levels,shards
 `register` measures the errors of the stage positions of a mosaic from the image data and saves them to a file that `fuse -reg` uses (see [Content-based registration](mosaic.md#content-based-registration)):
 
 ```console
-# measure on one channel: the result holds for every channel and timepoint
+# measure on one channel: the result holds for every channel and timepoint (only the z offset
+# between tile groups, e.g. left and right illumination, is measured per channel)
 zarrsmith register -i /path/to/2026-10-14_103957 -r registration.json -rc autofluo-488
 
 # fuse with these positions, as many times as needed

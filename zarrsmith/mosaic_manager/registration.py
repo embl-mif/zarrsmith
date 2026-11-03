@@ -1,7 +1,7 @@
 """Content-based registration of mosaic tiles: correct stage positions from the image data.
 
-Registration is translation-only and runs in three steps, on one **reference channel** at
-one **reference timepoint**; the result is applied to every channel and timepoint:
+Registration runs in three steps, on one **reference channel** at one **reference timepoint**;
+the result is applied to every channel and timepoint:
 
 1. **Pairs.** Tiles whose boxes share a face (within the search range) are paired, inside
    one field. Only the overlap of a pair is read, widened by the search range ``max_shift``.
@@ -11,15 +11,26 @@ one **reference timepoint**; the result is applied to every channel and timepoin
    chunks again and again). Small probes first locate the depths where both tiles have
    signal. Each slab is matched on its own, with phase correlation proposing shifts and
    normalized cross-correlation (NCC) on the real overlap choosing between them, and
-   reading stops as soon as two slabs agree. Results are saved after every pair, so an
-   interrupted run resumes without reading anything again.
-3. **Solve.** Weighted least squares over all links, per axis, with a weak pull towards the
-   stage position, so that tiles without a reliable link stay close to it. Links that
-   disagree with the solution are dropped and the fit is repeated. Thresholds can be changed
-   and the fit repeated (:meth:`Registration.solve`) without reading any pixel.
+   reading stops as soon as two slabs agree. A last pass matches a small part of the overlap
+   at full resolution. Results are saved after every pair, so an interrupted run resumes
+   without reading anything again.
+3. **Solve.** Weighted least squares over the links of every **block** (the tiles of one group
+   in one field), per axis. Links that disagree with the solution are dropped and the fit is
+   repeated. Tiles without a reliable link follow the linear trend of the corrections of
+   their block, or stay at the stage position when there is no trend. Thresholds can be
+   changed and the fit repeated (:meth:`Registration.solve`) without reading any pixel.
 
-Applying a registration only updates :attr:`Tile.origin
-<zarrsmith.mosaic_manager.tile.Tile.origin>` in memory, see
+Moving tiles is exact when all of them share one orientation, which also covers a stage
+rotated against the camera and a wrong pixel size. Blocks of one field can differ, however:
+the planes of the left and right illumination sides of a light-sheet microscope can be
+tilted differently. A z offset between neighbours then comes from the tilt inside the tiles
+and must not add up over the mosaic, or the blocks drift apart at their seam. So in a field
+with several blocks, tiles keep their stage height and the tilt of their block, fitted on
+its links, is removed inside them (:class:`TiltedArray`). The blocks are then placed against
+each other with one offset, from all the links between them. In z that offset is measured
+per channel, as the channels can differ between blocks.
+
+Applying a registration only changes the tiles in memory, see
 :meth:`MosaicManager.apply_registration
 <zarrsmith.mosaic_manager.MosaicManager.apply_registration>`. Fusion then places the tiles
 as usual: on whole output voxels, with no interpolation.
@@ -52,8 +63,8 @@ from .tile import Tile, series_keys
 
 logger = logging.getLogger("zarrsmith")
 
-#: Version of the registration file.
-FILE_VERSION = 1
+#: Version of the registration file. Version 1 had no fields and no tile centres in its links.
+FILE_VERSION = 2
 
 #: Default search range, as a fraction of the tile size per axis (z, y, x): stage errors of
 #: up to 3% on each of two tiles give a relative error of up to 6% in y/x.
@@ -88,10 +99,97 @@ _AGREEMENT = 2.0
 _HIGHPASS_SIGMA = 8.0
 #: Weak pull of every tile towards its stage position, relative to a link of NCC 1.
 _STAGE_PULL = 1e-3
+#: Fewest linked tiles, and links, a block needs for a linear trend, and for a tilt.
+_MIN_TREND_TILES = 4
+_MIN_TILT_LINKS = 3
+#: Links between two blocks measured in every other channel, for its z offset between them.
+_CHANNEL_SEAMS = 4
+#: Planes of the part of an overlap matched at full resolution.
+_FINE_PLANES = 128
 #: Attempts at measuring a pair, and seconds before the second one (doubled after that):
 #: on a network drive a read now and then fails for no lasting reason.
 _READ_ATTEMPTS = 4
 _RETRY_SECONDS = 15.0
+
+
+# ---------------------------------------------------------------------------
+# tilted planes
+# ---------------------------------------------------------------------------
+
+class TiltedArray:
+    """Lazy ``(z, y, x)`` view of a tile with the tilt of its planes removed.
+
+    Every column ``(y, x)`` moves along z by a whole number of planes, the rounded
+    ``-(tilt_y * u_y + tilt_x * u_x) / voxel_z``, with ``u`` its distance to the tile centre in
+    sample units. Voxel values are not interpolated. Planes are added so that every column
+    fits: :attr:`lead` before plane 0 of the tile, and voxels without data read as 0.
+    The data is read only when sliced, and whole planes or chunks are read as for ``data``.
+    """
+
+    def __init__(self, data, voxel_size, tilt):
+        self.data = data
+        self.voxel_size = tuple(float(v) for v in voxel_size)
+        self.tilt = tuple(float(v) for v in tilt)
+        self.picklable = getattr(data, "picklable", False)
+        self.dtype = np.dtype(data.dtype)
+        self.ndim = 3
+        nz, ny, nx = (int(n) for n in data.shape)
+        corners = self._columns(slice(0, ny), slice(0, nx))
+        low, high = int(corners.min()), int(corners.max())
+        self.lead = -low  # planes before plane 0 of the tile
+        self.shape = (nz + high - low, ny, nx)
+        chunks = getattr(data, "chunks", None)
+        if chunks is not None:
+            self.chunks = chunks
+
+    def _columns(self, ys: slice, xs: slice) -> np.ndarray:
+        """Planes every column of the tile moves, as integers."""
+        vz, vy, vx = self.voxel_size
+        ny, nx = self.data.shape[1:]
+        rows = (np.arange(ys.start, ys.stop)[:, None] - (ny - 1) / 2) * vy
+        columns = (np.arange(xs.start, xs.stop)[None, :] - (nx - 1) / 2) * vx
+        return np.rint(-(self.tilt[0] * rows + self.tilt[1] * columns) / vz).astype(int)
+
+    def __getitem__(self, key) -> np.ndarray:
+        key = key if isinstance(key, tuple) else (key,)
+        if any(k is Ellipsis for k in key):
+            i = key.index(Ellipsis)
+            key = key[:i] + (slice(None),) * (3 - len(key) + 1) + key[i + 1:]
+        key = key + (slice(None),) * (3 - len(key))
+        selection, dropped = [], []
+        for axis, (k, n) in enumerate(zip(key, self.shape)):
+            if isinstance(k, (int, np.integer)):
+                k = int(k) + (n if k < 0 else 0)
+                selection.append(slice(k, k + 1))
+                dropped.append(axis)
+            else:
+                start, stop, step = k.indices(n)
+                if step != 1:
+                    raise IndexError("TiltedArray slices cannot have a step.")
+                selection.append(slice(start, max(start, stop)))
+        zs, ys, xs = selection
+        out = np.zeros((zs.stop - zs.start, ys.stop - ys.start, xs.stop - xs.start), self.dtype)
+        if out.size:
+            moves = self._columns(ys, xs)
+            depth = self.data.shape[0]
+            for move in np.unique(moves):
+                first = zs.start - self.lead - int(move)  # plane of the tile at the top of the selection
+                lo, hi = max(first, 0), min(first + out.shape[0], depth)
+                if hi <= lo:
+                    continue
+                mask = moves == move
+                rows, columns = np.flatnonzero(mask.any(axis=1)), np.flatnonzero(mask.any(axis=0))
+                j0, j1, i0, i1 = rows[0], rows[-1] + 1, columns[0], columns[-1] + 1
+                block = np.asarray(self.data[lo:hi, ys.start + j0:ys.start + j1, xs.start + i0:xs.start + i1])
+                inside = mask[j0:j1, i0:i1]
+                out[lo - first:hi - first, j0:j1, i0:i1][:, inside] = block[:, inside]
+        return np.squeeze(out, axis=tuple(dropped)) if dropped else out
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def __repr__(self) -> str:
+        return f"TiltedArray({self.data!r}, tilt={self.tilt}, shape={self.shape})"
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +201,11 @@ def position_id(key: tuple) -> str:
     ``"group|stack|rank"``, shared by its tiles in every channel and timepoint."""
     _, group, stack, rank = key
     return f"{'' if group is None else group}|{'' if stack is None else stack}|{rank}"
+
+
+def _group_of(position: str) -> str:
+    """Group in a :func:`position_id`."""
+    return position.split("|", 1)[0]
 
 
 def _max_shift_fractions(max_shift) -> Tuple[float, float, float]:
@@ -367,6 +470,7 @@ class _PairJob:
     side_budget: float
     min_ncc: float
     ds: Optional[Tuple[int, int, int]] = None
+    channel: Optional[str] = None  # set for the z offset of another channel than the reference
 
 
 def _slab_depths(job: _PairJob, lo, hi, reach_planes: int, budget: float) -> Tuple[int, List[Tuple[int, int]]]:
@@ -469,8 +573,13 @@ def _measure_once(job: _PairJob) -> dict:
     lo, hi = _box(a, b, limit)
     if flat:
         lo[0], hi[0] = min(a.origin[0], b.origin[0]), max(a.extent[1][0], b.extent[1][0])
+    centre = [(np.array(t.origin) + (np.array(t.shape) - 1) / 2 * voxel).tolist() for t in (a, b)]
+    nominal = _box(a, b, np.zeros(3))
     link: Dict[str, Any] = {"a": job.a, "b": job.b, "size": [float(v) for v in size], "flat": flat,
+                            "centres": centre, "overlap": ((nominal[0] + nominal[1]) / 2).tolist(),
                             "estimates": [], "read_mb": 0.0, "slabs_tried": 0, "slabs_available": 1, "signal": True}
+    if job.channel is not None:
+        link["channel"] = job.channel
     spent = 0.0
 
     if flat:
@@ -531,8 +640,60 @@ def _measure_once(job: _PairJob) -> dict:
                                   "z": [int(z0), int(z1)], "structure": None if math.isinf(score) else float(score)})
         if len(_agreeing(link["estimates"], job.min_ncc)) >= 2:
             break
+    if job.channel is None and job.ds is None:
+        spent += _match_finely(job, link, nominal, voxel, flat, spent)
     link["read_mb"] = spent / 1e6
     return link
+
+
+def _match_finely(job: _PairJob, link: dict, nominal, voxel, flat: bool, spent: float) -> float:
+    """Match a small part of the overlap at full resolution, near the shift already found.
+
+    Only when that shift was measured on downsampled images, and if the budget allows it.
+    Sets ``link["fine"]`` and returns the bytes read.
+    """
+    group = _agreeing(link["estimates"], job.min_ncc)
+    if not group or all(v <= u * 1.001 for v, u in zip(group[0]["voxel"][1:], voxel[1:])):
+        return 0.0
+    a, b = job.tile_a, job.tile_b
+    best = max(group, key=lambda e: e["ncc"])
+    coarse = np.array(best["voxel"])
+    lo, hi = nominal[0].copy(), nominal[1].copy()
+    planes = min(_FINE_PLANES, best["z"][1] - best["z"][0])
+    middle = a.origin[0] + (best["z"][0] + best["z"][1]) / 2 * voxel[0]
+    if not flat:
+        lo[0], hi[0] = middle - planes / 2 * voxel[0], middle + planes / 2 * voxel[0]
+    else:
+        lo[0], hi[0] = min(a.origin[0], b.origin[0]), max(a.extent[1][0], b.extent[1][0])
+    # the whole width across the seam, as much of the length as fits, from its middle
+    along = 1 if hi[1] - lo[1] >= hi[2] - lo[2] else 2
+    across = 3 - along
+    wide = (hi[across] - lo[across]) / voxel[across]
+    length = min((hi[along] - lo[along]) / voxel[along], _WORK_VOXELS / max(planes if not flat else 1, 1) / max(wide, 1))
+    centre = (lo[along] + hi[along]) / 2
+    lo[along], hi[along] = centre - length / 2 * voxel[along], centre + length / 2 * voxel[along]
+    ds = (1, 1, 1)
+    crop_a, crop_b = _crop(a, lo, hi, ds), _crop(b, lo, hi, ds)
+    if flat:
+        crop_a[0], crop_b[0] = (0, a.shape[0]), (0, b.shape[0])
+    if min(p[1] - p[0] for p in crop_a + crop_b) < 1:
+        return 0.0
+    cost = _read_cost(a, crop_a, ds) + _read_cost(b, crop_b, ds)
+    if (spent + cost) / 2 > job.side_budget:
+        return 0.0
+    arr_a, wa = _read(a, crop_a, ds, flat)
+    arr_b, wb = _read(b, crop_b, ds, flat)
+    if flat:
+        wa[0], wb[0] = 0.0, 0.0
+    expected = (np.array(best["shift"]) - (wa - wb)) / voxel
+    reach = _AGREEMENT * coarse / voxel
+    if flat:
+        expected[0], reach[0] = 0.0, 0.0
+    found = _match(arr_a, arr_b, expected, reach)
+    if found is not None and found["ncc"] >= job.min_ncc:
+        shift = (wa - wb) + np.array(found["s"]) * voxel
+        link["fine"] = {"shift": [float(v) for v in shift], "ncc": found["ncc"]}
+    return cost
 
 
 # ---------------------------------------------------------------------------
@@ -552,66 +713,202 @@ def _link_value(link: dict, min_ncc: float) -> Tuple[Optional[dict], str]:
     if len(group) == 1 and len(estimates) > 1 and sum(e["ncc"] >= min_ncc for e in estimates) > 1:
         return None, "slabs disagree"
     weights = np.array([e["ncc"] for e in group])
-    return {"shift": np.average([e["shift"] for e in group], axis=0, weights=weights),
-            "voxel": np.array(group[0]["voxel"]),
-            "ncc": float(np.mean(weights)),
+    shift = np.average([e["shift"] for e in group], axis=0, weights=weights)
+    fine = link.get("fine")
+    if fine is not None and fine["ncc"] >= min_ncc:
+        shift = np.array(fine["shift"])
+    return {"shift": shift, "voxel": np.array(group[0]["voxel"]), "ncc": float(np.mean(weights)),
             "ncc_stage": float(np.mean([e["ncc_stage"] for e in group]))}, ""
 
 
-def _least_squares(ids: Sequence[str], used: List[dict]) -> np.ndarray:
+def _least_squares(ids: Sequence[str], used: List[dict], targets: Optional[np.ndarray] = None) -> np.ndarray:
     """Corrections ``(n, 3)`` from links ``x[b] - x[a] = shift``, weighted by their NCC, with a
-    weak pull to 0, which keeps every group of connected tiles centred on its stage positions."""
+    weak pull to ``targets`` (default 0), which also places tiles without links."""
     index = {name: i for i, name in enumerate(ids)}
     n, m = len(ids), len(used)
+    targets = np.zeros((n, 3)) if targets is None else targets
+    out = targets.copy()
+    if not m:
+        return out
     rows, cols, values = [], [], []
     for k, u in enumerate(used):
         rows += [k, k]
         cols += [index[u["a"]], index[u["b"]]]
         values += [-1.0, 1.0]
     design = sparse.csr_matrix((values, (rows, cols)), shape=(m, n))
-    weights = sparse.diags([u["ncc"] for u in used]) if m else sparse.csr_matrix((0, 0))
+    weights = sparse.diags([u["ncc"] for u in used])
     normal = (design.T @ weights @ design + _STAGE_PULL * sparse.identity(n)).tocsc()
-    out = np.zeros((n, 3))
-    if m:
-        target = np.array([u["shift"] for u in used])
-        for axis in range(3):
-            out[:, axis] = spsolve(normal, design.T @ (weights @ target[:, axis]))
+    wanted = np.array([u["shift"] for u in used]) - design @ targets
+    for axis in range(3):
+        out[:, axis] += spsolve(normal, design.T @ (weights @ wanted[:, axis]))
     return out
 
 
-def _solve(ids: Sequence[str], links: List[dict], *, min_ncc: float, max_shift, max_residual: float):
-    """``(corrections, per-link outcome)``: the fit over the usable links, dropping the link
-    furthest from the solution until all are within ``max_residual`` working voxels."""
-    used, outcome = [], {}
+def _fit_block(ids: Sequence[str], used: List[dict], stage: np.ndarray, max_residual: float, outcome: dict,
+               trend: bool) -> np.ndarray:
+    """Corrections of one block, dropping from ``used`` the link furthest from the solution until
+    all are within ``max_residual`` working voxels. With ``trend``, tiles without a link follow
+    the linear trend of the others, if there are enough of them to fit it."""
+    index = {name: i for i, name in enumerate(ids)}
+    corrections = _least_squares(ids, used)
+
+    def residuals(values):
+        return [float(np.max(np.abs(values[index[u["b"]]] - values[index[u["a"]]] - u["shift"]) / u["voxel"])) for u in used]
+
+    while used:
+        distances = residuals(corrections)
+        worst = int(np.argmax(distances))
+        if distances[worst] <= max_residual:
+            break
+        dropped = used.pop(worst)
+        outcome[dropped["key"]] = {"status": "rejected", "reason": f"disagrees with the others ({distances[worst]:.1f} voxels)"}
+        corrections = _least_squares(ids, used)
+    linked = sorted({index[name] for u in used for name in (u["a"], u["b"])})
+    if trend and len(linked) >= _MIN_TREND_TILES:
+        design = np.c_[stage[:, 1:], np.ones(len(ids))]
+        if np.linalg.matrix_rank(design[linked]) == 3:
+            coefficients = np.linalg.lstsq(design[linked], corrections[linked], rcond=None)[0]
+            corrections = _least_squares(ids, used, design @ coefficients)
+    return corrections
+
+
+def _fit_tilt(used: List[dict], max_residual: float) -> Tuple[float, float]:
+    """``(z per sample unit of y, of x)`` of the planes of a block, from its links: neighbours
+    meet with a z offset equal to the tilt times the distance between their centres."""
+    moved = [u for u in used if not u["flat"]]
+    while len(moved) >= _MIN_TILT_LINKS:
+        distance = np.array([np.subtract(u["centres"][1], u["centres"][0])[1:] for u in moved])
+        offset = np.array([u["shift"][0] for u in moved])
+        weight = np.sqrt([u["ncc"] for u in moved])
+        tilt = np.linalg.lstsq(distance * weight[:, None], offset * weight, rcond=None)[0]
+        away = np.abs(distance @ tilt - offset) / np.array([u["voxel"][0] for u in moved])
+        if away.max() <= max_residual:
+            return float(tilt[0]), float(tilt[1])
+        moved.pop(int(np.argmax(away)))
+    return 0.0, 0.0
+
+
+def _without_tilt(value: dict, tilt_a, tilt_b) -> float:
+    """z offset of a link once both tiles have their tilt removed, at the middle of their overlap."""
+    a, b = (np.subtract(value["overlap"], c)[1:] for c in value["centres"])
+    return float(value["shift"][0] - np.dot(tilt_a, a) + np.dot(tilt_b, b))
+
+
+def _place_blocks(blocks: List[str], across: List[dict], max_residual: float, outcome: dict):
+    """``({block: offset (z, y, x)}, links used)``, relative to the first block, from the median of
+    the links between each two blocks. A block without links stays where it is."""
+    offsets = {blocks[0]: np.zeros(3)}
+    used: List[dict] = []
+    todo = list(blocks[1:])
+    while todo:
+        step = None
+        for block in todo:
+            for known in offsets:
+                seam = [u for u in across if {u["block_a"], u["block_b"]} == {known, block}]
+                if seam:
+                    step = (block, known, seam)
+                    break
+            if step:
+                break
+        if step is None:
+            for block in todo:
+                offsets[block] = np.zeros(3)
+            break
+        block, known, seam = step
+        todo.remove(block)
+        rest = np.array([u["residual"] * (1 if u["block_b"] == block else -1) for u in seam])
+        middle = np.median(rest, axis=0)
+        offsets[block] = offsets[known] + middle
+        for u, r in zip(seam, rest):
+            away = float(np.max(np.abs(r - middle) / u["voxel"]))
+            if away > max_residual:
+                outcome[u["key"]] = {"status": "rejected", "reason": f"disagrees with the others ({away:.1f} voxels)"}
+            else:
+                outcome[u["key"]] = {"status": "used", "ncc": u["ncc"], "ncc_stage": u["ncc_stage"], "residual": away}
+                used.append(u)
+    return offsets, used
+
+
+def _solve(positions: Dict[str, List[float]], fields: Dict[str, str], links: List[dict], channel_links: Dict[str, List[dict]],
+           reference: str, *, min_ncc: float, max_shift, max_residual: float):
+    """Fit a whole registration: ``(shifts, outcome, tilts, z offsets, notes)``, see :class:`Registration`."""
+    ids = list(positions)
     limits = _max_shift_fractions(max_shift)
-    for link in links:
-        key = (link["a"], link["b"])
+    block_of = {name: f"{fields.get(name, '')}|{_group_of(name)}" for name in ids}
+    outcome: Dict[Tuple[str, str], dict] = {}
+
+    def usable(link, record=True):
         value, why = _link_value(link, min_ncc)
         if value is not None and np.any(np.abs(value["shift"]) > np.array(link["size"]) * limits + value["voxel"]):
             value, why = None, "shift above max_shift"
         if value is None:
-            outcome[key] = {"status": "rejected", "reason": why}
-        else:
-            used.append({"a": link["a"], "b": link["b"], "key": key, **value})
-    index = {name: i for i, name in enumerate(ids)}
-    corrections = _least_squares(ids, used)
-    while used:
-        worst, worst_value = None, 0.0
-        for i, u in enumerate(used):
-            found = corrections[index[u["b"]]] - corrections[index[u["a"]]]
-            value = float(np.max(np.abs(found - u["shift"]) / u["voxel"]))
-            if value > worst_value:
-                worst, worst_value = i, value
-        if worst is None or worst_value <= max_residual:
-            break
-        dropped = used.pop(worst)
-        outcome[dropped["key"]] = {"status": "rejected", "reason": f"disagrees with the others ({worst_value:.1f} voxels)"}
-        corrections = _least_squares(ids, used)
-    for u in used:
-        found = corrections[index[u["b"]]] - corrections[index[u["a"]]]
-        outcome[u["key"]] = {"status": "used", "ncc": u["ncc"], "ncc_stage": u["ncc_stage"],
-                             "residual": float(np.max(np.abs(found - u["shift"]) / u["voxel"]))}
-    return corrections, outcome
+            if record:
+                outcome[(link["a"], link["b"])] = {"status": "rejected", "reason": why}
+            return None
+        return {"a": link["a"], "b": link["b"], "key": (link["a"], link["b"]), "flat": link["flat"],
+                "centres": link.get("centres"), "overlap": link.get("overlap"),
+                "block_a": block_of[link["a"]], "block_b": block_of[link["b"]], **value}
+
+    values = [v for v in (usable(link) for link in links) if v is not None]
+    corrections = {name: np.zeros(3) for name in ids}
+    tilts: Dict[str, Tuple[float, float]] = {}
+    z_offsets: Dict[str, Dict[str, float]] = {}
+    notes: List[str] = []
+    for field in sorted({fields.get(name, "") for name in ids}):
+        members = [name for name in ids if fields.get(name, "") == field]
+        blocks = sorted({block_of[name] for name in members})
+        chosen = [v for v in values if v["a"] in set(members)]
+        several = len(blocks) > 1
+        if several and any(not v["flat"] and v["centres"] is None for v in chosen):
+            raise ValueError("This registration was made by an earlier version, which cannot place the groups of "
+                             "a mosaic against each other: run the registration again with a new file.")
+        for block in blocks:
+            inside = [v for v in chosen if v["block_a"] == v["block_b"] == block]
+            tilt = _fit_tilt(inside, max_residual) if several else (0.0, 0.0)
+            if tilt != (0.0, 0.0):
+                tilts[block] = tilt
+                for v in inside:  # what remains of the z offsets once the tilt is taken out of the tiles
+                    v["shift"] = v["shift"].copy()
+                    v["shift"][0] = _without_tilt(v, tilt, tilt)
+            names = [name for name in members if block_of[name] == block]
+            stage = np.array([positions[name] for name in names])
+            fitted = _fit_block(names, inside, stage, max_residual, outcome, trend=bool(fields))
+            for name, c in zip(names, fitted):
+                corrections[name] = c
+            for u in inside:
+                found = corrections[u["b"]] - corrections[u["a"]]
+                outcome[u["key"]] = {"status": "used", "ncc": u["ncc"], "ncc_stage": u["ncc_stage"],
+                                     "residual": float(np.max(np.abs(found - u["shift"]) / u["voxel"]))}
+        if not several:
+            continue
+
+        def seam_links(items):
+            seam = [v for v in items if v["block_a"] != v["block_b"]]
+            for v in seam:
+                v["shift"] = v["shift"].copy()
+                if not v["flat"]:
+                    v["shift"][0] = _without_tilt(v, tilts.get(v["block_a"], (0.0, 0.0)), tilts.get(v["block_b"], (0.0, 0.0)))
+                v["residual"] = v["shift"] - (corrections[v["b"]] - corrections[v["a"]])
+            return seam
+
+        offsets, _ = _place_blocks(blocks, seam_links(chosen), max_residual, outcome)
+        for name in members:  # y and x hold for all channels; z is kept per channel, below
+            corrections[name] = corrections[name] + offsets[block_of[name]] * [0, 1, 1]
+        for block in blocks:
+            z_offsets.setdefault(block, {})[reference] = float(offsets[block][0])
+        for channel, measured in channel_links.items():
+            items = [v for v in (usable(link, record=False) for link in measured) if v is not None and v["a"] in set(members)]
+            seam = seam_links(items)
+            for u in seam:  # y and x of the other block are in the corrections by now
+                u["residual"] = u["residual"] * [1, 0, 0]
+            found, _ = _place_blocks(blocks, seam, math.inf, {})
+            missing = [block for block in blocks[1:] if not any(block in (u["block_a"], u["block_b"]) for u in seam)]
+            for block in blocks:
+                z_offsets[block][channel] = float(offsets[block][0] if block in missing else found[block][0])
+            if missing:
+                notes.append(f"Channel {channel!r} has no trusted match between blocks {', '.join(missing)}: "
+                             f"it uses the z offset of {reference!r}.")
+    return corrections, outcome, tilts, z_offsets, notes
 
 
 # ---------------------------------------------------------------------------
@@ -623,8 +920,11 @@ class Registration:
     """Measurements of a registration and the corrections solved from them.
 
     Created by :func:`register_tiles`, or read back with :meth:`load`. ``shifts`` maps every
-    position (:func:`position_id`) to its ``(z, y, x)`` correction in sample units. Nothing
-    changes on the tiles until it is given to
+    position (:func:`position_id`) to its ``(z, y, x)`` correction in sample units, and
+    :meth:`placement` gives what a tile of a position gets in one channel. In a field with
+    several blocks (the tiles of one group), ``tilts`` has the ``(z per unit of y, of x)`` of the
+    planes of a block and ``z_offsets`` the z offset of a block per channel; a block is named
+    ``"field|group"``. Nothing changes on the tiles until it is given to
     :meth:`MosaicManager.apply_registration <zarrsmith.mosaic_manager.MosaicManager.apply_registration>`.
     """
 
@@ -635,13 +935,33 @@ class Registration:
     reference_timepoint: int
     settings: Dict[str, Any]
     links: List[dict] = _dc_field(default_factory=list)
+    fields: Dict[str, str] = _dc_field(default_factory=dict)  # field of every position
+    channel_links: Dict[str, List[dict]] = _dc_field(default_factory=dict)  # measured in the other channels
     shifts: Dict[str, List[float]] = _dc_field(default_factory=dict)
+    tilts: Dict[str, Tuple[float, float]] = _dc_field(default_factory=dict)
+    z_offsets: Dict[str, Dict[str, float]] = _dc_field(default_factory=dict)
+    notes: List[str] = _dc_field(default_factory=list)
     outcome: Dict[Tuple[str, str], dict] = _dc_field(default_factory=dict)
 
     @property
     def n_used(self) -> int:
         """Links used in the solution."""
         return sum(o["status"] == "used" for o in self.outcome.values())
+
+    def _block(self, position: str) -> str:
+        return f"{self.fields.get(position, '')}|{_group_of(position)}"
+
+    def placement(self, position: str, channel: str) -> Tuple[Optional[np.ndarray], Optional[Tuple[float, float]]]:
+        """``(shift (z, y, x), tilt or None)`` of the tile of ``position`` in ``channel``; the
+        shift is ``None`` for a position this registration does not know. A channel it did
+        not measure gets the z offset of the reference channel."""
+        shift = self.shifts.get(position)
+        if shift is None:
+            return None, None
+        block = self._block(position)
+        offsets = self.z_offsets.get(block, {})
+        z = offsets.get(channel, offsets.get(self.reference_channel, 0.0))
+        return np.array(shift) + [z, 0, 0], self.tilts.get(block)
 
     def solve(self, *, min_ncc: Optional[float] = None, max_shift=None, max_residual: Optional[float] = None) -> "Registration":
         """Fit the corrections from the saved measurements; reads no pixel data.
@@ -653,19 +973,20 @@ class Registration:
                            ("max_shift", None if max_shift is None else list(_max_shift_fractions(max_shift)))):
             if value is not None:
                 self.settings[key] = value
-        ids = list(self.positions)
-        corrections, self.outcome = _solve(ids, self.links, min_ncc=self.settings["min_ncc"],
-                                           max_shift=self.settings["max_shift"],
-                                           max_residual=self.settings["max_residual"])
-        self.shifts = {name: [float(v) for v in c] for name, c in zip(ids, corrections)}
+        corrections, self.outcome, self.tilts, self.z_offsets, self.notes = _solve(
+            self.positions, self.fields, self.links, self.channel_links, self.reference_channel,
+            min_ncc=self.settings["min_ncc"], max_shift=self.settings["max_shift"],
+            max_residual=self.settings["max_residual"])
+        self.shifts = {name: [float(v) for v in corrections[name]] for name in self.positions}
         return self
 
     def summary(self) -> str:
         """Report: links used and rejected (with the reasons), size of the corrections, reads."""
         lines = [f"{len(self.positions)} positions, {len(self.links)} links, {self.n_used} used "
                  f"(reference channel {self.reference_channel!r}, timepoint {self.reference_timepoint})"]
-        read = sum(link["read_mb"] for link in self.links)
-        lines.append(f"Read {read / 1e3:.1f} GB in {sum(link['slabs_tried'] for link in self.links)} slab(s)")
+        measured = self.links + [link for items in self.channel_links.values() for link in items]
+        read = sum(link["read_mb"] for link in measured)
+        lines.append(f"Read {read / 1e3:.1f} GB in {sum(link['slabs_tried'] for link in measured)} slab(s)")
         if self.shifts:
             values = np.abs(np.array(list(self.shifts.values()))) / np.array(self.voxel_size)
             lines.append("Corrections, voxels (z, y, x): median "
@@ -686,8 +1007,15 @@ class Registration:
         linked = {name for key, o in self.outcome.items() if o["status"] == "used" for name in key}
         alone = [name for name in self.positions if name not in linked]
         if alone:
-            lines.append(f"{len(alone)} position(s) without a used link stay at the stage position: "
-                         + ", ".join(alone[:6]) + (", ..." if len(alone) > 6 else ""))
+            lines.append(f"{len(alone)} position(s) without a used link follow the trend of their block, or stay at "
+                         "the stage position: " + ", ".join(alone[:6]) + (", ..." if len(alone) > 6 else ""))
+        for block, (tilt_y, tilt_x) in self.tilts.items():
+            lines.append(f"Tilt of block {block}: {tilt_y * 100:+.2f}% along y, {tilt_x * 100:+.2f}% along x")
+        for block, offsets in self.z_offsets.items():
+            if any(offsets.values()):
+                lines.append(f"z offset of block {block}, planes: " + ", ".join(
+                    f"{channel} {value / self.voxel_size[0]:+.1f}" for channel, value in offsets.items()))
+        lines += self.notes
         return "\n".join(lines)
 
     def save(self, path: str | Path) -> None:
@@ -696,7 +1024,8 @@ class Registration:
         content = {"version": FILE_VERSION, "positions": self.positions, "voxel_size": list(self.voxel_size),
                    "units": self.units, "reference_channel": self.reference_channel,
                    "reference_timepoint": self.reference_timepoint, "settings": self.settings,
-                   "links": self.links, "shifts": self.shifts}
+                   "fields": self.fields, "links": self.links, "channel_links": self.channel_links,
+                   "shifts": self.shifts, "tilts": self.tilts, "z_offsets": self.z_offsets}
         temporary = path.with_name(path.name + ".tmp")
         temporary.write_text(json.dumps(content, indent=1), encoding="utf-8")
         os.replace(temporary, path)
@@ -705,12 +1034,13 @@ class Registration:
     def load(cls, path: str | Path) -> "Registration":
         """Read a file written by :meth:`save`, also one of an unfinished run (without ``shifts``)."""
         content = json.loads(Path(path).read_text(encoding="utf-8"))
-        if content.get("version") != FILE_VERSION:
+        if content.get("version") not in (1, FILE_VERSION):
             raise ValueError(f"{path} has registration file version {content.get('version')!r}, "
                              f"expected {FILE_VERSION}.")
         reg = cls(positions=content["positions"], voxel_size=tuple(content["voxel_size"]), units=content["units"],
                   reference_channel=content["reference_channel"], reference_timepoint=content["reference_timepoint"],
-                  settings=content["settings"], links=content["links"], shifts=content["shifts"])
+                  settings=content["settings"], links=content["links"], fields=content.get("fields", {}),
+                  channel_links=content.get("channel_links", {}), shifts=content["shifts"])
         if reg.shifts:
             reg.solve()
         return reg
@@ -732,12 +1062,14 @@ class RegistrationPlan:
     budget_mb: Optional[float]
     full_gb: float  # both tiles of every pair, whole windows
     limit_gb: float  # the same, within the budget
+    channel_seams: int = 0  # links between blocks also measured in the other channels
 
     def summary(self) -> str:
         """One line with the number of pairs and the data read at most."""
         budget = "no budget" if self.budget_mb is None else f"budget {self.budget_mb:.0f} MB per pair"
+        seams = f", with {self.channel_seams} seams in other channels" if self.channel_seams else ""
         return (f"{self.positions} positions, {len(self.pairs)} pairs in channel {self.reference_channel!r} at "
-                f"timepoint {self.reference_timepoint}: reads at most {self.limit_gb:.1f} GB ({budget}; "
+                f"timepoint {self.reference_timepoint}: reads at most {self.limit_gb:.1f} GB{seams} ({budget}; "
                 f"{self.full_gb:.1f} GB for whole overlaps)")
 
 
@@ -761,7 +1093,21 @@ def plan_registration(
         sides = [_read_cost(t, _crop(t, lo, hi, (1, 1, 1)), (1, 1, 1)) for t in (a, b)]
         full += sum(sides)
         limit += sum(min(s, _side_budget(budget_mb)) for s in sides)
-    return RegistrationPlan(len(refs), pairs, channel, timepoint, fractions, budget_mb, full / 1e9, limit / 1e9)
+    # the z offset between blocks is also measured in every other channel, on a few seams
+    others = len({t.channel for t in tiles}) - 1
+    across: Dict[tuple, List[tuple]] = {}
+    for pair in pairs:
+        a, b = refs[pair[0]], refs[pair[1]]
+        if _group_of(pair[0]) != _group_of(pair[1]) and min(a.shape[0], b.shape[0]) >= _MIN_Z_PLANES:
+            across.setdefault((a.field, *sorted((_group_of(pair[0]), _group_of(pair[1])))), []).append(pair)
+    seams = others * sum(min(_CHANNEL_SEAMS, len(v)) for v in across.values())
+    for pair in [p for v in across.values() for p in v[:_CHANNEL_SEAMS]]:
+        a, b = refs[pair[0]], refs[pair[1]]
+        size = np.minimum(np.array(a.shape) * a.voxel_size, np.array(b.shape) * b.voxel_size)
+        lo, hi = _box(a, b, size * np.array(fractions))
+        sides = [_read_cost(t, _crop(t, lo, hi, (1, 1, 1)), (1, 1, 1)) for t in (a, b)]
+        limit += others * sum(min(s, _side_budget(budget_mb)) for s in sides)
+    return RegistrationPlan(len(refs), pairs, channel, timepoint, fractions, budget_mb, full / 1e9, limit / 1e9, seams)
 
 
 def _map_pairs(jobs: Sequence[_PairJob], workers: int, executor: str, on_result, progress: bool) -> None:
@@ -814,8 +1160,9 @@ def register_tiles(
     Parameters
     ----------
     tiles
-        Tiles to register. Only those of the reference channel and timepoint are read. Tiles
-        left out (e.g. a failed stack) stay at their stage position.
+        Tiles to register. Those of the reference channel and timepoint are read, and in a
+        field with several groups also a few seams between them in the other channels of
+        ``tiles``. Tiles left out (e.g. a failed stack) stay at their stage position.
     save_to
         Registration file, written after every pair. If it exists and has the same
         settings the run continues from it: finished pairs are not read again.
@@ -867,7 +1214,8 @@ def register_tiles(
     identity = {"positions": positions, "reference_channel": channel, "reference_timepoint": timepoint}
 
     save_to = Path(save_to)
-    reg = Registration(voxel_size=first.voxel_size, units=first.units, settings=settings, **identity)
+    fields = {name: str(t.field) for name, t in refs.items()}
+    reg = Registration(voxel_size=first.voxel_size, units=first.units, settings=settings, fields=fields, **identity)
     if save_to.exists():
         old = Registration.load(save_to)
         same = {k: getattr(old, k) for k in identity} == identity and \
@@ -875,7 +1223,7 @@ def register_tiles(
         if not same:
             raise ValueError(f"{save_to} holds another registration (other positions, reference or settings): "
                              "choose another file, or delete it to start again.")
-        reg.links = old.links
+        reg.links, reg.channel_links = old.links, old.channel_links
     if retry_rejected and reg.links:
         reg.solve()
         rejected = {key for key, o in reg.outcome.items() if o["status"] != "used"}
@@ -889,7 +1237,8 @@ def register_tiles(
                 len(jobs), len(done), len(refs), channel, timepoint)
 
     def on_result(link):
-        reg.links.append(link)
+        channel_of = link.get("channel")
+        (reg.links if channel_of is None else reg.channel_links.setdefault(channel_of, [])).append(link)
         reg.save(save_to)
 
     reg.save(save_to)
@@ -906,6 +1255,26 @@ def register_tiles(
         finished = {(link["a"], link["b"]) for link in reg.links}
         _map_pairs([j for j in jobs if (j.a, j.b) not in finished], workers, "thread", on_result, progress)
     reg.solve()
+
+    # the channels can differ in z between blocks: measure that on the best seams of each two blocks
+    keys = {(position_id(k), t.channel): t for k, t in zip(series_keys(tiles), tiles) if t.timepoint == timepoint}
+    seams: Dict[tuple, List[dict]] = {}
+    for link in reg.links:
+        outcome = reg.outcome[(link["a"], link["b"])]
+        if reg._block(link["a"]) != reg._block(link["b"]) and not link["flat"] and outcome["status"] == "used":
+            seams.setdefault(tuple(sorted((reg._block(link["a"]), reg._block(link["b"])))), []).append(link)
+    best = [link for items in seams.values()
+            for link in sorted(items, key=lambda k: reg.outcome[(k["a"], k["b"])]["ncc"], reverse=True)[:_CHANNEL_SEAMS]]
+    others = [c for c in dict.fromkeys(t.channel for t in tiles) if c != channel]
+    known = {c: {(link["a"], link["b"]) for link in reg.channel_links.get(c, [])} for c in others}
+    jobs = [_PairJob(link["a"], link["b"], keys[(link["a"], c)], keys[(link["b"], c)], fractions,
+                     _side_budget(budget_mb), float(min_ncc), None if ds is None else tuple(int(v) for v in ds), c)
+            for c in others for link in best
+            if (link["a"], link["b"]) not in known[c] and (link["a"], c) in keys and (link["b"], c) in keys]
+    if jobs:
+        logger.info("Measuring the z offset between blocks in %d other channel(s): %d seams", len(others), len(jobs))
+        _map_pairs(jobs, workers, executor if executor != "auto" else "thread", on_result, progress)
+        reg.solve()
     reg.save(save_to)
     logger.info("%s", reg.summary())
     return reg

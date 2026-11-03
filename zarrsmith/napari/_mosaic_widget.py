@@ -214,10 +214,19 @@ def register_kwargs(*, reference_channel, reference_timepoint, max_shift_z: floa
 
 
 def move_tile_layers(layers, mosaic) -> None:
-    """Put the tile layers of ``mosaic`` shown in napari at the current positions of their tiles."""
+    """Put the tile layers of ``mosaic`` shown in napari at the current positions of their tiles.
+
+    A layer with a time axis keeps the data it was shown with, so the tilt of a registration
+    only shows there after showing the tiles again.
+    """
     for layer in tile_layers(layers, mosaic.path):
-        origin = mosaic.tiles[layer.metadata["mosaic_tile"]].origin
-        layer.translate = (0.0,) * (layer.ndim - 3) + tuple(origin)  # a time axis does not move
+        t = mosaic.tiles[layer.metadata["mosaic_tile"]]
+        lead, shown = getattr(t.data, "lead", 0), layer.metadata.get("mosaic_lead", 0)
+        if layer.ndim == 3 and lead != shown:  # the tilt of a registration came or went
+            layer.data = mosaic._lazy(t)
+            layer.metadata["mosaic_lead"] = shown = lead
+        origin = (t.origin[0] + (lead - shown) * t.voxel_size[0],) + tuple(t.origin[1:])
+        layer.translate = (0.0,) * (layer.ndim - 3) + origin  # a time axis does not move
 
 
 def move_tile_map(layer, mosaic) -> None:

@@ -696,6 +696,35 @@ def test_positions_move_the_layers_and_keep_the_picks(app, tmp_path):
     assert not tile_map.editable
 
 
+def test_layers_show_the_tilt_of_a_registration(app, tmp_path):
+    from napari.components import ViewerModel
+
+    from .test_mosaic_registration import _Mosaic, _two_sides
+
+    tiles, _, _ = _two_sides()
+    mosaic = _Mosaic(tiles)
+    reg = mosaic.register(tmp_path / "reg.json", max_shift=(0.1, 0.1, 0.1), progress=False)
+    viewer = ViewerModel()
+    t = tiles[0]
+    plain = viewer.add_image(np.asarray(t.data), translate=t.origin, name="tile",
+                             metadata={"mosaic_tile": 0, "mosaic_tile_id": "a", "mosaic_path": str(mosaic.path)})
+    series = viewer.add_image(np.zeros((2,) + t.shape), translate=(0.0,) + t.origin, name="time",
+                              metadata={"mosaic_tile": 0, "mosaic_tile_id": "b", "mosaic_path": str(mosaic.path)})
+    stage_z = t.origin[0]
+
+    mosaic.apply_registration(reg)
+    mw.move_tile_layers(viewer.layers, mosaic)
+    assert plain.data.shape == t.shape and plain.data.shape[0] > 72  # shows the tilted data
+    assert tuple(plain.translate) == t.origin
+    assert series.data.shape[1] == 72  # keeps its data, so the planes stay where they were
+    assert tuple(series.translate)[1] == pytest.approx(t.origin[0] + t.data.lead)
+
+    mosaic.clear_registration()
+    mw.move_tile_layers(viewer.layers, mosaic)
+    assert plain.data.shape[0] == 72
+    assert tuple(plain.translate)[0] == stage_z and plain.metadata["mosaic_lead"] == 0
+
+
 def test_registration_file_and_widget_options(tmp_path):
     assert mw.default_registration_path(tmp_path / "acq").name == "acq_registration.json"
     assert mw.default_registration_path(tmp_path / "scan.czi") == tmp_path / "scan_registration.json"
