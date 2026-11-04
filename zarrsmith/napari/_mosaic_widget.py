@@ -11,6 +11,7 @@ from napari.qt.threading import thread_worker
 from qtpy.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from zarrsmith import mosaic_manager as mos
+from zarrsmith.mosaic_manager.fusion import ALL_TIMEPOINTS
 from zarrsmith.mosaic_manager.tile import series_keys
 from ._batch_csv import append_batch_csv
 from ._layout import compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_section, make_title
@@ -555,7 +556,7 @@ def mosaic_widget():
         timepoints = mosaic.timepoints
         fuse_widget.timepoints.choices = timepoints
         fuse_widget.timepoints.value = timepoints
-        fuse_widget.reference_timepoint.choices = timepoints
+        fuse_widget.reference_timepoint.choices = list(timepoints) + [ALL_TIMEPOINTS]
         fuse_widget.reference_timepoint.value = timepoints[0]
         fuse_widget.timepoints.visible = fuse_widget.reference_timepoint.visible = len(timepoints) > 1
         for w in (show_widget, fuse_widget):
@@ -642,7 +643,8 @@ def mosaic_widget():
                     "tooltip": "Timepoints to fuse. More than one gives an output with a t axis."},
         reference_timepoint={"label": "Reference timepoint", "widget_type": "ComboBox", "choices": [],
                              "tooltip": "Timepoint whose tiles set the geometry (output size, tile positions, "
-                                        "transitions): every timepoint is fused with it."},
+                                        "transitions): every timepoint is fused with it. 'all' places every "
+                                        "timepoint at its own stage positions instead."},
         tiles_to_fuse={"label": "Tiles to fuse", "choices": list(TILE_MODES), "value": "all tiles",
                        "tooltip": "Tiles whose layer is hidden (or not selected) are not read and stay blank; "
                                   "the output keeps its full size. Tiles that are not shown are fused."},

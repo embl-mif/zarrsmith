@@ -389,11 +389,11 @@ def test_visualize_scrolls_through_time_from_the_first_timepoint():
     m.visualize(viewer=v)  # the first layer of a viewer: napari starts it in the middle of every axis
     assert len(v.layers) == 2
     layer = v.layers[1]
-    assert layer.data.shape == (5, 4, 8, 8)
+    assert layer.data.shape == (5, 4, 8, 12)  # the tile moves 4 voxels over time
     assert v.dims.ndim == 4 and v.dims.axis_labels[0] == "T"
     assert v.dims.current_step[0] == 0
     assert v.dims.nsteps[0] == 5
-    assert tuple(layer.translate) == (0.0, 0.0, 0.0, 4.0)  # at its earliest position
+    assert tuple(layer.translate) == (0.0, 0.0, 0.0, 4.0)  # where the tile is furthest left
     assert tuple(layer.scale) == (1.0, 1.0, 1.0, 1.0)
     assert all(lay.visible for lay in v.layers)
     assert layer.metadata["mosaic_tile_id"] == "A/s1"
@@ -449,6 +449,84 @@ def test_visualize_reads_ahead_the_tiles_of_the_first_timepoint(tmp_path, monkey
     v.add_image(np.zeros((8, 8)))  # the 2D view of the plugin, with something already shown
     m.visualize(viewer=v)
     assert read == ["t0"]
+
+
+def _frame_box(frame):
+    """``(start, stop)`` per axis of the non-zero voxels of one frame."""
+    return [(int(np.flatnonzero(np.asarray(frame).any(axis=other))[0]),
+             int(np.flatnonzero(np.asarray(frame).any(axis=other))[-1]) + 1)
+            for other in ((1, 2), (0, 2), (0, 1))]
+
+
+def test_visualize_shows_every_timepoint_at_its_own_position():
+    ViewerModel = _napari()
+    tiles = [_tile(10, 5, 0, stack="s", z=2, y=1),   # x 5, y 1, z 2
+             _tile(20, 8, 1, stack="s", z=0, y=3),   # moves right, down and to a lower z
+             _tile(30, 2, 2, stack="s", z=1, y=1)]   # the furthest left: it sets the layer's x
+    v = ViewerModel()
+    _mosaic(tiles).visualize(viewer=v)
+    layer = v.layers[0]
+    assert tuple(layer.translate) == (0.0, 0.0, 1.0, 2.0)
+    assert layer.data.shape == (3, 4 + 2, 8 + 2, 8 + 6)
+    data = layer.data.compute()
+    assert data.dtype == np.uint16
+    # in the layer, relative to its translate
+    assert _frame_box(data[0]) == [(2, 6), (0, 8), (3, 11)] and (data[0][data[0] > 0] == 10).all()
+    assert _frame_box(data[1]) == [(0, 4), (2, 10), (6, 14)] and (data[1][data[1] > 0] == 20).all()
+    assert _frame_box(data[2]) == [(1, 5), (0, 8), (0, 8)] and (data[2][data[2] > 0] == 30).all()
+
+
+def test_visualize_tile_that_does_not_move_is_not_padded():
+    ViewerModel = _napari()
+    tiles = [_tile(10, 4.3, t, stack="s", z=1.2) for t in range(3)]
+    tiles[2] = _tile(30, 4.5, 2, stack="s", z=1.2)  # less than half a voxel away
+    v = ViewerModel()
+    _mosaic(tiles).visualize(viewer=v)
+    assert v.layers[0].data.shape == (3, 4, 8, 8)
+    assert tuple(v.layers[0].translate) == pytest.approx((0.0, 1.2, 0.0, 4.3))
+
+
+def test_visualize_moving_tile_reads_a_plane_once_and_blank_areas_never(tmp_path):
+    from zarrsmith.mosaic_manager.tiff_array import PlaneStackArray
+
+    class Counting(PlaneStackArray):
+        def __init__(self, label):
+            super().__init__((3, 8, 8), np.uint16)
+            self.label = label  # also keeps dask from taking the stacks for one another
+            self.reads = []
+
+        def _read(self, z):
+            self.reads.append(z)
+            return np.full(self.shape[1:], 5, np.uint16)
+
+    stacks = [Counting(t) for t in range(2)]
+    tiles = [Tile(stacks[0], (2, 0, 3), (1, 1, 1), "A", None, 0, {"stack": "s"}),
+             Tile(stacks[1], (0, 2, 0), (1, 1, 1), "A", None, 1, {"stack": "s"})]
+    data, origin, starts = MosaicManager._lazy_series({t.timepoint: t for t in tiles}, [0, 1])
+    assert data.shape == (2, 5, 10, 11) and origin == (0.0, 0.0, 0.0)
+    assert starts == {0: (2, 0, 3), 1: (0, 2, 0)}
+    assert (np.asarray(data[0, 3])[0:8, 3:11] == 5).all()
+    assert stacks[0].reads == [1] and stacks[1].reads == []  # plane 3 of the layer is plane 1 of the tile
+    assert (np.asarray(data[0, 0]) == 0).all()  # below the tile at this timepoint
+    assert stacks[0].reads == [1]
+
+
+@pytest.mark.parametrize("z_start, expected", [(0.0, [("t0", 0)]), (2.0, [])])
+def test_visualize_reads_ahead_the_plane_of_the_tile_at_its_position(monkeypatch, z_start, expected):
+    ViewerModel = _napari()
+    from zarrsmith.mosaic_manager import TiffStackArray
+
+    read = []
+    monkeypatch.setattr(TiffStackArray, "prefetch", lambda self, z: read.append((self.label, z)))
+    tiles = [Tile(TiffStackArray([None, None], (2, 8, 8), np.uint16), (z, 0, 0), (1, 1, 1), "A", None, t, {"stack": "s"})
+             for t, z in enumerate((z_start, 2.0 - z_start))]
+    for t in tiles:
+        t.data.label = f"t{t.timepoint}"
+    v = ViewerModel()
+    v.add_image(np.zeros((8, 8)))
+    _mosaic(tiles).visualize(viewer=v)
+    assert v.layers[1].data.shape == (2, 4, 8, 8)
+    assert read == expected
 
 
 def _dock(monkeypatch, viewer):
@@ -513,7 +591,7 @@ def test_widget_shows_timepoint_zero_and_keeps_the_tile_map(app, monkeypatch, tm
 
     dock.show_widget()
     layers = mw.tile_layers(viewer.layers, m.path)
-    assert len(layers) == 2 and layers[0].data.shape == (4, 4, 8, 8)
+    assert len(layers) == 2 and layers[0].data.shape == (4, 4, 8, 11)
     assert viewer.dims.current_step[0] == 0 and viewer.dims.nsteps[0] == 4
     assert tile_map.visible and viewer.layers[-1] is tile_map
 
@@ -604,6 +682,9 @@ def test_batch_row_timepoints():
     row = mw.batch_row(values=dict(values, timepoints=[0, 2], reference_timepoint=0),
                        all_timepoints=[0, 1, 2], **common)
     assert row["timepoints"] == "0 2" and row["reference_timepoint"] == "0"
+    row = mw.batch_row(values=dict(values, timepoints=[0, 1, 2], reference_timepoint="all"),
+                       all_timepoints=[0, 1, 2], **common)
+    assert row["reference_timepoint"] == "all"
     assert {"timepoints", "reference_timepoint"} <= set(mw.MOSAIC_BATCH_COLUMNS)
 
 
@@ -670,3 +751,150 @@ def test_fuse_batch_timepoints(timelapse, tmp_path, monkeypatch):
     _run(monkeypatch, "fuse", "--batch", csv2)
     assert mm.ZarrManager(str(tmp_path / "c.zarr")).metadata["axes"] == "zyx"
     assert Path(tmp_path / "d.zarr").exists()
+
+
+# ---------------------------------------------------------------------------
+# reference_timepoint="all": every timepoint at its own positions
+# ---------------------------------------------------------------------------
+
+def _moving_tiles():
+    """Two tiles whose overlap changes: the second one moves 3 voxels right at timepoint 1."""
+    return [_tile(100, 0, 0, stack="s0"), _tile(200, 4, 0, stack="s1"),
+            _tile(100, 0, 1, stack="s0"), _tile(200, 7, 1, stack="s1")]
+
+
+def test_own_positions_place_every_timepoint(tmp_path):
+    zm = fuse_tiles(_moving_tiles(), tmp_path / "o.zarr", blend="max", reference_timepoint="all", progress=False)
+    data = zm.data[0].compute()
+    assert data.shape == (2, 4, 8, 15)  # the grid covers both timepoints
+    assert (data[0, ..., :4] == 100).all() and (data[0, ..., 4:12] == 200).all() and (data[0, ..., 12:] == 0).all()
+    assert (data[1, ..., :7] == 100).all() and (data[1, ..., 7:15] == 200).all()
+    assert zm.root.attrs[fusion.PROVENANCE_KEY] == {"timepoints": [0, 1], "reference_timepoint": "all"}
+
+
+def test_own_positions_summary_and_invalid_value():
+    plan = plan_fusion(_moving_tiles(), reference_timepoint="all")
+    assert plan.per_timepoint and "own positions per timepoint" in plan.summary()
+    assert not plan_fusion(_moving_tiles()).per_timepoint
+    with pytest.raises(ValueError, match="must be a timepoint or 'all'"):
+        plan_fusion(_moving_tiles(), reference_timepoint="every")
+
+
+@pytest.mark.parametrize("blend", ["sigmoid", "midline", "max", "sum"])
+def test_own_positions_match_a_fusion_of_that_timepoint_alone(tmp_path, blend):
+    """Transitions follow each timepoint: a frame equals that timepoint fused by itself, on the same grid."""
+    tiles = [_tile(100, 0, 0, group="L", stack="l"), _tile(200, 4, 0, group="R", stack="r"),
+             _tile(100, 0, 1, group="L", stack="l"), _tile(200, 7, 1, group="R", stack="r")]
+    data = fuse_tiles(tiles, tmp_path / "all.zarr", blend=blend, reference_timepoint="all", progress=False).data[0].compute()
+    for t in (0, 1):
+        alone = [x for x in tiles if x.timepoint == t]
+        frame = fuse_tiles(alone, tmp_path / f"t{t}.zarr", blend=blend, progress=False).data[0].compute()
+        np.testing.assert_array_equal(data[t][..., :frame.shape[-1]], frame)
+        assert (data[t][..., frame.shape[-1]:] == 0).all()
+
+
+def test_own_positions_parts_line_up(tmp_path):
+    kw = dict(blend="max", reference_timepoint="all", progress=False)
+    whole = fuse_tiles(_moving_tiles(), tmp_path / "w.zarr", **kw).data[0].compute()
+    part = fuse_tiles(_moving_tiles(), tmp_path / "p.zarr", timepoints=[1], **kw)
+    assert part.metadata["axes"] == "zyx"
+    np.testing.assert_array_equal(part.data[0].compute(), whole[1])
+    assert part.root.attrs[fusion.PROVENANCE_KEY] == {"timepoints": [1], "reference_timepoint": "all"}
+
+
+def test_own_positions_crop_is_on_the_common_grid(tmp_path):
+    kw = dict(blend="max", reference_timepoint="all", progress=False)
+    whole = fuse_tiles(_moving_tiles(), tmp_path / "w.zarr", **kw).data[0].compute()
+    # x 12:15 only holds the second tile at timepoint 1: timepoint 0 stays blank there
+    crop = fuse_tiles(_moving_tiles(), tmp_path / "c.zarr", crop={"x": slice(12, 15)}, **kw).data[0].compute()
+    np.testing.assert_array_equal(crop, whole[..., 12:15])
+    assert (crop[0] == 0).all() and (crop[1] == 200).all()
+    with pytest.raises(ValueError, match="No tile intersects"):
+        plan_fusion(_moving_tiles(), crop={"x": slice(12, 15)}, timepoints=[0], reference_timepoint="all")
+
+
+def test_own_positions_missing_tile_stays_blank(tmp_path, caplog):
+    tiles = _moving_tiles()
+    del tiles[3]  # no second tile at timepoint 1
+    with caplog.at_level(logging.WARNING, logger="zarrsmith"):
+        plan = plan_fusion(tiles, reference_timepoint="all")
+    assert plan.n_missing == 1 and "missing at some timepoints" in caplog.text
+    data = fuse_tiles(tiles, tmp_path / "o.zarr", blend="max", reference_timepoint="all", progress=False).data[0].compute()
+    assert (data[1, ..., :8] == 100).all() and (data[1, ..., 8:] == 0).all()
+
+
+def test_own_positions_allow_another_shape_but_not_another_voxel_size(tmp_path):
+    tiles = [_tile(100, 0, 0, stack="s"), _tile(200, 0, 1, stack="s", shape=(4, 8, 12))]
+    with pytest.raises(ValueError, match="does not match reference timepoint"):
+        plan_fusion(tiles)
+    data = fuse_tiles(tiles, tmp_path / "o.zarr", blend="max", reference_timepoint="all", progress=False).data[0].compute()
+    assert data.shape == (2, 4, 8, 12)
+    assert (data[0, ..., 8:] == 0).all() and (data[1] == 200).all()
+    other = Tile(np.ones((4, 8, 8), np.uint16), (0, 0, 0), (2.0, 1.0, 1.0), "A", None, 1, {"stack": "s"})
+    with pytest.raises(ValueError, match="share one voxel size"):
+        plan_fusion([_tile(100, 0, 0, stack="s"), other], reference_timepoint="all")
+
+
+def test_own_positions_skip_by_id_and_by_tile(tmp_path):
+    kw = dict(blend="max", reference_timepoint="all", progress=False)
+    m = _mosaic(_moving_tiles())
+    by_id = m.fuse(tmp_path / "i.zarr", skip=["s1"], **kw).data[0].compute()
+    assert by_id.shape == (2, 4, 8, 15)  # the output keeps its size
+    assert (by_id[..., :8] == 100).all() and (by_id[..., 8:] == 0).all()
+    second = [t for t in m.tiles if t.attrs["stack"] == "s1" and t.timepoint == 1]
+    one = m.fuse(tmp_path / "t.zarr", skip=second, **kw).data[0].compute()  # only timepoint 1
+    assert (one[0, ..., 4:12] == 200).all() and (one[1, ..., 8:] == 0).all()
+
+
+def test_own_positions_projection_with_worker_threads(tmp_path):
+    kw = dict(blend="max", reference_timepoint="all", progress=False)
+    single = fuse_tiles(_moving_tiles(), tmp_path / "s.zarr", projection="max", **kw).data[0].compute()
+    assert single.shape == (2, 8, 15)
+    threads = fuse_tiles(_moving_tiles(), tmp_path / "t.zarr", projection="max", workers=2, executor="thread", **kw)
+    np.testing.assert_array_equal(threads.data[0].compute(), single)
+
+
+def test_own_positions_in_worker_processes(tmp_path):
+    acq = _luxendo_timelapse(tmp_path / "acq", "one folder")
+    kw = dict(blend="max", reference_timepoint="all", progress=False)
+    m = LuxendoMosaicManager(acq)
+    one = m.fuse(tmp_path / "a.zarr", **kw).data[0].compute()
+    two = m.fuse(tmp_path / "b.zarr", workers=2, executor="process", **kw).data[0].compute()
+    np.testing.assert_array_equal(one, two)
+
+
+def test_cli_own_positions(timelapse, tmp_path, monkeypatch, capsys):
+    out = tmp_path / "out.ome.zarr"
+    _run(monkeypatch, "fuse", "-i", timelapse, "-z", out, "-b", "max", "-rw", 1, "-rtp", "all")
+    assert "own positions per timepoint" in capsys.readouterr().out
+    assert mm.ZarrManager(str(out)).root.attrs[fusion.PROVENANCE_KEY]["reference_timepoint"] == "all"
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "fuse", "-i", timelapse, "-z", tmp_path / "x.zarr", "-rtp", "every")
+
+
+def test_batch_own_positions(timelapse, tmp_path, monkeypatch):
+    csv = tmp_path / "batch.csv"
+    pd.DataFrame([
+        {"input": str(timelapse), "output": str(tmp_path / "a.zarr"), "blend": "max", "read_workers": 1,
+         "reference_timepoint": "all"},
+        {"input": str(timelapse), "output": str(tmp_path / "b.zarr"), "blend": "max", "read_workers": 1,
+         "reference_timepoint": 2},
+    ]).to_csv(csv, index=False)
+    _run(monkeypatch, "fuse", "--batch", csv)
+    for name, reference in (("a.zarr", "all"), ("b.zarr", 2)):
+        record = zarr.open_group(str(tmp_path / name), mode="r").attrs[fusion.PROVENANCE_KEY]
+        assert record["reference_timepoint"] == reference
+
+
+def test_widget_own_positions(app, monkeypatch, tmp_path):
+    ViewerModel = _napari()
+    mw, dock = _dock(monkeypatch, ViewerModel())
+    fw = dock.fuse_widget
+    m = _mosaic(_moving_tiles())
+    dock.state["mosaic"] = m
+    dock.populate(m, tmp_path)
+    assert fw.reference_timepoint.value == 0  # still the default
+    fw.ds_z.value, fw.ds_y.value, fw.ds_x.value = 1, 1, 1
+    fw.reference_timepoint.value = "all"
+    assert "2 t x 1 ch x 4 x 8 x 15 px (tczyx)" in dock.plan_label.text()
+    assert "own positions per timepoint" in dock.plan_label.text()

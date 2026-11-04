@@ -71,7 +71,7 @@ The fusion options:
 | `-t`, `--tiles` | only fuse these tiles, and fit the output to them: stacks such as `1-x00-y00` (every channel), or `channel/stack` ids |
 | `-st`, `--skip_tiles` | tiles to leave blank (the output keeps its size): `channel/stack` ids such as `cFos-647/1-x00-y00`, or a stack such as `1-x00-y00` for every channel |
 | `-tp`, `--timepoints` | timepoints to fuse (default: all); more than one gives an output with a `t` axis, see [Timepoints](mosaic.md#timepoints) |
-| `-rtp`, `--reference_timepoint` | timepoint whose tiles set the geometry of every timepoint (default: the first) |
+| `-rtp`, `--reference_timepoint` | timepoint whose tiles set the geometry of every timepoint (default: the first), or `all` to place every timepoint at [its own positions](mosaic.md#own-positions-per-timepoint) |
 | `-nff`, `--no_flatfield` | Opera: do not apply Harmony's flat-field correction (applied by default, see [Opera](mosaic.md#opera-harmony-exports)) |
 | `-ma`, `--midline_axis` | axis along which `sigmoid`/`midline` separate the tile groups: `x` (default), `y` or `z` |
 | `-od`, `--out_dtype` | output dtype |

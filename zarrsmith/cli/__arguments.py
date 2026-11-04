@@ -390,9 +390,10 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
              't axis. Default: all.',
     )
     parser.add_argument(
-        '-rtp', '--reference_timepoint', type=int,
+        '-rtp', '--reference_timepoint', type=parse_timepoint_or_all,
         help='Timepoint whose tiles set the geometry (output size, tile positions, transitions): every '
-             'timepoint is fused with it. It need not be among --timepoints. Default: the first timepoint.',
+             'timepoint is fused with it. It need not be among --timepoints. "all" places every timepoint '
+             'at its own stage positions instead. Default: the first timepoint.',
     )
     parser.add_argument('-ma', '--midline_axis', choices=['x', 'y', 'z'], default='x',
                         help='Axis along which blend=midline/sigmoid separates the groups.')
@@ -474,8 +475,8 @@ FUSE_HELP = """\
     rows still run). Opera tiles are flat-field corrected as in Harmony, unless -nff is given.
 
     A mosaic with several timepoints gives an output with a t axis. The geometry comes from one
-    reference timepoint (-rtp, default: the first) and every timepoint is fused with it. -tp selects
-    the timepoints to fuse.
+    reference timepoint (-rtp, default: the first) and every timepoint is fused with it; -rtp all places
+    every timepoint at its own stage positions instead. -tp selects the timepoints to fuse.
 
     The --batch CSV file has the columns input | microscope | output, plus any of the output columns of
     `zarrsmith convert --batch` (chunk_size | max_size(MB) | zarr_format | downscale_factor | subset | channel_colors |
@@ -518,6 +519,17 @@ CHROMATIC_SHIFT_HELP = """\
       /path/to/b.ome.zarr  | /path/to/b_csc.ome.zarr  |                      | 0                 |
     Leave a cell empty for the default; shifts are space separated.
 """
+
+
+def parse_timepoint_or_all(value):
+    """``--reference_timepoint`` value: a timepoint, or ``all``."""
+    text = str(value).strip().lower()
+    if text == "all":
+        return "all"
+    try:
+        return int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Invalid timepoint '{value}'. Use a timepoint or 'all'.") from exc
 
 
 def parse_refine_level(value):
