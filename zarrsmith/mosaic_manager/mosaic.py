@@ -69,19 +69,23 @@ def _link_layers(groups) -> None:
 def _prefetch_planes(viewer, shown, workers: int = 8) -> None:
     """Read ahead, in threads, the plane napari is about to show of every ``(layer, tile)``
     whose data supports it (one file per plane, often on a network drive, read one by
-    one by napari otherwise). Only in a 2D view with the tiles' z axis sliced. A ``tile``
-    is ``None`` when its layer shows nothing at the current timepoint."""
+    one by napari otherwise). Only in a 2D view with the tiles' z axis sliced. ``shown``
+    holds ``(layer, tile, z_start)``, with ``z_start`` the plane of the layer where the
+    tile starts. A ``tile`` is ``None`` when its layer shows nothing at the current
+    timepoint. A plane outside the tile reads nothing."""
     from concurrent.futures import ThreadPoolExecutor
 
     dims = viewer.dims
     if dims.ndisplay != 2 or dims.ndim - 3 in dims.displayed:
         return
     jobs = []
-    for layer, t in shown:
+    for layer, t, z_start in shown:
         prefetch = getattr(t.data, "prefetch", None) if t is not None else None
         if prefetch is not None:
             z = layer.world_to_data(dims.point)[-3]
-            jobs.append((prefetch, int(np.clip(np.round(z), 0, t.shape[0] - 1))))  # as napari rounds
+            z = int(np.clip(np.round(z), 0, layer.data.shape[-3] - 1)) - z_start  # as napari rounds
+            if 0 <= z < t.shape[0]:
+                jobs.append((prefetch, z))
     if jobs:
         with ThreadPoolExecutor(min(workers, len(jobs))) as pool:
             list(pool.map(lambda job: job[0](job[1]), jobs))
@@ -250,23 +254,45 @@ class MosaicManager(ABC):
         return da.from_array(t.data, chunks=(min(16, z), min(1024, y), min(1024, x)))
 
     @classmethod
-    def _lazy_series(cls, series: Dict[int, Tile], timepoints: Sequence[int]) -> da.Array:
+    def _lazy_series(cls, series: Dict[int, Tile], timepoints: Sequence[int]
+                     ) -> Tuple[da.Array, Tuple[float, ...], Dict[int, Tuple[int, ...]]]:
         """``(t, z, y, x)`` array of the tiles of one position over ``timepoints``, read lazily.
 
+        The array covers every place the tile reaches, and every timepoint holds the tile
+        at its own position, rounded to a voxel, with zeros around it (which read nothing).
         A timepoint without a tile, or whose tile has another shape than the earliest
         one, is shown as zeros.
+
+        Returns the array, the position of its first voxel and, per timepoint with a tile,
+        the ``(z, y, x)`` voxel where the tile starts.
         """
         first = series[min(series)]
-        blank = da.zeros(first.shape, dtype=first.dtype, chunks=cls._lazy(first).chunksize)
-        frames = []
+        placed: Dict[int, Tile] = {}
         for tp in timepoints:
             t = series.get(tp)
-            if t is not None and t.shape != first.shape:
+            if t is None:
+                continue
+            if t.shape != first.shape:
                 logger.warning("Tile %s at timepoint %d has shape %s instead of %s: shown as blank.",
                                t.attrs.get("stack"), tp, t.shape, first.shape)
-                t = None
-            frames.append(blank if t is None else cls._lazy(t))
-        return da.stack(frames)
+                continue
+            placed[tp] = t
+        origin = np.min([t.origin for t in placed.values()], axis=0)
+        starts = {tp: tuple(int(v) for v in np.rint((np.array(t.origin) - origin) / np.array(first.voxel_size)))
+                  for tp, t in placed.items()}
+        extra = tuple(int(v) for v in np.max(list(starts.values()), axis=0))
+        shape = tuple(n + e for n, e in zip(first.shape, extra))
+        blank = da.zeros(shape, dtype=first.dtype, chunks=cls._lazy(first).chunksize)
+        frames = []
+        for tp in timepoints:
+            if tp not in placed:
+                frames.append(blank)
+            elif any(extra):
+                pad = [(s, e - s) for s, e in zip(starts[tp], extra)]
+                frames.append(da.pad(cls._lazy(placed[tp]), pad, mode="constant"))
+            else:
+                frames.append(cls._lazy(placed[tp]))
+        return da.stack(frames), tuple(float(v) for v in origin), starts
 
     def contrast_limits(
         self,
@@ -309,9 +335,10 @@ class MosaicManager(ABC):
         linked: changing the contrast or gamma of one tile changes all of them.
 
         When ``tiles`` span several timepoints, each position is one ``(t, z, y, x)``
-        layer, placed where it is at its earliest timepoint, and the napari slider
-        scrolls through time, starting on the first timepoint. Slider step ``i`` is the
-        ``i``-th of the timepoints shown. Only the planes displayed at the current
+        layer in which the tile sits at its stage position of that timepoint, rounded to
+        a voxel, so it moves as the napari slider scrolls through time, starting on the
+        first timepoint. The layer covers every place the tile reaches. Slider step ``i``
+        is the ``i``-th of the timepoints shown. Only the planes displayed at the current
         timepoint are read.
 
         Parameters
@@ -363,16 +390,17 @@ class MosaicManager(ABC):
         for series in positions.values():
             t = series[min(series)]
             i = index[id(t)]
+            data, origin, starts = self._lazy_series(series, timepoints) if over_time else (self._lazy(t), t.origin, {})
             limits = (contrast_limits or {}).get(t.channel)
             label = t.attrs.get("stack") or i
             # added hidden: napari would read a plane at z = 0 (on creation) before the
             # one at the current z (on insertion); a hidden layer is read once, when shown
             layer = viewer.add_image(
-                self._lazy_series(series, timepoints) if over_time else self._lazy(t),
+                data,
                 name=f"{t.channel} {t.group or ''} [{label}]".replace("  ", " ")
                 + (f" {t.field}" if len(self.fields) > 1 else ""),
                 scale=((1.0,) if over_time else ()) + t.voxel_size,
-                translate=((0.0,) if over_time else ()) + t.origin,
+                translate=((0.0,) if over_time else ()) + origin,
                 colormap=_COLORMAPS[names.index(t.channel) % len(_COLORMAPS)],
                 blending="additive",
                 contrast_limits=limits,
@@ -387,13 +415,13 @@ class MosaicManager(ABC):
                 layer.contrast_limits_range = (info.min, info.max)
                 layer.contrast_limits = limits
             by_channel.setdefault(t.channel, []).append(layer)
-            shown.append((layer, series.get(timepoints[0])))
+            shown.append((layer, series.get(timepoints[0]), starts.get(timepoints[0], (0,))[0]))
         _link_layers(by_channel.values())
         if over_time:  # napari starts the first layer of a viewer in the middle of every axis
             viewer.dims.set_current_step(viewer.dims.ndim - 4, 0)
             _set_axis_labels(viewer, tuple(axes), drop_channel=False)
         _prefetch_planes(viewer, shown)
-        for layer, _ in shown:
+        for layer, *_ in shown:
             layer.visible = True
         return viewer
 
@@ -457,7 +485,8 @@ class MosaicManager(ABC):
             position at every timepoint, a ``Tile`` only at its own timepoint.
         **kwargs
             Options of :func:`~zarrsmith.mosaic_manager.fuse_tiles`, among them
-            ``timepoints`` and ``reference_timepoint`` for a mosaic with several timepoints.
+            ``timepoints`` and ``reference_timepoint`` for a mosaic with several timepoints
+            (``reference_timepoint="all"`` places each at its own stage positions).
 
         Tiles of more than one field are not fused: a
         :class:`~zarrsmith.mosaic_manager.fields.MultipleFieldsError` is raised.

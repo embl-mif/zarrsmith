@@ -76,7 +76,7 @@ mos.ZeissMosaicManager("tile_scan.czi", scene_index=1)   # only this scene
 
 - **Fields are scenes.** Every tile region or position of the ZEN experiment is one field, named after its index and name. Tile ids look like `AF488-T2/scene0_TR1-m01`.
 - **Placement.** `y` and `x` come from the pixel coordinates of the tile in the file, which are the stage position rounded to a pixel, and `z` from the `FocusPosition` of its first plane. Tiles are not registered, so the result can differ from the images stitched by ZEN by a few pixels.
-- **Timelapses.** The file records slightly different positions at every timepoint; every timepoint is fused with those of the reference timepoint. The fused output has 1 second per timepoint, like every fused timelapse, not the interval of the experiment.
+- **Timelapses.** The file records slightly different positions at every timepoint. By default every timepoint is fused with those of the reference timepoint; `reference_timepoint="all"` uses those of each timepoint, see [Timepoints](#own-positions-per-timepoint). The fused output has 1 second per timepoint, like every fused timelapse, not the interval of the experiment.
 - **Files without tiles**, such as the output of ZEN's *Stitching*, are refused: read them with `ZeissManager`.
 
 ### Fields
@@ -116,7 +116,23 @@ Every timepoint is fused with the geometry of one **reference timepoint**: the o
 - **A tile with another shape, voxel size or unit** than its reference tile cannot be placed the same way: the fusion stops with an error naming it. Leave that timepoint out with `timepoints`.
 - **Fields** are labelled once per position, where it is first seen, so drift over time neither joins nor splits them. `field`, `tiles` and tile ids name the tiles of every timepoint. In `skip`, an id blanks that position at every timepoint and a `Tile` object only at its own timepoint.
 
-`visualize()` shows one layer per position with a time slider, see [Napari](#napari).
+`visualize()` shows one layer per position with a time slider, and every tile sits at its stage position of the current timepoint, see [Napari](#napari). This is what the file reports: a fusion with a reference timepoint puts a tile in the same place at every timepoint, and `reference_timepoint="all"` [follows the positions shown](#own-positions-per-timepoint).
+
+#### Own positions per timepoint
+
+When the positions recorded at every timepoint should be used, for example because the stage really moved, pass `reference_timepoint="all"` instead of a timepoint:
+
+```python
+zm = mosaic.fuse("acq_t.ome.zarr", ds=(4, 8, 8), reference_timepoint="all")
+zm.root.attrs["zarrsmith_fusion"]      # {'timepoints': [0, 1, 2, 3], 'reference_timepoint': 'all'}
+```
+
+- **One output grid.** Every timepoint has the same shape, so the grid covers the tiles of all timepoints of the mosaic, slightly larger than with a reference timepoint. Voxels of a timepoint that its tiles do not reach stay 0.
+- **Positions.** Every tile of every timepoint is placed at its own reported position, rounded to an output voxel, and the transitions between tiles and groups are computed for each timepoint. A tile therefore moves within the output when its reported position changes.
+- **Parts line up.** The grid does not depend on `timepoints`, so parts fused in separate runs still line up, and a part has the size of the whole timelapse. A `crop` is given on this grid.
+- **A tile missing at some timepoint** stays blank there, with a warning. Tiles may have another shape at another timepoint, but voxel size and unit stay the same for all tiles.
+
+Reported positions are not registered. Whether they place the tiles better than one reference timepoint depends on how accurately the microscope reports them, so check the overlaps of the result.
 
 ## 3D fusion
 
@@ -164,7 +180,7 @@ The projection is computed at full resolution along z and then downsampled in y/
 | `out_dtype` | dtype | default: input dtype, `float32` for `sum` |
 | `midline_axis` | `"x"`, `"y"`, `"z"` | axis along which `sigmoid` and `midline` separate the groups (default `x`) |
 | `timepoints` | list of timepoints | timepoints to fuse (default: all), see [Timepoints](#timepoints) |
-| `reference_timepoint` | timepoint | timepoint whose tiles set the geometry of every timepoint (default: the first) |
+| `reference_timepoint` | timepoint or `"all"` | timepoint whose tiles set the geometry of every timepoint (default: the first); `"all"` places every timepoint at [its own positions](#own-positions-per-timepoint) |
 | `overwrite` | bool | replace an existing output, once the fusion has succeeded (see [Existing outputs](advanced.md#existing-outputs)) |
 | `temp_dir` | path | where the temporary fused level 0 goes (default: next to the output) |
 
@@ -220,6 +236,7 @@ zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_MIP.ome.zarr -p max -f A3
 zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_raw.ome.zarr -p max -f A3_field1 -nff   # without flat-field
 zarrsmith fuse -i /path/to/timelapse -z acq_t.ome.zarr -rds 4 8 8 -rtp 0                        # every timepoint, reference 0
 zarrsmith fuse -i /path/to/timelapse -z part.ome.zarr -rds 4 8 8 -tp 10 11 12 -rtp 0            # some timepoints
+zarrsmith fuse -i tile_scan.czi -z acq_t.ome.zarr -rds 1 2 2 -rtp all                            # own positions per timepoint
 ```
 
 The fields are listed when the mosaic is loaded. Without `-f/--fields` (or `-t/--tiles`) the first field is fused. Asking for tiles from several fields prints an error and nothing is fused; in a `--batch` run that row is not done, the other rows still run, and the rows that were not fused are listed at the end.
@@ -231,8 +248,8 @@ The fields are listed when the mosaic is loaded. Without `-f/--fields` (or `-t/-
 `Plugins > ZarrSmith > Mosaic Fusion` opens a widget with three boxes:
 
 1. **Mosaic loading**: choose the microscope and the acquisition folder (browse, or drag and drop it, or any file inside it, from the file explorer), then *Load tiles*. *Flat-field correction (Opera)* (on by default) corrects Opera tiles as Harmony does; other microscopes ignore it. This reads metadata only and adds a **tile map**: a `tile map` shapes layer with one rectangle per stack position, labelled with its stack id, all picked (green). Click a rectangle in the 2D view to unpick it (grey) or pick it again; dragging still pans. *Shift* + drag picks, and *Ctrl* + drag unpicks, every tile that lies even partially in the box shown while you drag (a temporary `tile map box` layer, removed on release) (*Shift* or *Ctrl* + click: one tile). A rectangle stands for that position in every channel and illumination side. Only picked tiles are shown and fused. When the mosaic has several [fields](#fields), each rectangle also shows its field, the log lists the stack positions of every field, and the *fields* selectors of *Show tiles* and *Fuse to OME-Zarr* start on the first field.
-2. **Show tiles**: show the picked tiles of the selected channels, groups and fields as one layer per tile at its stage position, with one linked contrast per channel. A channel starts at the whole range of its data type, so nothing is read before the tiles appear: set the contrast of one tile and the others follow. Every displayed plane reads data from all shown tiles, so show only a few channels or groups at a time. Change the picks on the tile map and click *Show tiles in napari* again to update the view; the contrast you set is kept, and *Remove existing layers* keeps the tile map. A mosaic with several timepoints opens on the first timepoint, and the **T slider** at the bottom of the image scrolls through time, each tile at the position of its first timepoint. Only the planes displayed at the current timepoint are read. A timepoint without that tile shows as blank.
-3. **Fuse to OME-Zarr**: the main fusion options, with a live estimate of the output size. For a mosaic with several timepoints, *Timepoints* selects those to fuse (all by default) and *Reference timepoint* the one whose geometry they all use (the first by default). Only the picked tiles of the selected field are fused, and the output fits them. Selecting several fields shows an error in the size estimate, and *Fuse to OME-Zarr* and *Append to batch CSV* then print an error and do nothing. With several fields, the default output name ends with the field, e.g. `<acquisition>_3D_ds4-8-8_field1.ome.zarr`. *Tiles to fuse* can be set to *visible layers only* or *selected layers only*: tiles whose layer is hidden (eye icon off) or not selected in the layer list are then left blank (the output keeps its size), and *Blank in all channels* also blanks that position in the other channels. Picked tiles that are not shown in napari are fused normally. The output path follows the parameters (for example `<acquisition>_3D_ds4-8-8.ome.zarr`) until you type your own; dropping a folder on the output field writes the result inside that folder. When fusion finishes, the result can be opened directly, on its first timepoint (the tile map is then hidden, since the result is not placed at the stage position).
+2. **Show tiles**: show the picked tiles of the selected channels, groups and fields as one layer per tile at its stage position, with one linked contrast per channel. A channel starts at the whole range of its data type, so nothing is read before the tiles appear: set the contrast of one tile and the others follow. Every displayed plane reads data from all shown tiles, so show only a few channels or groups at a time. Change the picks on the tile map and click *Show tiles in napari* again to update the view; the contrast you set is kept, and *Remove existing layers* keeps the tile map. A mosaic with several timepoints opens on the first timepoint, and the **T slider** at the bottom of the image scrolls through time, each tile at its stage position of that timepoint, rounded to a voxel, so a tile moves when its position changes. The tile map stays at the position of the first timepoint. Only the planes displayed at the current timepoint are read. A timepoint without that tile shows as blank.
+3. **Fuse to OME-Zarr**: the main fusion options, with a live estimate of the output size. For a mosaic with several timepoints, *Timepoints* selects those to fuse (all by default) and *Reference timepoint* the one whose geometry they all use (the first by default), or `all` to place every timepoint at [its own positions](#own-positions-per-timepoint). Only the picked tiles of the selected field are fused, and the output fits them. Selecting several fields shows an error in the size estimate, and *Fuse to OME-Zarr* and *Append to batch CSV* then print an error and do nothing. With several fields, the default output name ends with the field, e.g. `<acquisition>_3D_ds4-8-8_field1.ome.zarr`. *Tiles to fuse* can be set to *visible layers only* or *selected layers only*: tiles whose layer is hidden (eye icon off) or not selected in the layer list are then left blank (the output keeps its size), and *Blank in all channels* also blanks that position in the other channels. Picked tiles that are not shown in napari are fused normally. The output path follows the parameters (for example `<acquisition>_3D_ds4-8-8.ome.zarr`) until you type your own; dropping a folder on the output field writes the result inside that folder. When fusion finishes, the result can be opened directly, on its first timepoint (the tile map is then hidden, since the result is not placed at the stage position).
 
 4. **Batch CSV export**: *Append to batch CSV* adds the current settings, including the picked tiles (`tiles` column), the timepoints and the tiles left blank, as a row of a CSV file. Run the file later, for example on a workstation close to the data, with `zarrsmith fuse --batch mosaic_batch.csv`.
 

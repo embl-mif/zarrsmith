@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -584,7 +584,7 @@ def mosaic_convert(
     tiles: Optional[List[str]] = None,
     skip_tiles: Optional[List[str]] = None,
     timepoints: Optional[List[int]] = None,
-    reference_timepoint: Optional[int] = None,
+    reference_timepoint: Union[int, str, None] = None,
     midline_axis: str = "x",
     out_dtype: Optional[str] = None,
     read_workers: int = 4,
@@ -602,7 +602,7 @@ def mosaic_convert(
     without ``tiles`` and ``fields`` the first field is fused. Tiles from several fields
     are not fused: an error is printed and ``False`` returned (``True`` once the output
     is saved). ``timepoints`` and ``reference_timepoint`` choose the timepoints to fuse and
-    the one whose geometry they all use. The other options are those of
+    the one whose geometry they all use (``"all"``: each at its own positions). The other options are those of
     :func:`zarrsmith.mosaic_manager.fuse_tiles`: ``read_downsample`` is its ``ds`` and
     ``read_workers`` its ``workers``. ``flatfield`` is passed to readers that correct
     the tiles (Opera); the others ignore it.
@@ -760,7 +760,7 @@ def convert_mosaic_batch(args):
         if "timepoints" in columns and _present(v.get("timepoints")):
             kwargs["timepoints"] = [int(float(t)) for t in str(v["timepoints"]).split()]
         if "reference_timepoint" in columns and _present(v.get("reference_timepoint")):
-            kwargs["reference_timepoint"] = int(float(v["reference_timepoint"]))
+            kwargs["reference_timepoint"] = _timepoint_cell(v["reference_timepoint"])
         if "read_workers" in columns and _present(v.get("read_workers")):
             kwargs["read_workers"] = int(v["read_workers"])
         if "sigmoid_steepness" in columns and _present(v.get("sigmoid_steepness")):
@@ -785,6 +785,12 @@ def convert_mosaic_batch(args):
 #: Options of ``estimate_chromatic_shift`` exposed on the command line.
 _ESTIMATE_OPTIONS = ("timepoint", "max_shift", "coarse_level", "refine_level", "n_regions", "crop_yx",
                      "min_z_normal", "min_correlation", "threshold")
+
+
+def _timepoint_cell(value) -> Union[int, str]:
+    """A timepoint or ``all`` from a batch CSV cell (pandas reads 3 in a column with empty cells as 3.0)."""
+    text = str(value).strip().lower()
+    return "all" if text == "all" else int(float(text))
 
 
 def _channel_index(channel, channel_names: List[str]) -> int:

@@ -21,6 +21,10 @@ grid, tile offsets, transitions between tiles and groups) comes from the tiles o
 **reference timepoint**, and every timepoint is fused with it, tile by tile. Stage
 positions reported at other timepoints are not used, so a position stays at the same
 place throughout the output.
+
+With ``reference_timepoint="all"`` every timepoint uses its own stage positions instead:
+the output grid covers the tiles of all timepoints, and the tile offsets and transitions
+are computed for each timepoint.
 """
 from __future__ import annotations
 
@@ -33,7 +37,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import dask.array as da
 import numpy as np
@@ -72,6 +76,9 @@ _TEMP_COMPRESSORS = "auto"
 DISPLAY_PERCENTILES = (0.5, 99.9)
 #: Values kept from every fused region to estimate the display window (no extra reads).
 _WINDOW_SAMPLES = 65536
+
+#: ``reference_timepoint`` value that places every timepoint at its own stage positions.
+ALL_TIMEPOINTS = "all"
 
 #: Root attribute recording the timepoints and the reference of a fused timelapse.
 PROVENANCE_KEY = "zarrsmith_fusion"
@@ -285,6 +292,33 @@ def _target(p: _Placed, region, zrange: Tuple[int, int], flat: bool):
     k0, k1, j0, j1, i0, i1 = ov
     yx = (slice(j0 - region[0], j1 - region[0]), slice(i0 - region[2], i1 - region[2]))
     return yx if flat else (slice(k0 - zrange[0], k1 - zrange[0]),) + yx
+
+
+def _layout_blocks(index: int, channel: str, placed: Sequence[_Placed], yx: Tuple[int, int], depth: int,
+                   region: Tuple[int, int, int], blend: str, axis: int) -> List[tuple]:
+    """The regions of one channel that hold tiles of the layout ``placed``, see :class:`_RegionSeries`.
+
+    ``region`` is the ``(z, y, x)`` size of a region. Looks up the regions of every tile, so
+    the cost follows the tiles and not the regions of the whole output.
+    """
+    cz, cy, cx = region
+    cells: Dict[Tuple[int, int, int], List[int]] = {}
+    for i, p in enumerate(placed):
+        ranges = []
+        for offset, size, stop, step in zip(p.offset, p.size, (depth,) + yx, region):
+            lo, hi = max(offset, 0), min(offset + size, stop)
+            ranges.append(range(lo // step, (hi - 1) // step + 1) if hi > lo else range(0))
+        for k in ranges[0]:
+            for j in ranges[1]:
+                for n in ranges[2]:
+                    cells.setdefault((j, n, k), []).append(i)
+    midline = (axis, _midline_ranges(placed, axis)) if blend == "midline" else None
+    transitions = (axis, _sigmoid_transitions(placed, axis)) if blend == "sigmoid" else None
+    return [(index, channel,
+             (j * cy, min((j + 1) * cy, yx[0]), n * cx, min((n + 1) * cx, yx[1])),
+             (k * cz, min((k + 1) * cz, depth)),
+             midline, transitions, cells[(j, n, k)])
+            for j, n, k in sorted(cells)]
 
 
 def _read_block(job) -> np.ndarray:
@@ -605,22 +639,26 @@ def _fuse_level0(regions, arr, *, ds, projection, blend, dtype, steepness: float
 
 
 class _RegionSeries:
-    """The regions of every fused timepoint, built when they are read: every timepoint
-    has the same regions, and there can be many timepoints.
+    """The regions of every fused timepoint, built when they are read, since there can
+    be many timepoints.
 
-    ``blocks`` holds, for one timepoint, ``(channel index, channel, bounds, zrange,
-    midline, transitions, indices)``, where ``indices`` are the tiles of the channel's
-    layout that overlap the region. Regions in which a timepoint has no tile to read
-    are left out: they keep the fill value (0).
+    ``blocks`` holds ``(channel index, channel, bounds, zrange, midline, transitions,
+    indices)`` for one timepoint, where ``indices`` are the tiles of the channel's layout
+    that overlap the region. It is a list when every timepoint has the same layout, or a
+    function of the timepoint when each has its own. Regions in which a timepoint has no
+    tile to read are left out: they keep the fill value (0).
     """
 
-    def __init__(self, blocks: Sequence[tuple], plan: "FusionPlan"):
+    def __init__(self, blocks: Union[Sequence[tuple], Callable[[int], Sequence[tuple]]], plan: "FusionPlan"):
         self.blocks = blocks
         self.plan = plan
         self.stacked = "t" in plan.axes
         self.samples = max(1, _WINDOW_SAMPLES // len(plan.timepoints))
         self.total = sum(any(plan.frames[tp][b[1]][i] is not None for i in b[6])
-                         for tp in plan.timepoints for b in blocks)
+                         for tp in plan.timepoints for b in self._blocks(tp))
+
+    def _blocks(self, timepoint: int) -> Sequence[tuple]:
+        return self.blocks(timepoint) if callable(self.blocks) else self.blocks
 
     def __len__(self) -> int:
         return self.total
@@ -628,7 +666,7 @@ class _RegionSeries:
     def __iter__(self) -> Iterator[_Region]:
         for ti, tp in enumerate(self.plan.timepoints):
             frame = self.plan.frames[tp]
-            for ci, channel, bounds, zrange, midline, transitions, indices in self.blocks:
+            for ci, channel, bounds, zrange, midline, transitions, indices in self._blocks(tp):
                 inside = [frame[channel][i] for i in indices if frame[channel][i] is not None]
                 if inside:
                     yield _Region(ci, bounds, inside, midline, transitions, zrange,
@@ -687,8 +725,9 @@ class FusionPlan:
     """Level-0 geometry of a fusion, computed without reading any pixel data."""
 
     tiles: List[Tile]  # tiles that are read, at every timepoint (skipped tiles excluded)
-    placed: Dict[str, List[_Placed]]  # per output channel, offsets relative to the output grid (reference timepoint)
-    layout: Dict[str, List[_Placed]]  # like ``placed`` but including skipped tiles: the geometry of every timepoint
+    placed: Dict[str, List[_Placed]]  # per output channel, offsets relative to the output grid
+    layout: Dict[str, List[_Placed]]  # like ``placed`` but including skipped tiles: the geometry of every timepoint,
+    # or with reference_timepoint="all" the tiles of all fused timepoints (see ``layouts``)
     channels: List[str]
     ds: Tuple[int, int, int]
     blend: str
@@ -701,11 +740,18 @@ class FusionPlan:
     n_skipped: int = 0  # tiles left blank
     fields: List[str] = dataclasses.field(default_factory=list)  # fields of the tiles (skipped ones included)
     timepoints: List[int] = dataclasses.field(default_factory=list)  # fused timepoints, in output order
-    reference_timepoint: int = 0  # timepoint whose tiles set the geometry
+    reference_timepoint: Union[int, str] = 0  # timepoint whose tiles set the geometry, or ALL_TIMEPOINTS
     # per timepoint and channel, the tiles aligned with ``layout``; None where a tile is skipped or missing
     frames: Dict[int, Dict[str, List[Optional[_Placed]]]] = dataclasses.field(default_factory=dict)
     n_missing: int = 0  # tiles of ``layout`` that a timepoint does not have
     n_available: int = 1  # timepoints of the tiles the plan was made from
+    # reference_timepoint="all": the layout of every timepoint, aligned with ``frames``; empty otherwise
+    layouts: Dict[int, Dict[str, List[_Placed]]] = dataclasses.field(default_factory=dict)
+
+    @property
+    def per_timepoint(self) -> bool:
+        """Whether every timepoint is placed at its own positions."""
+        return self.reference_timepoint == ALL_TIMEPOINTS
 
     @property
     def nbytes(self) -> int:
@@ -714,14 +760,18 @@ class FusionPlan:
 
     def summary(self) -> str:
         """One line such as ``2 ch x 260 x 1100 x 1500 px (czyx), 1.71 GB, voxel 12 x 11.7 x 11.7 micrometer`` (MB below 0.1 GB);
-        ``5 t x 2 ch x ...`` for several timepoints, followed by the reference timepoint."""
+        ``5 t x 2 ch x ...`` for several timepoints, followed by the reference timepoint
+        or by ``own positions per timepoint``."""
         dims = " x ".join(str(v) for v in self.shape[-len(self.scale):])
         vox = " x ".join(f"{v:.3g}" for v in self.scale)
         size = f"{self.nbytes / 1e9:.2f} GB" if self.nbytes >= 1e8 else f"{self.nbytes / 1e6:.1f} MB"
         blank = f", {self.n_skipped} tile(s) left blank" if self.n_skipped else ""
         missing = f", {self.n_missing} tile(s) missing at some timepoints (blank)" if self.n_missing else ""
         time = f"{len(self.timepoints)} t x " if "t" in self.axes else ""
-        reference = f", reference timepoint {self.reference_timepoint}" if self.n_available > 1 else ""
+        reference = ""
+        if self.n_available > 1:
+            reference = (", own positions per timepoint" if self.per_timepoint
+                         else f", reference timepoint {self.reference_timepoint}")
         fields = f"; ERROR: {len(self.fields)} separate fields ({', '.join(self.fields)}), cannot be fused" \
             if len(self.fields) > 1 else ""
         return (f"{time}{len(self.channels)} ch x {dims} px ({self.axes}), {size}, voxel {vox} {self.tiles[0].units}"
@@ -738,8 +788,8 @@ class FusionPlan:
         return multiple_fields_message(self.fields) if self.multiple_fields else None
 
 
-def _select_timepoints(tiles: Sequence[Tile], timepoints, reference_timepoint) -> Tuple[List[int], int, List[int]]:
-    """``(fused timepoints, reference timepoint, available timepoints)``, validated."""
+def _select_timepoints(tiles: Sequence[Tile], timepoints, reference_timepoint) -> Tuple[List[int], Union[int, str], List[int]]:
+    """``(fused timepoints, reference timepoint or ALL_TIMEPOINTS, available timepoints)``, validated."""
     available = sorted({t.timepoint for t in tiles})
     if timepoints is None:
         selected = available
@@ -750,6 +800,10 @@ def _select_timepoints(tiles: Sequence[Tile], timepoints, reference_timepoint) -
             raise ValueError(f"Timepoints {missing} not found; available: {available}.")
         if not selected:
             raise ValueError("No timepoint selected.")
+    if reference_timepoint == ALL_TIMEPOINTS:
+        return selected, ALL_TIMEPOINTS, available
+    if isinstance(reference_timepoint, str) and not reference_timepoint.strip().lstrip("-").isdigit():
+        raise ValueError(f"reference_timepoint must be a timepoint or {ALL_TIMEPOINTS!r}, got {reference_timepoint!r}.")
     reference = available[0] if reference_timepoint is None else int(reference_timepoint)
     if reference not in available:
         raise ValueError(f"Reference timepoint {reference} not found; available: {available}.")
@@ -805,6 +859,30 @@ def _build_frames(tiles: Sequence[Tile], layout: Dict[str, List[_Placed]], timep
     return frames, n_skipped, n_missing
 
 
+def _build_own_frames(tiles: Sequence[Tile], placed: Sequence[_Placed], names: Sequence[str],
+                      timepoints: Sequence[int], skipped: set) -> Tuple[dict, dict, int, int]:
+    """Split ``placed`` into the tiles of every timepoint, each at its own position.
+
+    Returns ``(layouts, frames, n_skipped, n_missing)``, see :attr:`FusionPlan.layouts`. A
+    position that a timepoint does not have is missing there; one cropped away is not.
+    """
+    layouts = {tp: {n: [] for n in names} for tp in timepoints}
+    frames = {tp: {n: [] for n in names} for tp in timepoints}
+    n_skipped = 0
+    for p in placed:
+        tp, channel = p.tile.timepoint, p.tile.channel
+        layouts[tp][channel].append(p)
+        blank = id(p.tile) in skipped
+        n_skipped += blank
+        frames[tp][channel].append(None if blank else p)
+    keys = series_keys(tiles)
+    present = {(k, t.timepoint) for k, t in zip(keys, tiles)}
+    n_missing = sum((k, tp) not in present for k in set(keys) for tp in timepoints)
+    if n_missing:
+        logger.warning("%d tile(s) are missing at some timepoints: they stay blank there.", n_missing)
+    return layouts, frames, n_skipped, n_missing
+
+
 def plan_fusion(
     tiles: Sequence[Tile],
     *,
@@ -817,7 +895,7 @@ def plan_fusion(
     out_dtype=None,
     midline_axis: str = "x",
     timepoints: Optional[Sequence[int]] = None,
-    reference_timepoint: Optional[int] = None,
+    reference_timepoint: Union[int, str, None] = None,
 ) -> FusionPlan:
     """Validate fusion arguments and compute the level-0 geometry (see :func:`fuse_tiles`)."""
     tiles = list(tiles)
@@ -847,7 +925,12 @@ def plan_fusion(
     tiles = [t for n in names for t in tiles if t.channel == n]
     selected, reference, available = _select_timepoints(tiles, timepoints, reference_timepoint)
 
-    placed, grid, out_vox, origin = _place_tiles([t for t in tiles if t.timepoint == reference], ds)
+    per_timepoint = reference == ALL_TIMEPOINTS
+    # With own positions the grid fits all available timepoints, so parts fused separately line up.
+    placed, grid, out_vox, origin = _place_tiles(tiles if per_timepoint else
+                                                 [t for t in tiles if t.timepoint == reference], ds)
+    if per_timepoint:
+        placed = [p for p in placed if p.tile.timepoint in selected]
     if crop:  # shift the grid to the crop and drop the tiles outside it
         bounds = _crop_bounds(crop, grid)
         start = tuple(b[0] for b in bounds)
@@ -861,7 +944,11 @@ def plan_fusion(
     fields = fields_of([p.tile for p in placed])
     # skipped tiles keep their place in the geometry (the output does not shrink) but are not read
     skipped = {id(t) for t in skip or ()}
-    frames, n_skipped, n_missing = _build_frames(tiles, layout, selected, reference, skipped)
+    layouts = {}
+    if per_timepoint:
+        layouts, frames, n_skipped, n_missing = _build_own_frames(tiles, placed, names, selected, skipped)
+    else:
+        frames, n_skipped, n_missing = _build_frames(tiles, layout, selected, reference, skipped)
     read = [p.tile for tp in selected for n in names for p in frames[tp][n] if p is not None]
     if not read:
         raise ValueError("Every tile is skipped: nothing to fuse.")
@@ -897,6 +984,7 @@ def plan_fusion(
         frames=frames,
         n_missing=n_missing,
         n_available=len(available),
+        layouts=layouts,
     )
 
 
@@ -947,7 +1035,7 @@ def fuse_tiles(
     midline_axis: str = "x",
     sigmoid_steepness: float = SIGMOID_STEEPNESS,
     timepoints: Optional[Sequence[int]] = None,
-    reference_timepoint: Optional[int] = None,
+    reference_timepoint: Union[int, str, None] = None,
     overwrite: bool = False,
     name: Optional[str] = None,
     temp_dir: str | Path | None = None,
@@ -1032,6 +1120,13 @@ def fuse_tiles(
         stays blank there (with a warning), a tile without a counterpart at the reference
         is not fused (with a warning), and a tile with another shape, voxel size or
         unit than its reference tile raises ``ValueError``.
+
+        ``"all"`` places every timepoint at its own positions instead. The output grid
+        covers the tiles of all timepoints of ``tiles``, also those not in ``timepoints``,
+        so ``crop`` and the output shape hold for all of them and timepoints fused in
+        separate runs line up. Tile offsets and transitions are computed for each
+        timepoint, so tiles and the overlaps between them follow the reported positions.
+        A tile missing at a timepoint stays blank there (with a warning).
     overwrite
         Replace ``out`` if it is an existing Zarr store (with a warning, once the
         fusion has succeeded). Otherwise an existing non-empty ``out`` raises
@@ -1118,20 +1213,14 @@ def fuse_tiles(
                                    fill_value=0, overwrite=True,
                                    compressors=_TEMP_COMPRESSORS if temp_compression else None)
         axis = "zyx".index(midline_axis)
-        zranges = [(0, depth)] if flat else [(z0, min(z0 + cz, depth)) for z0 in range(0, depth, cz)]
-        blocks = []
-        for ci, n in enumerate(names):
-            placed = plan.layout[n]
-            midline = (axis, _midline_ranges(plan.layout[n], axis)) if blend == "midline" else None
-            transitions = (axis, _sigmoid_transitions(plan.layout[n], axis)) if blend == "sigmoid" else None
-            for y0 in range(0, plan.shape[-2], cy):
-                for x0 in range(0, plan.shape[-1], cx):
-                    bounds = (y0, min(y0 + cy, plan.shape[-2]), x0, min(x0 + cx, plan.shape[-1]))
-                    for zr in zranges:
-                        inside = [i for i, p in enumerate(placed) if _overlap(p, bounds, zr) is not None]
-                        if inside:  # regions without tiles keep the fill value (0)
-                            blocks.append((ci, n, bounds, zr, midline, transitions, inside))
-        regions = _RegionSeries(blocks, plan)
+        region = (depth if flat else cz, cy, cx)
+
+        def layout_blocks(layout: Dict[str, List[_Placed]]) -> List[tuple]:
+            return [b for ci, n in enumerate(names)
+                    for b in _layout_blocks(ci, n, layout[n], tuple(plan.shape[-2:]), depth, region, blend, axis)]
+
+        regions = _RegionSeries((lambda tp: layout_blocks(plan.layouts[tp])) if plan.per_timepoint
+                                else layout_blocks(plan.layout), plan)
         logger.info("Fusing %d regions of up to %s voxels (z, y, x)", len(regions),
                     ("-", cy, cx) if flat else (cz, cy, cx))
 

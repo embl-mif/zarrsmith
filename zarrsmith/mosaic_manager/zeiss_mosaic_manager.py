@@ -60,8 +60,9 @@ class ZeissMosaicManager(MosaicManager):
     Tiles are placed where the file says: ``y`` and ``x`` from the pixel coordinates
     of the tile in the file (the stage position, rounded to a pixel), ``z`` from the
     ``FocusPosition`` of its first plane. They are not registered, unlike the images
-    stitched by ZEN. Positions in the file change a little between timepoints:
-    a fusion uses those of one reference timepoint, as ZEN uses one offset for all.
+    stitched by ZEN. Positions in the file change a little between timepoints: by
+    default a fusion uses those of one reference timepoint, as ZEN uses one offset for
+    all; ``reference_timepoint="all"`` uses those of every timepoint.
     """
 
     def __init__(self, path, scene_index: Optional[int] = None):
