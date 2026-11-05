@@ -7,7 +7,13 @@ import zarr
 
 from .axes import normalize_axes, normalize_data_type
 from .create_empty_dataset import write_empty_pyramid
-from .ngff import ZarrWriteConfig, _infer_ngff_version, _register_label_on_labels_group, _resolve_format
+from .ngff import (
+    DEFAULT_COMPRESSOR_LEVEL,
+    ZarrWriteConfig,
+    _infer_ngff_version,
+    _register_label_on_labels_group,
+    _resolve_format,
+)
 
 def _without_axis(values, axis_index: int):
     return tuple(v for i, v in enumerate(values) if i != axis_index)
@@ -56,7 +62,7 @@ def create_empty_group(
     ngff_version: str | None = None,
     zarr_format: int | None = None,
     compressor: str | None = None,
-    compressor_level: int = 3,
+    compressor_level: int = DEFAULT_COMPRESSOR_LEVEL,
     data_type: str | None = None,
     shards: Any = None,
     shard_target_mb: float = 1024.0,

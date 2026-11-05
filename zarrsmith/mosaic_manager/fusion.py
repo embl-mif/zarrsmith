@@ -44,7 +44,7 @@ import numpy as np
 import zarr
 
 from ..utils.metadata import ChannelInfo, build_metadata
-from ..utils.ngff import ZarrWriteConfig
+from ..utils.ngff import ZarrWriteConfig, _resolve_format
 from ..utils.output_path import output_refusal
 from .fields import check_single_field, fields_of, multiple_fields_message
 from .tile import Tile, series_keys
@@ -1009,6 +1009,7 @@ def _check_write_options(options: dict) -> None:
     reserved = set(options) & _RESERVED_WRITE_OPTIONS
     if reserved:
         raise TypeError(f"Option(s) {sorted(reserved)} are set by fuse_tiles and cannot be passed.")
+    _resolve_format(ZarrWriteConfig(**options))  # before hours of fusion, not after
 
 
 # ---------------------------------------------------------------------------

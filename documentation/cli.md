@@ -31,11 +31,12 @@ zarrsmith convert --batch datasets.csv
 | `-df`, `--downscale_factor` / `-nl`, `--num_levels` | pyramid factor and number of levels (estimated if omitted) |
 | `-s`, `--subset` | crop or select before writing, e.g. `"y=10:100:2;x=20:80;c=0,2"` |
 | `-sh`, `-stm`, `-sea` | sharding (see [Advanced writing options](advanced.md)) |
+| `-cp`, `--compressor` / `-cpl`, `--compressor_level` | `blosc` (default), `gzip` (zarr v2 only) or `none`, and the level from 0 to 9 (default 1); see [Compression](advanced.md#compression) |
 | `-ds`, `--drop_singleton` | drop size-1 `t`/`c`/`z` axes (default true) |
 | `-nw`, `--num_workers` | write threads |
 | `-ow`, `--overwrite` | replace an existing output (see [Existing outputs](advanced.md#existing-outputs)) |
 
-The batch CSV has the columns `input`, `microscope`, `output`, plus any of `chunk_size`, `max_size(MB)`, `scene_index`, `zarr_format`, `downscale_factor`, `subset`, `channel_colors`, `channel_names`, `num_levels`, `shards`, `shard_target_mb`, `shard_exclude_axes`, `drop_singleton`, `num_workers`, `overwrite`. The napari converter writes such rows with *Append to batch CSV*.
+The batch CSV has the columns `input`, `microscope`, `output`, plus any of `chunk_size`, `max_size(MB)`, `scene_index`, `zarr_format`, `downscale_factor`, `subset`, `channel_colors`, `channel_names`, `num_levels`, `shards`, `shard_target_mb`, `shard_exclude_axes`, `compressor`, `compressor_level`, `drop_singleton`, `num_workers`, `overwrite`. The napari converter writes such rows with *Append to batch CSV*.
 
 An existing non-empty output is refused unless `--overwrite` is given, and only a Zarr store is ever replaced. With `--batch`, overwriting is set per row in the `overwrite` column (`--overwrite` is not accepted); a row whose output is in the way is skipped with a warning, the other rows still run, and the skipped rows are listed at the end. This also applies to `fuse` and `chromatic-shift`.
 
