@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..utils.czi import czi_distance
+from ..utils.czi import block_key, czi_distance, read_block_index
 from .czi_array import CziTileArray
 from .mosaic import MosaicManager
 from .tile import Tile
@@ -100,6 +100,7 @@ class ZeissMosaicManager(MosaicManager):
             zs = [z for s in stacks.values() for z in s["boxes"]]
             first_z, last_z = min(zs), max(zs)
             focus = self._focus_positions(czi, first_z, min(key[3] for key in stacks))
+        index = read_block_index(self.path, dtype)
         default_focus = next(iter(focus.values()), 0.0)
         names = channel_names(md, sorted({key[3] for key in stacks}))
         scenes = scene_names(md)
@@ -107,13 +108,16 @@ class ZeissMosaicManager(MosaicManager):
 
         tiles = []
         missing = 0
+        indirect = 0
         for (scene, m, t, c), s in sorted(stacks.items(), key=lambda kv: tuple(-1 if v is None else v for v in kv[0])):
             planes = [z if z in s["boxes"] else None for z in range(first_z, last_z + 1)]
             missing += planes.count(None)
+            blocks = [None if z is None else index.get(block_key({**s["coords"], "Z": z})) for z in planes]
+            indirect += blocks.count(None) - planes.count(None)
             box = next(iter(s["boxes"].values()))
             field = None if scene is None else field_name(scene, scenes.get(scene))
             tiles.append(Tile(
-                data=CziTileArray(self.path, s["coords"], planes, (len(planes), box.h, box.w), dtype),
+                data=CziTileArray(self.path, s["coords"], planes, (len(planes), box.h, box.w), dtype, blocks),
                 origin=(focus.get((scene, m, t), default_focus), box.y * voxel[1], box.x * voxel[2]),
                 voxel_size=voxel,
                 channel=names[c],
@@ -124,6 +128,9 @@ class ZeissMosaicManager(MosaicManager):
             ))
         if missing:
             logger.warning("%d plane(s) are missing in %s: they are read as zeros.", missing, self.path.name)
+        if indirect:
+            logger.info("%d plane(s) of %s are read with aicspylibczi (e.g. JPEG XR), which is slow on files with "
+                        "many subblocks.", indirect, self.path.name)
         return tiles
 
     @staticmethod
