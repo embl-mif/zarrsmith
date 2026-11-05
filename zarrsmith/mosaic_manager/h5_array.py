@@ -15,6 +15,10 @@ class H5Array:
     read many tiles in parallel despite h5py's per-process lock) and needs no
     ``close()``. It behaves like a read-only array: ``shape``, ``dtype``, ``ndim``
     and numpy-style slicing, so ``dask.array.from_array`` accepts it directly.
+
+    Files are opened without HDF5 file locking, so do not read a file that is still
+    being written. On NFS, locking made reads 1.5x slower, and 3x when the file was
+    already cached (raw Luxendo tiles, 16 workers).
     """
 
     #: Tells ``fuse_tiles(executor="auto")`` that this data can be used in worker processes.
@@ -26,7 +30,7 @@ class H5Array:
         self.path = str(path)
         self.dataset = dataset
         if shape is None or dtype is None:
-            with h5py.File(self.path, "r") as f:
+            with h5py.File(self.path, "r", locking=False) as f:
                 d = f[dataset]
                 shape = d.shape if shape is None else shape
                 dtype = d.dtype if dtype is None else dtype
@@ -35,7 +39,7 @@ class H5Array:
         self.ndim = len(self.shape)
 
     def __getitem__(self, key):
-        with h5py.File(self.path, "r") as f:
+        with h5py.File(self.path, "r", locking=False) as f:
             return f[self.dataset][key]
 
     def __len__(self) -> int:

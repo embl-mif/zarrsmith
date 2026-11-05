@@ -5,7 +5,25 @@ import json
 import h5py
 import numpy as np
 
-from zarrsmith.mosaic_manager import LuxendoMosaicManager
+from zarrsmith.mosaic_manager import H5Array, LuxendoMosaicManager
+
+
+def test_h5_array_opens_files_without_locking(tmp_path, monkeypatch):
+    path = tmp_path / "tile.h5"
+    with h5py.File(path, "w") as f:
+        f["Data"] = np.arange(24, dtype=np.uint16).reshape(2, 3, 4)
+    opened = []
+    real = h5py.File
+
+    def spy(*args, **kwargs):
+        opened.append(kwargs.get("locking"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(h5py, "File", spy)
+    array = H5Array(path)  # the file is opened for its shape and dtype
+    assert array.shape == (2, 3, 4) and array.dtype == np.uint16
+    assert array[1, 2, 3] == 23  # and again for every read
+    assert opened == [False, False]
 
 
 def _write_tile(folder, name, desc, stack, tx, ty, tz, shape=(4, 8, 6), value=1, time_point=None):
