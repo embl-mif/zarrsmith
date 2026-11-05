@@ -56,6 +56,27 @@ zarrsmith convert -i INPUT -m opera -z OUT.zarr -sh auto -stm 256 -sea t c   # o
 - `shard_exclude_axes` lists axes that `"auto"` never merges chunks along. It defaults to `t c`, so each timepoint and channel stays in its own shard. Use `none` (CLI/CSV) or `()` (Python) to allow every axis to merge. An explicit shard shape is always used exactly as given.
 - `shard_target_mb` is the target uncompressed size of a shard. The default is 1024 MB (1 GB). Larger shards mean fewer files but more memory per write thread (see below).
 
+## Compression
+
+Chunks are compressed by default with Blosc, using zstd and byte shuffle at level 1. This was the best compromise between size and speed in a benchmark on `uint16` light-sheet, mosaic and organoid data: about 2.5 to 2.9 times smaller on most of them, and about 1.5 times smaller on a noisy mosaic.
+
+| Python / CSV column | CLI flag | Values | Default |
+|---|---|---|---|
+| `compressor` | `-cp`, `--compressor` | `blosc`, `gzip` (zarr v2 only), or no compression | `blosc` |
+| `compressor_level` | `-cpl`, `--compressor_level` | 0 to 9 | 1 |
+
+```python
+dataset.to_zarr("out.zarr")                                   # Blosc-zstd, level 1
+dataset.to_zarr("out.zarr", compressor="blosc", compressor_level=5)
+dataset.to_zarr("out.zarr", compressor=None)                  # uncompressed
+```
+
+On the command line and in the batch CSV, write `none` in lowercase for uncompressed chunks. An empty CSV cell means the default.
+
+- Higher levels write much more slowly and rarely help. Level 5 only made the noisy mosaic smaller (by about 7%), and it wrote about 6 times more slowly than level 2 there. Level 3 was usually slightly larger than level 1.
+- An unusable combination, such as `gzip` with zarr v3 or a level above 9, is refused before anything is written or replaced.
+- Existing stores are not changed. `chromatic-shift` keeps the codec of its input, and `create_empty_dataset` and `create_empty_group` keep their own default: with `compressor=None` they use zarr's default codec on zarr v3 and no compression on zarr v2.
+
 ## Singleton axes
 
 With `drop_singleton=True` (the default) any `t`, `c` or `z` axis of size 1 is removed from the written dataset, so a single-timepoint, single-channel stack is stored as a plain `zyx` array. The axes list, scales, units and any `chunks`/`shards` you gave for the full axis set are adjusted accordingly. `y` and `x` are never dropped. Pass `drop_singleton=False` (`-ds false` in the CLI, `false` in the CSV, or untick the napari checkbox) to keep every axis.

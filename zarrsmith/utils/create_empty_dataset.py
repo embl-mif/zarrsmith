@@ -7,6 +7,7 @@ import zarr
 
 from .axes import normalize_axes, normalize_data_type
 from .ngff import (
+    DEFAULT_COMPRESSOR_LEVEL,
     ZarrWriteConfig,
     _build_multiscales,
     _build_omero_metadata,
@@ -24,7 +25,7 @@ def create_empty_dataset(
     ngff_version: str | None = None,
     zarr_format: int | None = None,
     compressor: str | None = None,
-    compressor_level: int = 3,
+    compressor_level: int = DEFAULT_COMPRESSOR_LEVEL,
     data_type: str | None = None,
     shards: Any = None,
     shard_target_mb: float = 1024.0,

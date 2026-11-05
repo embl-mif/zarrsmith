@@ -328,6 +328,22 @@ def _add_zarr_arguments(parser):
         ),
     )
     parser.add_argument(
+        '-cp', '--compressor',
+        required=False,
+        type=str.lower,
+        choices=['blosc', 'gzip', 'none'],
+        help=(
+            'Codec of the output. "blosc" is Blosc with zstd and byte shuffle, "gzip" needs --zarr_format 2, '
+            '"none" stores the chunks uncompressed. Default: blosc.'
+        ),
+    )
+    parser.add_argument(
+        '-cpl', '--compressor_level',
+        required=False,
+        type=int,
+        help='Compression level, 0 to 9. Higher levels write much more slowly and rarely save much space. Default: 1.',
+    )
+    parser.add_argument(
         '-ds', '--drop_singleton',
         required=False,
         type=parse_bool,
@@ -439,8 +455,8 @@ CONVERT_HELP = """\
 
     The --batch CSV file has the columns input | microscope | output, plus any of
     chunk_size | max_size(MB) | scene_index | zarr_format | downscale_factor | subset | channel_colors |
-    channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | drop_singleton | num_workers |
-    overwrite
+    channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | compressor | compressor_level |
+    drop_singleton | num_workers | overwrite
     with the same meaning as the options below, e.g.
       input            | microscope | output          | chunk_size    | zarr_format | downscale_factor | subset             | num_levels | shards
       /path/to/input_1 | opera      | /path/to/zarr_1 | 1 1 2 512 512 | 3           | 1 2 2            | y=10:100:2;x=20:80 | 3          | auto
@@ -448,7 +464,9 @@ CONVERT_HELP = """\
     Leave a cell empty for the default. channel_colors can be hex codes or matplotlib color names.
     shards: "auto" (default when empty), an explicit shard shape, or "none". Not supported with zarr_format 2.
     shard_target_mb only applies to shards=auto (default 1024). shard_exclude_axes defaults to "t c"
-    ("none" lets every axis merge). drop_singleton (true/false, default true) removes singleton t/c/z axes.
+    ("none" lets every axis merge). compressor: "blosc" (default when empty), "gzip" (zarr_format 2 only) or
+    "none", in lowercase; compressor_level goes from 0 to 9 (default 1).
+    drop_singleton (true/false, default true) removes singleton t/c/z axes.
     num_workers is the number of write threads (default: half of the available cores, capped at 8).
     overwrite (true/false, default false) replaces an existing output; a row whose output is in the way is
     skipped with a warning, and the other rows still run.
@@ -480,8 +498,8 @@ FUSE_HELP = """\
 
     The --batch CSV file has the columns input | microscope | output, plus any of the output columns of
     `zarrsmith convert --batch` (chunk_size | max_size(MB) | zarr_format | downscale_factor | subset | channel_colors |
-    channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | drop_singleton | num_workers |
-    overwrite)
+    channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | compressor | compressor_level |
+    drop_singleton | num_workers | overwrite)
     and of the fusion columns
     downsample | projection | blend | sigmoid_steepness | channels | groups | fields | tiles | skip_tiles | timepoints |
     reference_timepoint | midline_axis | out_dtype | read_workers | temp_dir |

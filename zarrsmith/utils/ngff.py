@@ -39,6 +39,13 @@ SPATIAL_AXES = SPATIAL_AXIS_SET
 # the spatial axes (z/y/x) get consolidated automatically.
 DEFAULT_SHARD_EXCLUDE_AXES: tuple[str, ...] = ("t", "c")
 
+# Default codec: Blosc with zstd and byte shuffle, the best size/speed compromise
+# measured on uint16 light-sheet, mosaic and organoid data. Higher levels mostly
+# cost write speed: Blosc also grows its block size with the level, and level 3
+# was usually slightly larger than level 1 with byte shuffle.
+DEFAULT_COMPRESSOR = "blosc"
+DEFAULT_COMPRESSOR_LEVEL = 1
+
 # Default write parallelism: this fraction of the available cores, capped.
 # Beyond ~8 threads writes stop getting faster (compression and disk I/O
 # saturate) while memory use keeps growing.
@@ -58,6 +65,13 @@ class ZarrWriteConfig:
     ----------
     ngff_version, zarr_format
         ``0.4``/Zarr v2 and ``0.5``/Zarr v3 are the supported pairs.
+    compressor
+        Codec of the written chunks. ``"blosc"`` (default) is Blosc with zstd and
+        byte shuffle; ``"gzip"`` is only available with zarr v2; ``None`` stores
+        the chunks uncompressed.
+    compressor_level
+        Compression level, 0 to 9 (default 1). Higher levels write much more
+        slowly and rarely make the output noticeably smaller.
     data_type
         Optional dataset semantic type.  Use ``"intensity"`` for regular image
         intensities or ``"label"`` for integer segmentation/annotation data.
@@ -133,8 +147,8 @@ class ZarrWriteConfig:
     overwrite: bool = False
     compute: bool = True
     storage_options: dict[str, Any] | None = None
-    compressor: Literal["blosc", "gzip"] | None = None
-    compressor_level: int = 3
+    compressor: Literal["blosc", "gzip"] | None = DEFAULT_COMPRESSOR
+    compressor_level: int = DEFAULT_COMPRESSOR_LEVEL
     data_type: Literal["intensity", "label"] | None = None
     chunks: Sequence[int] | Sequence[Sequence[int]] | None = None
     shards: Literal["auto"] | Sequence[int] | Sequence[Sequence[int]] | None = "auto"
@@ -292,6 +306,7 @@ def _resolve_format(cfg: ZarrWriteConfig) -> tuple[str, int]:
             f"Incompatible ngff_version/zarr_format pair: {ngff_version}/{zarr_format}. "
             "Use 0.4 with zarr v2 or 0.5 with zarr v3."
         )
+    _check_compressor(cfg.compressor, cfg.compressor_level, zarr_format)
 
     return ngff_version, zarr_format
 
@@ -643,12 +658,22 @@ def _resolve_shards_for_levels(
     ]
 
 
+def _check_compressor(compressor: str | None, level: int, zarr_format: int) -> None:
+    """Refuse an unusable codec before anything is deleted, created or computed."""
+    if compressor is None:
+        return
+    if isinstance(level, bool) or not isinstance(level, (int, np.integer)) or not 0 <= level <= 9:
+        raise ValueError(f"compressor_level must be an integer from 0 to 9, got {level!r}.")
+    build = _build_v2_compressor if zarr_format == 2 else _build_v3_compressors
+    build(compressor, level)
+
+
 def _build_v2_compressor(compressor: str | None, level: int):
     """Construct a zarr v2-compatible compressor configuration."""
     if compressor is None:
         return None
     if compressor == "blosc":
-        return Blosc(cname="zstd", clevel=level, shuffle=Blosc.BITSHUFFLE)
+        return Blosc(cname="zstd", clevel=level, shuffle=Blosc.SHUFFLE)
     if compressor == "gzip":
         return GZip(level=level)
     raise ValueError(f"Unsupported compressor for zarr v2: {compressor}")
@@ -663,7 +688,7 @@ def _build_v3_compressors(compressor: str | None, level: int):
             zarr.codecs.BloscCodec(
                 cname="zstd",
                 clevel=level,
-                shuffle=zarr.codecs.BloscShuffle.bitshuffle,
+                shuffle="shuffle",
             )
         ]
     raise ValueError(f"Unsupported compressor for zarr v3: {compressor}")

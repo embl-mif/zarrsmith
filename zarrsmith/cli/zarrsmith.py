@@ -10,6 +10,7 @@ import pandas as pd
 import zarrsmith.microscope_manager as mm
 from zarrsmith.utils.axes import metadata_axes, metadata_axis_size
 from zarrsmith.utils.chunks import default_chunk_size, default_num_levels
+from zarrsmith.utils.ngff import DEFAULT_COMPRESSOR
 from zarrsmith.utils.output_path import output_refusal
 from zarrsmith.cli.__arguments import (
     _parse_arguments,
@@ -72,6 +73,16 @@ def _normalize_shards(value):
     raise TypeError(
         f"shards must be 'auto', a shard shape, or None; got {value!r}."
     )
+
+
+def _compression_kwargs(compressor, compressor_level) -> Dict[str, Any]:
+    """``to_zarr`` options from a `compressor` CLI/CSV/kwarg value; ``"none"`` or ``None`` is uncompressed."""
+    if isinstance(compressor, str):
+        compressor = compressor.strip().lower()
+    kwargs: Dict[str, Any] = {"compressor": None if compressor == "none" else compressor}
+    if compressor_level is not None:
+        kwargs["compressor_level"] = int(compressor_level)
+    return kwargs
 
 
 def _normalize_shard_exclude_axes(value):
@@ -148,6 +159,8 @@ def zarr_convert(
     shards: Optional[Any] = "auto",
     shard_target_mb: Optional[float] = None,
     shard_exclude_axes: Optional[Any] = None,
+    compressor: Optional[str] = DEFAULT_COMPRESSOR,
+    compressor_level: Optional[int] = None,
     drop_singleton: Optional[bool] = True,
     num_workers: Optional[int] = None,
     overwrite: Optional[bool] = False,
@@ -212,6 +225,15 @@ def zarr_convert(
             Axes that shards="auto" never merges chunks along.\n
             Example: \"-sea t c\" (default) or \"-sea none\" to allow every axis to merge.\n
             Default: None (falls back to zarrsmith's own default of t, c)
+        compressor : Optional[str]
+            Codec of the output: "blosc" (Blosc with zstd and byte shuffle), "gzip"
+            (zarr_format 2 only), or "none" or None for uncompressed chunks.\n
+            Example: \"-cp none\"
+
+            Default: "blosc"
+        compressor_level : Optional[int]
+            Compression level, 0 to 9.\n
+            Default: None (falls back to zarrsmith's own default of 1)
         drop_singleton : Optional[bool]
             Remove singleton t/c/z axes from the output dataset.\n
             Example: \"-ds false\" to keep them.\n
@@ -333,6 +355,7 @@ def zarr_convert(
         "drop_singleton": drop_singleton,
         "shards": shards,
         "overwrite": bool(overwrite),
+        **_compression_kwargs(compressor, compressor_level),
     }
     if num_workers is not None:
         to_zarr_kwargs["num_workers"] = int(num_workers)
@@ -350,6 +373,7 @@ def zarr_convert(
     print(f"N CHUNKS: {n_chunks}.")
     print(f"PYRAMID LEVELS: {num_levels}.")
     print(f"ZARR FORMAT: {zarr_format}, NGFF VERSION: {ngff_version}.")
+    print(f"COMPRESSOR: {to_zarr_kwargs['compressor']}, LEVEL: {to_zarr_kwargs.get('compressor_level', '(zarrsmith default: 1)')}.")
     print(f"DROP_SINGLETON: {drop_singleton}.")
     print(f"NUM_WORKERS: {num_workers if num_workers is not None else '(zarrsmith default)'}.")
     print(f"SHARDS: {shards}.")
@@ -398,6 +422,12 @@ def _batch_row_kwargs(v, columns) -> Dict[str, Any]:
 
     if "shard_target_mb" in columns and _present(v.get("shard_target_mb")):
         kwargs["shard_target_mb"] = float(v["shard_target_mb"])
+
+    if "compressor" in columns and _present(v.get("compressor")):
+        kwargs["compressor"] = v["compressor"]
+
+    if "compressor_level" in columns and _present(v.get("compressor_level")):
+        kwargs["compressor_level"] = int(v["compressor_level"])
 
     if "drop_singleton" in columns and _present(v.get("drop_singleton")):
         kwargs["drop_singleton"] = parse_bool(v["drop_singleton"])
@@ -465,6 +495,7 @@ def convert_single(args):
         f'--chunk_size {args.chunk_size} --subset {args.subset} '
         f'--shards {args.shards} --shard_target_mb {args.shard_target_mb} '
         f'--shard_exclude_axes {args.shard_exclude_axes} '
+        f'--compressor {args.compressor} --compressor_level {args.compressor_level} '
         f'--drop_singleton {args.drop_singleton} --num_workers {args.num_workers}'
         f'{" --overwrite" if args.overwrite else ""}'
     )
@@ -572,6 +603,8 @@ def mosaic_convert(
     shards: Optional[Any] = "auto",
     shard_target_mb: Optional[float] = None,
     shard_exclude_axes: Optional[Any] = None,
+    compressor: Optional[str] = DEFAULT_COMPRESSOR,
+    compressor_level: Optional[int] = None,
     drop_singleton: Optional[bool] = True,
     num_workers: Optional[int] = None,
     read_downsample: Optional[Any] = None,
@@ -677,6 +710,7 @@ def mosaic_convert(
         "drop_singleton": True if drop_singleton is None else parse_bool(drop_singleton),
         "shards": shards,
         "chunks": chunks,
+        **_compression_kwargs(compressor, compressor_level),
     }
     if num_workers is not None:
         write_kwargs["num_workers"] = int(num_workers)

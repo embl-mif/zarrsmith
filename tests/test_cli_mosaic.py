@@ -135,6 +135,39 @@ def test_fuse_batch(acquisition, tmp_path, monkeypatch):
     assert mm.ZarrManager(str(tmp_path / "a.ome.zarr")).metadata["axes"] == "zyx"
 
 
+def _inner_codec_names(out):
+    meta = json.loads((out / "0" / "zarr.json").read_text())
+    codecs = meta["codecs"]
+    if codecs[0]["name"] == "sharding_indexed":
+        codecs = codecs[0]["configuration"]["codecs"]
+    return [c["name"] for c in codecs]
+
+
+def test_fuse_compression(acquisition, tmp_path, monkeypatch):
+    base = ("fuse", "-i", str(acquisition), "-rds", "2", "2", "2", "-nl", "1", "-rw", "2", "-nw", "2")
+    default, none = tmp_path / "default.ome.zarr", tmp_path / "none.ome.zarr"
+    _run(monkeypatch, *base, "-z", str(default))
+    assert "blosc" in _inner_codec_names(default)
+    _run(monkeypatch, *base, "-z", str(none), "-cp", "none")
+    assert "blosc" not in _inner_codec_names(none)
+
+
+def test_fuse_refuses_gzip_on_v3_before_fusing(acquisition, tmp_path, monkeypatch):
+    out = tmp_path / "out.ome.zarr"
+    base = ("fuse", "-i", str(acquisition), "-rds", "2", "2", "2", "-nl", "1", "-rw", "2", "-nw", "2", "-z", str(out))
+    _run(monkeypatch, *base)
+    before = (out / "0" / "zarr.json").read_text()
+
+    def must_not_fuse(*args, **kwargs):
+        pytest.fail("the tiles were read before the codec was refused")
+
+    monkeypatch.setattr(fusion, "_fuse_regions", must_not_fuse, raising=False)
+    with pytest.raises(ValueError, match="Unsupported compressor"):
+        _run(monkeypatch, *base, "-cp", "gzip", "--overwrite")
+    assert (out / "0" / "zarr.json").read_text() == before
+    assert not list(tmp_path.glob(".*.level0.zarr"))
+
+
 def test_old_command_names_still_work(acquisition, tmp_path, monkeypatch, capsys):
     out = tmp_path / "old.ome.zarr"
     _run(monkeypatch, "mosaic2zarr", "-i", str(acquisition), "-z", str(out), "--read_downsample",
