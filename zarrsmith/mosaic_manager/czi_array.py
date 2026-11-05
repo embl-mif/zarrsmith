@@ -5,6 +5,7 @@ from typing import Dict, Optional, Sequence
 
 import numpy as np
 
+from ..utils.czi import CziBlock, read_block
 from .tiff_array import PlaneStackArray
 
 
@@ -25,19 +26,28 @@ class CziTileArray(PlaneStackArray):
         ``Z`` index in the file of every plane, in order. ``None`` marks a missing plane, read as zeros.
     shape, dtype
         ``(z, y, x)`` shape and data type, from the metadata (no plane is read).
+    blocks
+        Where every plane is stored (:func:`~zarrsmith.utils.czi.read_block_index`), to read
+        it directly. A plane without one is read with aicspylibczi, which goes through the
+        whole directory of the file: seconds per plane if it holds a million subblocks.
     """
 
-    def __init__(self, path: str | Path, coords: Dict[str, int], planes: Sequence[Optional[int]], shape, dtype):
+    def __init__(self, path: str | Path, coords: Dict[str, int], planes: Sequence[Optional[int]], shape, dtype,
+                 blocks: Optional[Sequence[Optional[CziBlock]]] = None):
         super().__init__(shape, dtype)
         self.path = str(path)
         self.coords = dict(coords)
         self.planes = list(planes)
-        if self.shape[0] != len(self.planes):
-            raise ValueError(f"shape {self.shape} does not match {len(self.planes)} plane(s).")
+        self.blocks = [None] * len(self.planes) if blocks is None else list(blocks)
+        if not self.shape[0] == len(self.planes) == len(self.blocks):
+            raise ValueError(f"shape {self.shape} does not match {len(self.planes)} plane(s) and "
+                             f"{len(self.blocks)} block(s).")
 
     def _read(self, z: int) -> np.ndarray:
         if self.planes[z] is None:
             return np.zeros(self.shape[1:], self.dtype)
+        if self.blocks[z] is not None:
+            return read_block(self.path, self.blocks[z], self.shape[1:], self.dtype)
         from aicspylibczi import CziFile
 
         with open(self.path, "rb") as f:

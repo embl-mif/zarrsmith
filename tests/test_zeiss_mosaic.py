@@ -16,6 +16,7 @@ from zarrsmith.cli import zarrsmith as cli
 from zarrsmith.mosaic_manager import (CziTileArray, LuxendoMosaicManager, TiffStackArray, WrongReaderError,
                                       ZeissMosaicManager, detect_microscope)
 from zarrsmith.mosaic_manager import zeiss_mosaic_manager as zeiss
+from zarrsmith.utils.czi import CziBlock, block_key, read_block, read_block_index
 
 pyczi = pytest.importorskip("pylibCZIrw.czi")
 
@@ -139,6 +140,124 @@ def test_missing_plane_is_read_as_zeros(czi_path):
     data = CziTileArray(czi_path, {"S": 0, "M": 0, "T": 0, "C": 0}, [0, None], (2, SIZE, SIZE), np.uint16)
     assert data[0].max() == plane_value(0, 0, 0, 0, 0)
     assert data[1].max() == 0
+
+
+def _write_scan(path, dtype=np.uint16, compression=None):
+    """Two tiles of one scene, 2 channels, 2 planes, in which both bytes of a 16-bit pixel
+    vary (so that hi-lo packing matters); returns ``{(m, c, z): plane}``."""
+    limit = 256 if dtype == np.uint8 else 2**16
+    expected = {}
+    with pyczi.create_czi(str(path), exist_ok=True, compression_options=compression) as f:
+        for m, location in enumerate(LAYOUT[0]):
+            for c in range(2):
+                for z in range(2):
+                    values = (np.arange(SIZE * SIZE) * 251 + 7 * m + 11 * c + 13 * z) % limit
+                    plane = values.astype(dtype).reshape(SIZE, SIZE, 1)
+                    f.write(plane, plane={"T": 0, "C": c, "Z": z}, scene=0, location=location)
+                    expected[m, c, z] = plane[..., 0]
+        _write_metadata(f)
+    return expected
+
+
+@pytest.mark.parametrize("dtype, compression, mode", [
+    (np.uint16, None, 0),
+    (np.uint8, None, 0),
+    (np.float32, None, 0),
+    (np.uint16, "zstd0:ExplicitLevel=1", 5),
+    (np.uint16, "zstd1:ExplicitLevel=1", 6),
+    (np.uint8, "zstd1:ExplicitLevel=1", 6),
+    (np.uint16, "zstd1:ExplicitLevel=1;PreProcess=HiLoByteUnpack", 6),
+])
+def test_planes_are_read_from_their_position_in_the_file(tmp_path, monkeypatch, dtype, compression, mode):
+    """The pixels of aicspylibczi, without going through it: it scans the whole directory for every plane."""
+    from aicspylibczi import CziFile
+
+    path = tmp_path / "scan.czi"
+    expected = _write_scan(path, dtype, compression)
+    mosaic = ZeissMosaicManager(path)
+    assert {b.compression for t in mosaic.tiles for b in t.data.blocks} == {mode}
+    with open(path, "rb") as f:
+        library = {k: CziFile(f).read_image(S=0, M=k[0], T=0, C=k[1], Z=k[2])[0].reshape(SIZE, SIZE) for k in expected}
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("read through aicspylibczi")
+
+    monkeypatch.setattr(CziFile, "read_image", refuse)
+    for tile in mosaic.tiles:
+        m, c = tile.attrs["mosaic_index"], mosaic.channels.index(tile.channel)
+        planes = np.asarray(pickle.loads(pickle.dumps(tile.data))[:])
+        assert planes.dtype == dtype
+        for z in range(2):
+            np.testing.assert_array_equal(planes[z], expected[m, c, z])
+            np.testing.assert_array_equal(planes[z], library[m, c, z])
+        assert tile.data[0].flags.writeable  # like the planes of aicspylibczi
+
+
+def test_hi_lo_packing_is_exercised(tmp_path):
+    """The file of the hi-lo case above does pack the bytes: its zstd header says so."""
+    path = tmp_path / "scan.czi"
+    _write_scan(path, compression="zstd1:ExplicitLevel=1;PreProcess=HiLoByteUnpack")
+    block = next(iter(read_block_index(path, np.uint16).values()))
+    with open(path, "rb") as f:
+        f.seek(block.position + 32)
+        metadata = struct.unpack("<i", f.read(4))[0]
+        f.seek(block.data_offset + metadata)
+        assert f.read(3) == b"\x03\x01\x01"
+
+
+def _patch_entries(path, offset, value):
+    """Write the 32-bit ``value`` at ``offset`` in every directory entry of the file (7 dimensions each)."""
+    with open(path, "r+b") as f:
+        f.seek(84)
+        directory = struct.unpack("<q", f.read(8))[0]
+        f.seek(directory + 32)
+        count = struct.unpack("<i", f.read(4))[0]
+        for i in range(count):
+            f.seek(directory + 160 + i * (32 + 7 * 20) + offset)
+            f.write(struct.pack("<i", value))
+
+
+@pytest.mark.parametrize("offset, value", [
+    (18, 4),  # compressed with JPEG XR
+    (14, 1),  # in another part of a split file
+    (22, 1),  # a pyramid level
+    (2, 0),  # another pixel type (gray8)
+    (32 + 16, SIZE // 2),  # X (the first dimension) stored smaller than it covers: a pyramid level
+])
+def test_planes_that_need_the_library_are_not_indexed(tmp_path, offset, value):
+    path = tmp_path / "scan.czi"
+    _write_scan(path)
+    assert len(read_block_index(path, np.uint16)) == 2 * 2 * 2
+    _patch_entries(path, offset, value)
+    assert read_block_index(path, np.uint16) == {}
+
+
+def test_planes_with_the_same_coordinates_are_not_indexed(tmp_path):
+    path = tmp_path / "scan.czi"
+    _write_scan(path)
+    _patch_entries(path, 32 + 2 * 20 + 4, 0)  # M (the third dimension): every tile becomes the first one
+    assert read_block_index(path, np.uint16) == {}
+
+
+def test_plane_without_a_block_is_read_with_the_library(tmp_path):
+    path = tmp_path / "scan.czi"
+    expected = _write_scan(path)
+    block = read_block_index(path, np.uint16)[block_key({"S": 0, "M": 1, "T": 0, "C": 1, "Z": 1})]
+    data = CziTileArray(path, {"S": 0, "M": 1, "T": 0, "C": 1}, [0, 1], (2, SIZE, SIZE), np.uint16, [None, block])
+    np.testing.assert_array_equal(data[0], expected[1, 1, 0])
+    np.testing.assert_array_equal(data[1], expected[1, 1, 1])
+
+
+def test_plane_that_does_not_fit_is_refused(tmp_path):
+    path = tmp_path / "scan.czi"
+    _write_scan(path)
+    block = next(iter(read_block_index(path, np.uint16).values()))
+    with pytest.raises(ValueError, match="does not hold"):
+        read_block(path, block, (SIZE, SIZE + 1), np.uint16)
+    with pytest.raises(ValueError, match="cut short"):
+        read_block(path, CziBlock(block.position, path.stat().st_size - 8, block.compression), (SIZE, SIZE), np.uint16)
+    with pytest.raises(ValueError, match="does not match"):
+        CziTileArray(path, {}, [0, 1], (2, SIZE, SIZE), np.uint16, [None])
 
 
 def test_scene_index_loads_one_scene(czi_path):
