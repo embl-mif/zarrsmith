@@ -1,0 +1,114 @@
+zarrsmith.mosaic_manager.zeiss_mosaic_manager
+=============================================
+
+.. py:module:: zarrsmith.mosaic_manager.zeiss_mosaic_manager
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   zarrsmith.mosaic_manager.zeiss_mosaic_manager.logger
+   zarrsmith.mosaic_manager.zeiss_mosaic_manager._PIXEL_TYPES
+   zarrsmith.mosaic_manager.zeiss_mosaic_manager._FOCUS
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   zarrsmith.mosaic_manager.zeiss_mosaic_manager.scene_names
+   zarrsmith.mosaic_manager.zeiss_mosaic_manager.channel_names
+   zarrsmith.mosaic_manager.zeiss_mosaic_manager.field_name
+
+
+Module Contents
+---------------
+
+.. py:data:: logger
+
+.. py:data:: _PIXEL_TYPES
+
+.. py:data:: _FOCUS
+
+.. py:function:: scene_names(czi_metadata) -> Dict[int, str]
+
+   ``{scene index: name}`` of a CZI file (names may be missing).
+
+
+.. py:function:: channel_names(czi_metadata, indices) -> Dict[int, str]
+
+   ``{channel index: name}`` for ``indices``, unique so that channels are not fused together.
+
+
+.. py:function:: field_name(scene: int, name: Optional[str]) -> str
+
+   ``scene0_TR1``: the index keeps the acquisition order and spaces are not allowed
+   in field names, which the command line and batch CSV separate with spaces.
+
+
+.. py:class:: ZeissMosaicManager(path, scene_index: Optional[int] = None)
+
+   Bases: :py:obj:`zarrsmith.mosaic_manager.mosaic.MosaicManager`
+
+
+   Raw Zeiss tiles of one ``.czi`` file (a ZEN tile scan), before any stitching.
+
+   Not to be confused with :class:`~zarrsmith.microscope_manager.ZeissManager`, which
+   reads one scene as a single image; a file without tiles, such as the output of
+   ZEN's *Stitching*, is read with it. Every tile (``M`` index) of every channel and
+   timepoint is one tile, and its planes stay on disk until read
+   (:class:`~zarrsmith.mosaic_manager.CziTileArray`).
+
+   * ``channel``: the channel name in the metadata (``AF488-T2``);
+   * ``field``: the scene: ``scene0_TR1``, ``scene1_P1``, ... with the tile regions and
+     positions of the ZEN experiment as ``TR1`` and ``P1``;
+   * ``timepoint``: the ``T`` index;
+   * ``attrs``: ``stack`` (``scene0_TR1-m00``, the tile id without the channel),
+     ``scene``, ``scene_name``, ``mosaic_index`` and ``path``.
+
+   Tiles are placed where the file says: ``y`` and ``x`` from the pixel coordinates
+   of the tile in the file (the stage position, rounded to a pixel), ``z`` from the
+   ``FocusPosition`` of its first plane. They are not registered, unlike the images
+   stitched by ZEN. Positions in the file change a little between timepoints: by
+   default a fusion uses those of one reference timepoint, as ZEN uses one offset for
+   all; ``reference_timepoint="all"`` uses those of every timepoint.
+
+
+   .. py:attribute:: scene_index
+      :value: None
+
+
+
+   .. py:method:: _scan() -> List[zarrsmith.mosaic_manager.tile.Tile]
+
+      Discover the tiles under :attr:`path` (lazy data, positions in the sample frame).
+
+
+
+   .. py:method:: _stacks(czi) -> Dict[Tuple, dict]
+      :staticmethod:
+
+
+      ``{(scene, m, t, c): {"coords": ..., "boxes": {z: box}}}``, from the directory of the file.
+
+
+
+   .. py:method:: _focus_positions(czi, z: int, c: int) -> Dict[Tuple, float]
+      :staticmethod:
+
+
+      ``{(scene, m, t): focus position (um)}`` of plane ``z`` of channel ``c`` (one read per tile).
+
+
+

@@ -1,0 +1,121 @@
+zarrsmith.utils.czi
+===================
+
+.. py:module:: zarrsmith.utils.czi
+
+.. autoapi-nested-parse::
+
+   Helpers for Zeiss CZI files, shared by the Zeiss readers: metadata, and direct access to planes.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   zarrsmith.utils.czi._SEGMENT_HEADER
+   zarrsmith.utils.czi._DIRECTORY_POSITION
+   zarrsmith.utils.czi._DIRECTORY_HEADER
+   zarrsmith.utils.czi._SUBBLOCK_HEADER
+   zarrsmith.utils.czi._SUBBLOCK_SIZES
+   zarrsmith.utils.czi._ENTRY
+   zarrsmith.utils.czi._DIMENSION
+   zarrsmith.utils.czi._PIXEL_DTYPES
+   zarrsmith.utils.czi._zstd
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   zarrsmith.utils.czi.CziBlock
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   zarrsmith.utils.czi.czi_distance
+   zarrsmith.utils.czi.block_key
+   zarrsmith.utils.czi.read_block_index
+   zarrsmith.utils.czi.read_block
+
+
+Module Contents
+---------------
+
+.. py:function:: czi_distance(czi_metadata, axis: str, default: Optional[float] = None) -> float
+
+   Voxel size along ``axis`` in micrometers (CZI stores meters).
+
+
+.. py:data:: _SEGMENT_HEADER
+   :value: 32
+
+
+.. py:data:: _DIRECTORY_POSITION
+   :value: 52
+
+
+.. py:data:: _DIRECTORY_HEADER
+   :value: 128
+
+
+.. py:data:: _SUBBLOCK_HEADER
+   :value: 256
+
+
+.. py:data:: _SUBBLOCK_SIZES
+
+.. py:data:: _ENTRY
+
+.. py:data:: _DIMENSION
+
+.. py:data:: _PIXEL_DTYPES
+
+.. py:data:: _zstd
+
+.. py:class:: CziBlock
+
+   Bases: :py:obj:`NamedTuple`
+
+
+   Where one plane is stored in a CZI file (see :func:`read_block`).
+
+
+   .. py:attribute:: position
+      :type:  int
+
+
+   .. py:attribute:: data_offset
+      :type:  int
+
+
+   .. py:attribute:: compression
+      :type:  int
+
+
+.. py:function:: block_key(coords: Mapping[str, int]) -> Tuple[Tuple[str, int], ...]
+
+   Key of a plane in :func:`read_block_index`, from its coordinates such as
+   ``{"S": 0, "M": 3, "T": 1, "C": 2, "Z": 0}`` (a file without ``Z`` has one plane).
+
+
+.. py:function:: read_block_index(path, dtype) -> Dict[Tuple[Tuple[str, int], ...], CziBlock]
+
+   ``{block_key(coordinates): CziBlock}`` of the planes :func:`read_block` can read.
+
+   Only the directory of the file is read. Planes that have to go through aicspylibczi
+   are left out: other compressions (e.g. JPEG XR), pixel types other than ``dtype``,
+   planes stored in another part of a file split in several, and planes that share their
+   coordinates. Pyramid levels stored in the file are left out too.
+
+
+.. py:function:: read_block(path, block: CziBlock, shape: Sequence[int], dtype) -> numpy.ndarray
+
+   Read one plane of shape ``(y, x)`` from ``block`` of :func:`read_block_index`.
+
+

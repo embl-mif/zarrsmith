@@ -1,0 +1,75 @@
+zarrsmith.utils.output_path
+===========================
+
+.. py:module:: zarrsmith.utils.output_path
+
+.. autoapi-nested-parse::
+
+   Checks made before writing to an output path, so that existing data is not lost by accident.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   zarrsmith.utils.output_path.ZARR_METADATA_FILES
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   zarrsmith.utils.output_path.has_zarr_name
+   zarrsmith.utils.output_path.is_zarr_store
+   zarrsmith.utils.output_path.has_content
+   zarrsmith.utils.output_path.output_refusal
+   zarrsmith.utils.output_path.check_output_path
+
+
+Module Contents
+---------------
+
+.. py:data:: ZARR_METADATA_FILES
+   :value: ('zarr.json', '.zgroup', '.zarray', '.zattrs')
+
+
+.. py:function:: has_zarr_name(path: str | pathlib.Path) -> bool
+
+   Whether the name of ``path`` ends in ``.zarr`` (so also ``.ome.zarr``).
+
+
+.. py:function:: is_zarr_store(path: str | pathlib.Path) -> bool
+
+   Whether the folder ``path`` holds Zarr metadata at its root.
+
+
+.. py:function:: has_content(path: str | pathlib.Path) -> bool
+
+   Whether ``path`` is a file or a non-empty folder.
+
+
+.. py:function:: output_refusal(path: str | pathlib.Path, *, overwrite: bool = False, sources: Iterable[Any] = (), hint: str = 'pass overwrite=True') -> str | None
+
+   Why ``path`` must not be written to, or ``None`` if it can be.
+
+   A missing path or an empty folder can always be written to. An existing Zarr
+   store needs ``overwrite``. Files and non-empty folders that are not Zarr stores
+   are never replaced, because writing with ``overwrite`` first deletes everything
+   in the output folder.
+
+   ``sources`` are the paths the data is read from (``None`` entries are ignored):
+   the output cannot be one of them or contain one, and cannot be inside a source
+   that is a Zarr store. Reading is lazy, so replacing a source loses the data.
+   ``hint`` says how to allow overwriting, in the terms of the caller.
+
+
+.. py:function:: check_output_path(path: str | pathlib.Path, *, overwrite: bool = False, sources: Iterable[Any] = (), hint: str = 'pass overwrite=True') -> None
+
+   Raise ``FileExistsError`` if ``path`` must not be written to (see :func:`output_refusal`).
+
+   Warn if the output is not named ``.zarr`` or if an existing store will be replaced.
+
+

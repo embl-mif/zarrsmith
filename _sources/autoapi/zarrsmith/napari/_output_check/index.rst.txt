@@ -1,0 +1,43 @@
+zarrsmith.napari._output_check
+==============================
+
+.. py:module:: zarrsmith.napari._output_check
+
+.. autoapi-nested-parse::
+
+   The checks the napari widgets make before writing, shown in the viewer and in the log of the widget.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   zarrsmith.napari._output_check.output_problem
+   zarrsmith.napari._output_check.warn_user
+   zarrsmith.napari._output_check.output_allowed
+
+
+Module Contents
+---------------
+
+.. py:function:: output_problem(path, *, overwrite: bool = False, sources: Iterable[Any] = ()) -> Optional[str]
+
+   Why a widget must not write a dataset to ``path``, or ``None`` if it can.
+
+   The name is checked first: choosing a folder that is not meant to be a dataset is
+   how data gets lost. Then what is already there, see
+   :func:`zarrsmith.utils.output_path.output_refusal`.
+
+
+.. py:function:: warn_user(message: str) -> None
+
+   Show ``message`` in the viewer and keep it in the log.
+
+
+.. py:function:: output_allowed(path, *, overwrite: bool = False, sources: Iterable[Any] = ()) -> bool
+
+   Whether a widget can write a dataset to ``path``; warns if not, or if a store will be replaced.
+
+
