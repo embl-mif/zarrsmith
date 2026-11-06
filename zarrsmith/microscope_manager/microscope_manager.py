@@ -264,3 +264,26 @@ class MicroscopeManager(ABC):
             rebuild_pyramid=rebuild_pyramid,
         )
         logger.info("Dataset subset complete.")
+
+    def resample_dataset(self, target_scale, fast: bool = False) -> None:
+        """
+        Change the pixel size of the dataset, rescaling the data accordingly.
+
+        Parameters
+        ----------
+        target_scale : float, sequence of float or dict
+            New pixel size in the units of the dataset: one value, one per spatial
+            axis, or a dict such as ``{"z": 1.0}`` (omitted axes are kept).
+        fast : bool
+            Read images from the coarsest pyramid level still fine enough instead
+            of level 0: much less data, but it keeps the aliasing of that level.
+
+        Labels use nearest neighbour, images linear interpolation with
+        anti-aliasing. The pyramid is rebuilt with the same number of levels.
+        This is lazy and builds one dask graph: for large OME-Zarr stores, use
+        ``ZarrManager.resample_to_zarr``.
+        """
+        from ..utils.resample import resample_levels
+
+        self.data, self.metadata = resample_levels(self.data, self.metadata, target_scale, fast=fast)
+        logger.info("Dataset resampled to %s.", target_scale)

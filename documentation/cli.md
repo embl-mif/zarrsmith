@@ -1,14 +1,15 @@
 # Command line
 
-The `zarrsmith` command has three subcommands:
+The `zarrsmith` command has four subcommands:
 
 | Command | Does |
 |---|---|
 | `zarrsmith convert` | convert a dataset to OME-Zarr, or every dataset listed in a CSV file with `--batch` |
 | `zarrsmith fuse` | fuse the raw tiles of a mosaic into one OME-Zarr image, or every mosaic listed in a CSV file with `--batch` |
 | `zarrsmith chromatic-shift` | measure and correct the Z chromatic shift between the channels of an OME-Zarr image, or of every image listed in a CSV file with `--batch` |
+| `zarrsmith resample` | change the pixel size of an OME-Zarr image, or of every image listed in a CSV file with `--batch` |
 
-`zarrsmith -h` lists them, and `zarrsmith convert -h`, `zarrsmith fuse -h` and `zarrsmith chromatic-shift -h` show every option, examples and the batch CSV columns. `zarrsmith --version` prints the installed version.
+`zarrsmith -h` lists them, and `zarrsmith convert -h`, `zarrsmith fuse -h`, `zarrsmith chromatic-shift -h` and `zarrsmith resample -h` show every option, examples and the batch CSV columns. `zarrsmith --version` prints the installed version.
 
 Each command runs either one dataset (`-i INPUT -z OUTPUT`) or a CSV file (`--batch FILE.csv`), never both (`chromatic-shift` can also run with `-i` alone, to only measure). In a batch file, one row is one run and the columns take the place of the options.
 
@@ -38,7 +39,33 @@ zarrsmith convert --batch datasets.csv
 
 The batch CSV has the columns `input`, `microscope`, `output`, plus any of `chunk_size`, `max_size(MB)`, `scene_index`, `zarr_format`, `downscale_factor`, `subset`, `channel_colors`, `channel_names`, `num_levels`, `shards`, `shard_target_mb`, `shard_exclude_axes`, `compressor`, `compressor_level`, `drop_singleton`, `num_workers`, `overwrite`. The napari converter writes such rows with *Append to batch CSV*.
 
-An existing non-empty output is refused unless `--overwrite` is given, and only a Zarr store is ever replaced. With `--batch`, overwriting is set per row in the `overwrite` column (`--overwrite` is not accepted); a row whose output is in the way is skipped with a warning, the other rows still run, and the skipped rows are listed at the end. This also applies to `fuse` and `chromatic-shift`.
+An existing non-empty output is refused unless `--overwrite` is given, and only a Zarr store is ever replaced. With `--batch`, overwriting is set per row in the `overwrite` column (`--overwrite` is not accepted); a row whose output is in the way is skipped with a warning, the other rows still run, and the skipped rows are listed at the end. This also applies to `fuse`, `chromatic-shift` and `resample`.
+
+## Change the pixel size
+
+`resample` writes a copy of an OME-Zarr image with a new pixel size, and rescales the data accordingly. Other formats go through `convert` first:
+
+```bash
+zarrsmith resample -i INPUT_ZARR -z OUTPUT_ZARR -ps 1              # the same size on every spatial axis
+zarrsmith resample -i INPUT_ZARR -z OUTPUT_ZARR -ps 1 0.5 0.5      # Z Y X
+zarrsmith resample --batch images.csv
+```
+
+The output has the compression and number of pyramid levels of the input. Its chunks and shards start from those of the input and are adjusted to divide each new level evenly, so they are never larger than the input's and store almost no padding. Image groups and labels are resampled too, unless `-ig false` or `-il false` is given. Images use linear interpolation, with anti-aliasing on the axes that shrink; labels use nearest neighbour.
+
+| Option | Does |
+|---|---|
+| `-ps`, `--pixel_size` | the new pixel size in the units of the dataset: one value, or three in `Z Y X` order |
+| `-f`, `--fast` | read images from the coarsest pyramid level still fine enough, instead of level 0 |
+| `-ig`, `--include_groups` / `-il`, `--include_labels` | also resample image groups and labels (`true` or `false`) |
+| `-nw`, `--num_workers` | number of write threads |
+| `-ow`, `--overwrite` | replace an existing output |
+
+`--fast` reads much less data when shrinking, but pyramid levels are usually built by skipping pixels, so the result keeps their aliasing. Leave it out for data you will measure. Labels always read the coarsest suitable level, because they have no intensities to average.
+
+Large datasets are written one batch at a time, each as large as the free memory allows, in whole chunks or shards. Memory use therefore depends on the batch size rather than on the number of timepoints or the size of the volume. Only the blocks of one batch run in parallel, so a block as large as the batch (very large shards with little memory) runs on one thread.
+
+The batch CSV has the columns `input`, `output`, `pixel_size`, plus any of `fast`, `include_groups`, `include_labels`, `overwrite`, `num_workers`.
 
 ## Fuse a mosaic
 

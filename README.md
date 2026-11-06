@@ -32,7 +32,7 @@ The rendered documentation is at **[embl-mif.github.io/zarrsmith](https://embl-m
 - **Pyramids and subsetting**: multiscale generation, cropping, channel reordering, metadata updates. → [Python API](https://embl-mif.github.io/zarrsmith/python-api.html)
 - **Mosaics**: raw tiles shown at their stage position and fused into one OME-Zarr image (3D or projection, one timepoint or a timelapse). → [Mosaics](https://embl-mif.github.io/zarrsmith/mosaic.html)
 - **Chromatic shift correction**: the Z offset between channels measured on the sample itself, on the reference channel and timepoint you choose and applied to every timepoint, and a corrected copy with the same layout as the input. → [Chromatic shift correction](https://embl-mif.github.io/zarrsmith/chromatic-shift.html)
-- **Command line**: one-off and CSV-batch conversion, mosaic fusion and chromatic shift correction. → [Command line](https://embl-mif.github.io/zarrsmith/cli.html)
+- **Command line**: one-off and CSV-batch conversion, mosaic fusion, chromatic shift correction and pixel size changes. → [Command line](https://embl-mif.github.io/zarrsmith/cli.html)
 - **Napari widgets**: conversion with ROI selection, mosaic fusion, exploration of segmented objects (features plot linked with the viewer). → [Napari plugin](https://embl-mif.github.io/zarrsmith/napari-plugin.html)
 - **Output tuning**: sharding, singleton axes, parallel writing, progress bars. → [Advanced writing options](https://embl-mif.github.io/zarrsmith/advanced.html)
 
@@ -75,6 +75,7 @@ z.visualize()                                       # open in napari
 zarrsmith convert -i INPUT_PATH -m MICROSCOPE -z OUTPUT_ZARR
 zarrsmith fuse -i ACQUISITION_FOLDER -z OUTPUT_ZARR -rds 4 8 8   # fuse raw tiles
 zarrsmith chromatic-shift -i INPUT_ZARR -z OUTPUT_ZARR -r shift.json   # align channels in Z
+zarrsmith resample -i INPUT_ZARR -z OUTPUT_ZARR -ps 1 0.5 0.5          # change the pixel size (Z Y X)
 ```
 
 ## Documentation
@@ -99,7 +100,7 @@ zarrsmith chromatic-shift -i INPUT_ZARR -z OUTPUT_ZARR -r shift.json   # align c
 
 | Page | Contents |
 |---|---|
-| [Command line](https://embl-mif.github.io/zarrsmith/cli.html) | `zarrsmith convert`, `zarrsmith fuse`, `zarrsmith chromatic-shift` (one dataset or a CSV batch) |
+| [Command line](https://embl-mif.github.io/zarrsmith/cli.html) | `zarrsmith convert`, `zarrsmith fuse`, `zarrsmith chromatic-shift`, `zarrsmith resample` (one dataset or a CSV batch) |
 | [Napari plugin](https://embl-mif.github.io/zarrsmith/napari-plugin.html) | converter, mosaic fusion and objects explorer widgets |
 
 **Reference**

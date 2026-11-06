@@ -110,6 +110,25 @@ z.write_image_region(
 )
 ```
 
+## Change the pixel size
+
+`resample_dataset` gives a dataset a new pixel size and rescales the data accordingly. Nothing is computed until the dataset is written, and it works with every manager:
+
+```python
+z = mm.ZarrManager("input.zarr")
+z.resample_dataset({"z": 1.0, "y": 0.5, "x": 0.5})  # one value per axis; omitted axes are kept
+z.to_zarr("resampled.zarr")
+```
+
+Images use linear interpolation, with anti-aliasing on the axes that shrink; labels use nearest neighbour. The pyramid is rebuilt with the same number of levels. `fast=True` reads images from the coarsest pyramid level still fine enough instead of level 0: much less data, but the result keeps the aliasing of that level.
+
+For large stores, `resample_to_zarr` computes one batch at a time, keeps the compression of the input, and fits the chunks and shards to each level. It is what [`zarrsmith resample`](cli.md) runs:
+
+```python
+z = mm.ZarrManager("input.zarr")
+resampled = z.resample_to_zarr("resampled.zarr", {"z": 1.0, "y": 0.5, "x": 0.5})
+```
+
 ## Correct the chromatic shift between channels
 
 `ZarrManager` can measure the axial (Z) offset between the channels of a light-sheet dataset on the sample itself and write a corrected copy with the same structure as the input:
