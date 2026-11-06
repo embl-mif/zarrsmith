@@ -17,9 +17,12 @@ histogram, ...). The plot is linked with the viewer:
 
 * click a point: the viewer goes to that object (its image, its plane, centred, zoomed in) and selects
   its label,
+* click an object in the viewer (a click, not a drag): its label is selected,
+* the selected object is marked in the plot (a ring and a cross through its point, above all the
+  others), and a small window lists all its features (it stays open and follows the selection),
 * hover a point: a thumbnail of the object (XY and XZ through its centre, the intensity with the
   object outlined in magenta) appears next to the mouse,
-* pick a label in napari: its point is highlighted in the plot.
+* pick a label in napari (e.g. with the picker): its point is marked too.
 
 Where the objects are comes from centroid columns of the CSV: ``centroid-0/1/2`` (skimage
 ``regionprops_table``), ``centroid_z/y/x`` or ``z/y/x``, in voxels of the labels (full resolution) or
@@ -44,8 +47,9 @@ from napari.utils.notifications import show_error, show_info, show_warning
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QCursor, QFont, QGuiApplication, QImage, QPixmap
 from qtpy.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QWidget,
 )
 from scipy.spatial import cKDTree
 from skimage.segmentation import find_boundaries
@@ -105,6 +109,10 @@ MIN_POINT_SIZE = 10
 #: Outline of the object, and of the other objects, in the thumbnail.
 OBJECT_RGB = (255, 0, 255)
 OTHER_RGB = (0, 200, 255)
+#: Marker of the selected object in the plot (the colour of its outline in the thumbnails).
+MARKER_COLOR = "#ff00ff"
+#: A press and release of the mouse closer than this (screen pixels) is a click, not a drag (a pan).
+CLICK_TOLERANCE_PX = 4
 
 # ---------------------------------------------------------------------------
 # napari-clusters-plotter
@@ -626,6 +634,17 @@ class Session:
             features[column] = pd.Categorical(values[rows]) if categorical else values[rows]
         return features, np.r_[0, ids]
 
+    def feature_values(self, row):
+        """(name, value) of every feature of a table row, as plotted: with the plotter's columns (clusters, ...)."""
+        k = int(np.searchsorted(self.feature_rows, row))
+        if (k < len(self.feature_rows) and self.feature_rows[k] == row
+                and self.layer is not None and len(self.layer.features) == len(self.feature_rows)):
+            values = self.layer.features.iloc[k]
+        else:  # an object that isn't plotted (its image is unticked)
+            self.keep_plotter_columns()
+            values = self.features([row])[0].iloc[0]
+        return [(name, value) for name, value in values.items() if name != "index"]  # index: napari's label
+
     def keep_plotter_columns(self):
         """Columns that the plotter added to the layer features (clusters, ...), kept by table row."""
         if self.layer is None or len(self.layer.features) != len(self.feature_rows):
@@ -708,15 +727,62 @@ class ThumbnailPopup(QFrame):
         self.show()
 
     def move_near_mouse(self):
-        mouse = QCursor.pos()
-        screen = QGuiApplication.screenAt(mouse) or QGuiApplication.primaryScreen()
-        area = screen.availableGeometry()
-        x, y = mouse.x() + 16, mouse.y() + 16
-        if x + self.width() > area.right():
-            x = mouse.x() - 16 - self.width()
-        if y + self.height() > area.bottom():
-            y = mouse.y() - 16 - self.height()
-        self.move(x, y)
+        move_near_mouse(self)
+
+
+def move_near_mouse(window, left=False):
+    """Move a window next to the mouse (below right, or below left: beside the thumbnail), on the screen."""
+    mouse = QCursor.pos()
+    screen = QGuiApplication.screenAt(mouse) or QGuiApplication.primaryScreen()
+    area = screen.availableGeometry()
+    right_x, left_x = mouse.x() + 16, mouse.x() - 16 - window.width()
+    x, y = (left_x if left else right_x), mouse.y() + 16
+    if x + window.width() > area.right():
+        x = left_x
+    if x < area.left():
+        x = right_x
+    if y + window.height() > area.bottom():
+        y = mouse.y() - 16 - window.height()
+    window.move(x, y)
+
+
+def format_value(value):
+    """A feature value as text: numbers with 6 significant digits."""
+    return f"{value:.6g}" if isinstance(value, (float, np.floating)) else str(value)
+
+
+class FeaturesWindow(QFrame):
+    """Small window with every feature of the selected object. It stays open, follows the selection, and
+    opens next to the mouse."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)  # napari keeps the keyboard
+        self.setWindowTitle("Object features")
+        self.title = QLabel()
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["Feature", "Value"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(self.title)
+        layout.addWidget(self.table)
+        self.resize(320, 420)
+
+    def show_features(self, title, features):
+        """Show (name, value) pairs; a hidden window opens left of the mouse (the thumbnail is on its right)."""
+        self.title.setText(title)
+        self.table.setRowCount(len(features))
+        for i, (name, value) in enumerate(features):
+            self.table.setItem(i, 0, QTableWidgetItem(str(name)))
+            self.table.setItem(i, 1, QTableWidgetItem(format_value(value)))
+        self.table.resizeColumnToContents(0)
+        if not self.isVisible():
+            move_near_mouse(self, left=True)
+            self.show()
+        self.raise_()
 
 
 def _form(*rows):
@@ -748,13 +814,19 @@ class ObjectsExplorer(QWidget):
         self._hover_row = None
         self._thumbnails = OrderedDict()  # (table row, channel, field of view) -> views
         self._worker = self._worker_key = None
+        self._selected_row = None  # table row of the selected object
+        self._marker, self._marked_row = [], None  # marker in the plot (matplotlib artists): hovered, else selected
+        self._plot_press = None  # where the mouse was pressed in the plot
         self.popup = ThumbnailPopup(self)
+        self.features_window = FeaturesWindow(self)
         self._hover_timer = QTimer(self)
         self._hover_timer.setSingleShot(True)
         self._hover_timer.setInterval(HOVER_DELAY_MS)
         self._hover_timer.timeout.connect(self._request_thumbnail)
         self._build_ui()
         self._connect_plotter()
+        if viewer is not None:
+            viewer.mouse_drag_callbacks.append(self._on_viewer_mouse)
 
     # ----------------------------------------------------------------- panel
     def _build_ui(self):
@@ -791,6 +863,9 @@ class ObjectsExplorer(QWidget):
         self.isolate.toggled.connect(self._isolate_toggled)
         self.hover = QCheckBox("Thumbnail when hovering a point")
         self.hover.setChecked(True)
+        self.show_features = QCheckBox("Feature window for the clicked object")
+        self.show_features.setChecked(True)
+        self.show_features.toggled.connect(lambda on: on or self.features_window.hide())
         self.channel = QComboBox()
         self.field_of_view = QDoubleSpinBox()
         self.field_of_view.setRange(0, 100000)
@@ -805,7 +880,7 @@ class ObjectsExplorer(QWidget):
 
         data = _form(("Intensity", self.image_field.native), ("Labels", self.labels_field.native),
                      ("Features", self.table_field.native), ("Label column", self.label_column), self.centroids_um)
-        links = _form(self.zoom, self.isolate, self.hover, ("Thumbnail channel", self.channel),
+        links = _form(self.zoom, self.isolate, self.show_features, self.hover, ("Thumbnail channel", self.channel),
                       ("Thumbnail width", self.field_of_view))
         self.images_section = make_section(make_title("Images of the table:"), hint, self.images, buttons)
         self.images_section.setVisible(False)
@@ -983,6 +1058,8 @@ class ObjectsExplorer(QWidget):
             self._load_failed(error)
 
     def _clear_highlight(self):
+        self._selected_row = None
+        self._place_marker()
         artist = self.plotter.plotting_widget.active_artist
         if artist.highlighted is None:
             return
@@ -1004,7 +1081,6 @@ class ObjectsExplorer(QWidget):
         data = s.data(index)
         first = s.layer is None
         axes = None if first else (self.plotter.x_axis, self.plotter.y_axis, self.plotter.hue_axis)
-        self._hide_popup()
         for layer in s.image_layers:
             if layer in self.viewer.layers:
                 self.viewer.layers.remove(layer)
@@ -1080,6 +1156,9 @@ class ObjectsExplorer(QWidget):
 
     def _clear(self):
         self._hide_popup()
+        self.features_window.hide()
+        self._selected_row = None
+        self._place_marker()
         self._thumbnails.clear()
         self._points_data = self._point_rows = self._tree = None
         self._pending = None
@@ -1099,9 +1178,15 @@ class ObjectsExplorer(QWidget):
             artist.highlighted_changed_signal.connect(self._on_highlighted)
         # label picked in napari: highlight its point (same row number problem in the plotter's own)
         self.plotter._update_selected_object_feature = self._on_label_selected
+        # the marker of the selected object follows the plot (other features, histogram, ...), once redrawn
+        for signal in (*(artist.data_changed_signal for artist in canvas.artists.values()),
+                       canvas.artist_changed_signal):
+            signal.connect(lambda *_: QTimer.singleShot(0, self._place_marker))
         canvas.canvas.mpl_connect("motion_notify_event", self._on_mouse_move)
-        for event in ("axes_leave_event", "figure_leave_event", "button_press_event"):
+        for event in ("axes_leave_event", "figure_leave_event"):  # a click keeps the thumbnail
             canvas.canvas.mpl_connect(event, self._hide_popup)
+        canvas.canvas.mpl_connect("button_press_event", self._on_plot_press)
+        canvas.canvas.mpl_connect("button_release_event", self._on_plot_release)
 
     def _plot_points(self):
         """Table row of every point of the plot (-1: another layer), updated when the plot data change."""
@@ -1192,6 +1277,7 @@ class ObjectsExplorer(QWidget):
             s.layer.show_selected_label = self.isolate.isChecked()
         finally:
             self._syncing = False
+        self._select(row, open_window=True)
 
     def _canvas_size(self):
         """(height, width) of the canvas in screen pixels, or None."""
@@ -1206,26 +1292,124 @@ class ObjectsExplorer(QWidget):
                 return size
         return None
 
+    def _row_of_label(self, label):
+        """Table row of a label of the shown image, or None."""
+        s = self.session
+        rows = s.sources[s.active].rows  # sorted by label
+        k = int(np.searchsorted(s.labels[rows], label))
+        return int(rows[k]) if k < len(rows) and s.labels[rows[k]] == label else None
+
     def _on_label_selected(self, event=None):
-        """A label picked in napari: highlight its point in the plot."""
+        """A label picked in napari (e.g. with the picker): mark its point in the plot."""
         s = self.session
         if self._syncing or s is None or s.layer is None or getattr(event, "source", s.layer) is not s.layer:
             return
-        rows = self._plot_points()
-        artist = self.plotter.plotting_widget.active_artist
-        if rows is None or not isinstance(artist, Scatter):
+        row = self._row_of_label(s.layer.selected_label)
+        if row is not None:
+            self._select(row)
+
+    def _on_viewer_mouse(self, viewer, event):
+        """A click on an object in the viewer selects it. A drag still pans, and nothing happens while a
+        modifier key is held or the selected layer is in another mode than pan / zoom (e.g. painting)."""
+        s = self.session
+        active = viewer.layers.selection.active
+        if (s is None or s.layer is None or not s.layer.visible or event.button != 1 or list(event.modifiers)
+                or str(getattr(active, "mode", "pan_zoom")) != "pan_zoom"):
             return
-        ours = rows >= 0
-        highlighted = np.zeros(len(rows), bool)
-        highlighted[ours] = ((s.source_of_row[rows[ours]] == s.active)
-                             & (s.labels[rows[ours]] == s.layer.selected_label))
-        if not highlighted.any() or (artist.highlighted is not None and np.array_equal(artist.highlighted, highlighted)):
+        press = np.asarray(event.pos)
+        position, direction = tuple(event.position), event.view_direction
+        displayed = list(event.dims_displayed)
+        moved = False
+        yield
+        while event.type == "mouse_move":
+            moved = moved or np.linalg.norm(np.asarray(event.pos) - press) > CLICK_TOLERANCE_PX
+            yield
+        if moved or s is not self.session:
+            return
+        value = s.layer.get_value(position, view_direction=direction, dims_displayed=displayed, world=True)
+        label = value[1] if isinstance(value, tuple) else value  # multiscale: (level, value)
+        if label is None or int(label) <= 0:  # the background, or outside the image
+            self._deselect()
+            return
+        row = self._row_of_label(int(label))
+        if row is None:
+            show_info(f"label {int(label)} is not in the table")
             return
         self._syncing = True
         try:
-            artist.highlighted = highlighted
+            s.layer.selected_label = int(label)
         finally:
             self._syncing = False
+        self._select(row, open_window=True)
+
+    def _select(self, row, open_window=False):
+        """Mark the object of a table row in the plot, and show its features in the feature window: opened
+        by a click (``open_window``), else updated if it is open."""
+        s = self.session
+        rows = self._plot_points()
+        artist = self.plotter.plotting_widget.active_artist
+        if rows is not None and isinstance(artist, Scatter):
+            highlighted = rows == row
+            if artist.highlighted is None or not np.array_equal(artist.highlighted, highlighted):
+                self._syncing = True
+                try:
+                    artist.highlighted = highlighted
+                finally:
+                    self._syncing = False
+        self._selected_row = row
+        self._place_marker()
+        if self.show_features.isChecked() and (open_window or self.features_window.isVisible()):
+            title = f"label {s.labels[row]}" + (f" of {s.sources[s.source_of_row[row]].name}" if s.multi else "")
+            if rows is not None and not (rows == row).any():
+                title += " (not plotted)"
+            self.features_window.show_features(title, s.feature_values(row))
+
+    def _deselect(self):
+        """Clear the selection: no marker (unless a point is hovered), no highlight, the feature window closed."""
+        self._clear_highlight()
+        self.features_window.hide()
+
+    def _on_plot_press(self, event):
+        canvas = self.plotter.plotting_widget
+        self._plot_press = (event.x, event.y) if event.button == 1 and event.inaxes is canvas.axes else None
+
+    def _on_plot_release(self, event):
+        """A click (not a drag: a pan or a zoom) on an empty part of the plot clears the selection."""
+        press, self._plot_press = self._plot_press, None
+        canvas = self.plotter.plotting_widget
+        if (press is None or self.session is None or canvas.active_selector is not None
+                or event.inaxes is not canvas.axes
+                or np.hypot(event.x - press[0], event.y - press[1]) > CLICK_TOLERANCE_PX):
+            return
+        if self._point_under(event) is None:
+            self._deselect()
+
+    def _place_marker(self, force=True):
+        """Draw the marker above every point of the plot (a ring and a cross through it) on the hovered
+        point, else on the selected object's, or remove it. Unless ``force``, only when that point changes."""
+        target = self._hover_row if self._hover_row is not None else self._selected_row
+        if not force and target == self._marked_row:
+            return
+        self._marked_row = target
+        for artist in self._marker:
+            try:
+                artist.remove()
+            except (ValueError, NotImplementedError):  # already removed with its axes
+                pass
+        self._marker = []
+        canvas = self.plotter.plotting_widget
+        rows = None if target is None else self._plot_points()
+        points = np.flatnonzero(rows == target) if rows is not None else []
+        if len(points) and np.isfinite(self._points_data[points[0]]).all():
+            x, y = self._points_data[points[0]]
+            axes = canvas.axes
+            line = dict(color=MARKER_COLOR, linewidth=0.8, linestyle="--", alpha=0.6, zorder=10)
+            self._marker = [
+                axes.axvline(x, **line), axes.axhline(y, **line),
+                axes.plot([x], [y], marker="o", markersize=16, markerfacecolor="none", markeredgewidth=2,
+                          color=MARKER_COLOR, linestyle="none", zorder=11, scalex=False, scaley=False)[0],
+            ]
+        canvas.canvas.draw_idle()
 
     # ----------------------------------------------------------------- hover thumbnails
     def _on_mouse_move(self, event):
@@ -1242,6 +1426,7 @@ class ObjectsExplorer(QWidget):
         if row != self._hover_row:
             self._hover_row = row
             self._hover_timer.start()
+            self._place_marker(force=False)  # the marker follows the mouse
         elif self.popup.isVisible():
             self.popup.move_near_mouse()
 
@@ -1249,6 +1434,7 @@ class ObjectsExplorer(QWidget):
         self._hover_row = None
         self._hover_timer.stop()
         self.popup.hide()
+        self._place_marker(force=False)  # back on the selected object
 
     def _thumbnail_key(self):
         return self._hover_row, self.channel.currentIndex(), self.field_of_view.value()

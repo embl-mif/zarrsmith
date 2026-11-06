@@ -387,6 +387,8 @@ def test_widget_with_several_images(app, multi_dataset, monkeypatch):
     explorer.images.item(0).setCheckState(Qt.CheckState.Unchecked)
     assert s.feature_rows.tolist() == [2, 3]
     assert len(plotter.plotting_widget.active_artist.data) == 2
+    unplotted = dict(s.feature_values(0))  # label 3 of image a, for the feature window
+    assert unplotted["area"] == 256 and unplotted[ew.IMAGE_INDEX] == 1 and unplotted["MANUAL_CLUSTER_ID"] == 0
     explorer.images.item(0).setCheckState(Qt.CheckState.Checked)
     assert s.layer.features["MANUAL_CLUSTER_ID"].tolist() == [0, 1, 2, 2]
 
@@ -421,3 +423,157 @@ def test_redrawing_the_plot_is_not_a_click(app, dataset, monkeypatch):
     plotter.plot_needs_update.emit()
     app.processEvents()
     assert jumps == [1]
+
+
+class _MouseEvent:
+    """A napari mouse event, pressed at ``position`` (world) and ``pos`` (screen), in the 2D view."""
+
+    def __init__(self, position, button=1, modifiers=()):
+        self.type, self.position, self.pos = "mouse_press", position, (100, 100)
+        self.button, self.modifiers = button, modifiers
+        self.view_direction, self.dims_displayed = None, [len(position) - 2, len(position) - 1]
+
+
+def _mouse(explorer, viewer, event, drag=(0, 0)):
+    """Press, move by ``drag`` screen pixels and release, as napari runs a mouse callback."""
+    steps = explorer._on_viewer_mouse(viewer, event)
+    try:
+        next(steps)
+        event.type, event.pos = "mouse_move", tuple(np.add(event.pos, drag))
+        next(steps)
+        event.type = "mouse_release"
+        next(steps)
+    except StopIteration:
+        pass
+
+
+def _settle(app):
+    for _ in range(20):
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def test_format_value():
+    assert ew.format_value(0.123456789) == "0.123457"
+    assert ew.format_value(np.float32(2.5)) == "2.5"
+    assert ew.format_value(np.nan) == "nan"
+    assert ew.format_value(7) == "7"
+    assert ew.format_value("a") == "a"
+
+
+def test_click_in_the_viewer_marks_the_object_and_lists_its_features(app, dataset, monkeypatch):
+    viewer, explorer, plotter = _explorer(monkeypatch)
+    image_path, table = dataset
+    explorer._show(_read(str(image_path), "", str(table), "label")[1])
+    s, window = explorer.session, explorer.features_window
+    artist = plotter.plotting_widget.active_artist
+    lead = (0,) * (viewer.dims.ndim - 3)
+
+    def click(zyx, **kwargs):
+        drag = kwargs.pop("drag", (0, 0))
+        _mouse(explorer, viewer, _MouseEvent(lead + zyx, **kwargs), drag)
+
+    assert explorer._on_viewer_mouse in viewer.mouse_drag_callbacks
+
+    # a drag pans, a modifier or another button is something else: nothing is selected
+    click((8, 4, 4), drag=(30, 0))
+    click((8, 4, 4), modifiers=("Shift",))
+    click((8, 4, 4), button=2)
+    assert explorer._selected_row is None and explorer._marker == [] and not window.isVisible()
+
+    # a click on label 3 (table row 0, the first point): selected, marked above every point, its features listed
+    click((8, 4, 4))
+    assert s.layer.selected_label == 3
+    assert np.flatnonzero(artist.highlighted).tolist() == [0]
+    ring = explorer._marker[-1]
+    assert tuple(ring.get_xydata()[0]) == pytest.approx((256, 0.9))  # (area, solidity)
+    assert ring.get_zorder() > artist._mpl_artists["scatter"].get_zorder()
+    assert window.isVisible() and window.title.text() == "label 3"
+    values = {window.table.item(i, 0).text(): window.table.item(i, 1).text() for i in range(window.table.rowCount())}
+    assert values["label"] == "3" and values["area"] == "256" and values["solidity"] == "0.9"
+    assert "index" not in values  # napari's label of the row, not a feature
+
+    # the marker follows the point when the plot shows other features
+    explorer._set_plot_features("solidity", "area", "area")
+    _settle(app)
+    assert tuple(explorer._marker[-1].get_xydata()[0]) == pytest.approx((0.9, 256))
+
+    # a label picked in napari: the open window follows; label 5 has no solidity (inf): no point to mark
+    s.layer.selected_label = 5
+    explorer._on_label_selected()
+    assert window.title.text() == "label 5" and explorer._marker == []
+
+    # once closed, the window opens again on a click, not on a pick
+    window.hide()
+    s.layer.selected_label = 3
+    explorer._on_label_selected()
+    assert not window.isVisible() and len(explorer._marker) == 3
+    click((8, 4, 4))
+    assert window.isVisible()
+
+    # the feature window can be turned off
+    explorer.show_features.setChecked(False)
+    assert not window.isVisible()
+    click((8, 4, 4))
+    assert not window.isVisible() and len(explorer._marker) == 3
+
+    # a click on the background clears the selection
+    explorer.show_features.setChecked(True)
+    click((8, 4, 4))
+    assert window.isVisible()
+    click((8, 15, 15))
+    assert explorer._selected_row is None and explorer._marker == [] and not window.isVisible()
+    assert not artist.highlighted.any()
+
+    # loading again: no selection left
+    click((8, 4, 4))
+    explorer._show(_read(str(image_path), "", str(table), "label")[1])
+    assert explorer._selected_row is None and explorer._marker == []
+
+
+def _plot_event(plotter, name, point=None, offset=(0, 0), button=None):
+    """A matplotlib mouse event on the plot, at a point (data coordinates) plus an offset (screen pixels)."""
+    from matplotlib.backend_bases import MouseEvent
+
+    canvas = plotter.plotting_widget
+    canvas.canvas.draw()  # the transforms of the axes are known once drawn
+    x, y = canvas.axes.transData.transform(point) + np.asarray(offset)
+    return MouseEvent(name, canvas.canvas, x, y, button=button)
+
+
+def test_hover_moves_the_marker_and_a_click_keeps_the_thumbnail(app, dataset, monkeypatch):
+    viewer, explorer, plotter = _explorer(monkeypatch)
+    image_path, table = dataset
+    explorer._show(_read(str(image_path), "", str(table), "label")[1])
+    explorer._set_plot_features("area", "label", "area")  # both points are finite: (256, 3) and (224, 5)
+    _settle(app)
+    callbacks = plotter.plotting_widget.canvas.callbacks
+
+    def marked():
+        return tuple(explorer._marker[-1].get_xydata()[0]) if explorer._marker else None
+
+    _click(plotter, 1)  # label 5 selected
+    assert marked() == pytest.approx((224, 5))
+
+    # hovering label 3: the marker and the thumbnail are on it; a click selects it and keeps the thumbnail
+    explorer._on_mouse_move(_plot_event(plotter, "motion_notify_event", (256, 3)))
+    _settle(app)
+    assert marked() == pytest.approx((256, 3)) and explorer.popup.isVisible()
+    callbacks.process("button_press_event", _plot_event(plotter, "button_press_event", (256, 3), button=1))
+    callbacks.process("button_release_event", _plot_event(plotter, "button_release_event", (256, 3), button=1))
+    _settle(app)
+    assert explorer._selected_row == 0 and explorer.popup.isVisible()
+
+    # hovering label 5, then away from the points: back on the selected object, the thumbnail gone
+    explorer._on_mouse_move(_plot_event(plotter, "motion_notify_event", (224, 5)))
+    assert marked() == pytest.approx((224, 5))
+    explorer._on_mouse_move(_plot_event(plotter, "motion_notify_event", (240, 4)))
+    assert marked() == pytest.approx((256, 3)) and not explorer.popup.isVisible()
+
+    # a drag on an empty part of the plot keeps the selection, a click clears it
+    for offset in ((30, 0), (0, 0)):
+        callbacks.process("button_press_event", _plot_event(plotter, "button_press_event", (240, 4), button=1))
+        callbacks.process("button_release_event",
+                          _plot_event(plotter, "button_release_event", (240, 4), offset, button=1))
+        assert (explorer._selected_row is None) == (offset == (0, 0))
+    assert explorer._marker == [] and not explorer.features_window.isVisible()
