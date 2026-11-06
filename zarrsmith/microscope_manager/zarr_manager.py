@@ -677,6 +677,79 @@ class ZarrManager(MicroscopeManager):
 
         logger.info("Zarr datasets subset complete.")
 
+    def resample_dataset(
+        self,
+        target_scale,
+        include_groups: bool = True,
+        include_labels: bool = True,
+        fast: bool = False,
+    ):
+        """
+        Resample raw, groups, and labels to a new pixel size.
+
+        ``target_scale`` is the same physical pixel size for every dataset: one
+        value, one per spatial axis, or a dict such as ``{"z": 1.0}``. Labels use
+        nearest neighbour. See :func:`zarrsmith.utils.resample.resample_levels`.
+        This is lazy and builds one dask graph: for large stores, use
+        :meth:`resample_to_zarr`.
+        """
+        from ..utils.resample import resample_levels
+
+        for name, dataset in self._iter_datasets(
+            include_raw=True,
+            include_groups=include_groups,
+            include_labels=include_labels,
+        ):
+            if not dataset.data:
+                continue
+
+            dataset.data, dataset.metadata = resample_levels(
+                dataset.data, dataset.metadata, target_scale, fast=fast
+            )
+            self._invalidate_zarr_data(dataset)
+
+        self._sync_raw_aliases()
+
+        logger.info("Zarr datasets resampled to %s.", target_scale)
+
+    def resample_to_zarr(
+        self,
+        path: str | Path,
+        target_scale,
+        *,
+        fast: bool = False,
+        include_groups: bool = True,
+        include_labels: bool = True,
+        overwrite: bool = False,
+        num_workers: int | None = None,
+        progress: bool = True,
+    ) -> "ZarrManager":
+        """Write a copy of this store with a new pixel size, one batch at a time.
+
+        Scales to large stores: the memory and the dask graph depend on a batch,
+        which is limited by the free memory, and not on the dataset. The output keeps
+        the compression and number of levels of the input, with chunks and shards
+        fitted to the size of each level. ``target_scale`` and ``fast`` work as in :meth:`resample_dataset`.
+        Returns the output, opened for reading.
+        """
+        from ..utils.resample import write_resampled
+
+        write_resampled(
+            self.root,
+            self._iter_datasets(
+                include_raw=True,
+                include_groups=include_groups,
+                include_labels=include_labels,
+            ),
+            path,
+            target_scale,
+            fast=fast,
+            overwrite=overwrite,
+            num_workers=num_workers,
+            progress=progress,
+        )
+        return ZarrManager(str(path), chunks=None, mode="r")
+
     def build_pyramid(
         self,
         num_levels: Optional[int] = 3,

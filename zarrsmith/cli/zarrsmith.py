@@ -999,8 +999,73 @@ def chromatic_shift_batch(args):
     _warn_rows_skipped(skipped)
 
 
+# ---------------------------------------------------------------------------
+# Pixel size: resample / resample --batch
+# ---------------------------------------------------------------------------
+
+def resample_zarr(
+    input_path: str,
+    zarr_path: str,
+    pixel_size: Any,
+    *,
+    fast: bool = False,
+    include_groups: bool = True,
+    include_labels: bool = True,
+    overwrite: bool = False,
+    num_workers: Optional[int] = None,
+) -> None:
+    """Write a copy of an OME-Zarr image with a new pixel size (one value, or three in Z Y X order)."""
+    _refuse_output(zarr_path, overwrite=overwrite, input_path=input_path)
+    sizes = [float(v) for v in (str(pixel_size).split() if isinstance(pixel_size, str) else pixel_size)]
+    if len(sizes) not in (1, 3):
+        raise ValueError(f"Invalid pixel size {pixel_size!r}: give one value, or three in Z Y X order.")
+
+    z = mm.ZarrManager(path=str(input_path))
+    print(f"\n--->Resampling {input_path} from {z.metadata['scales'][0]} to {sizes} ({z.metadata.get('units')})")
+    z.resample_to_zarr(
+        zarr_path,
+        sizes[0] if len(sizes) == 1 else sizes,
+        fast=bool(fast),
+        include_groups=bool(include_groups),
+        include_labels=bool(include_labels),
+        overwrite=bool(overwrite),
+        num_workers=num_workers,
+    )
+    print(f"Saved {zarr_path}")
+
+
+def resample_single(args):
+    """Runmode to resample one OME-Zarr image."""
+    resample_zarr(**{k: v for k, v in vars(args).items() if k not in _NOT_CONVERSION_OPTIONS})
+
+
+def resample_batch(args):
+    """Runmode to resample every OME-Zarr image listed in a CSV file."""
+    csv_path = getattr(args, "input_file", args)  # parsed arguments or a path
+    print(f"Resampling a batch from {csv_path}")
+    database = pd.read_csv(csv_path)
+    print(database)
+    columns = database.columns
+
+    skipped = []
+    for _, v in database.iterrows():
+        print("-" * 20)
+        kwargs: Dict[str, Any] = {"input_path": v["input"], "zarr_path": v["output"], "pixel_size": str(v["pixel_size"])}
+        for key in ("fast", "include_groups", "include_labels", "overwrite"):
+            if key in columns and _present(v.get(key)):
+                kwargs[key] = parse_bool(v[key])
+        if "num_workers" in columns and _present(v.get("num_workers")):
+            kwargs["num_workers"] = int(v["num_workers"])
+        try:
+            resample_zarr(**kwargs)
+        except FileExistsError as error:
+            print(f"WARNING: row skipped: {error}", file=sys.stderr)
+            skipped.append(str(v["input"]))
+    _warn_rows_skipped(skipped)
+
+
 def main(argv=None):
-    """Entry point of the ``zarrsmith`` command: ``convert``, ``fuse`` or ``chromatic-shift``."""
+    """Entry point of the ``zarrsmith`` command: ``convert``, ``fuse``, ``chromatic-shift`` or ``resample``."""
     args = _parse_arguments(argv)
     if args.renamed_to:
         print(f"Note: `zarrsmith {args.command}` is now `{args.renamed_to}`; the old name still works for now.",
@@ -1012,6 +1077,8 @@ def main(argv=None):
         "fuse_batch": convert_mosaic_batch,
         "chromatic_shift": chromatic_shift_single,
         "chromatic_shift_batch": chromatic_shift_batch,
+        "resample": resample_single,
+        "resample_batch": resample_batch,
     }
     runners[args.mode](args)
 

@@ -539,6 +539,28 @@ CHROMATIC_SHIFT_HELP = """\
 """
 
 
+RESAMPLE_HELP = """\
+    Change the pixel size of an OME-Zarr image, rescaling the data accordingly, and write a copy with
+    the same compression and number of levels as the input, and chunks and shards fitted to each level.
+    Image groups and labels are resampled too. Run `zarrsmith convert` first for other formats.
+
+    Examples:
+      zarrsmith resample -i brain.ome.zarr -z brain_1um.ome.zarr -ps 1
+      zarrsmith resample -i brain.ome.zarr -z brain_iso.ome.zarr -ps 1 0.5 0.5
+      zarrsmith resample --batch images.csv
+
+    The pixel size is in the units of the dataset, usually micrometer. Images use linear interpolation,
+    with anti-aliasing on the axes that shrink, and labels use nearest neighbour.
+
+    The --batch CSV file has the columns input | output | pixel_size, plus any of fast | include_groups |
+    include_labels | overwrite | num_workers, with the same meaning as the options below, e.g.
+      input                | output                  | pixel_size  | fast
+      /path/to/a.ome.zarr  | /path/to/a_1um.ome.zarr | 1           |
+      /path/to/b.ome.zarr  | /path/to/b_iso.ome.zarr | 1 0.5 0.5   | true
+    Leave a cell empty for the default; the pixel size is space separated.
+"""
+
+
 def parse_timepoint_or_all(value):
     """``--reference_timepoint`` value: a timepoint, or ``all``."""
     text = str(value).strip().lower()
@@ -617,6 +639,29 @@ def _add_chromatic_shift_arguments(parser):
                           'capped at 8.')
 
 
+def _add_resample_arguments(parser):
+    io = parser.add_argument_group('Input and output (or --batch)')
+    io.add_argument('-i', '--input_path', type=valid_input_path, help='Path to the input OME-Zarr image.')
+    io.add_argument('-z', '--zarr_path', type=os.path.abspath, help='Path to the resampled .ome.zarr.')
+    io.add_argument('--batch', metavar='CSV', type=valid_input_path,
+                    help='Run every row of this CSV file instead (see the description above).')
+
+    out = parser.add_argument_group('Resampling')
+    out.add_argument('-ps', '--pixel_size', nargs='+', type=float, metavar='SIZE',
+                     help='New pixel size: one value for every spatial axis, or three values in Z Y X order.')
+    out.add_argument('-f', '--fast', action='store_true',
+                     help='Read images from the coarsest pyramid level still fine enough instead of level 0: much '
+                          'less data when shrinking, but it keeps the aliasing of that level. Labels always do this.')
+    out.add_argument('-ig', '--include_groups', type=parse_bool, default=True,
+                     help='Also resample image subgroups ("true" or "false").')
+    out.add_argument('-il', '--include_labels', type=parse_bool, default=True,
+                     help='Also resample labels ("true" or "false").')
+    out.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
+    out.add_argument('-nw', '--num_workers', default=argparse.SUPPRESS, type=int,
+                     help='Number of threads used to write the zarr. Default: half of the available cores, '
+                          'capped at 8, and fewer if memory requires it.')
+
+
 #: Old command names, kept working: old name -> (mode, new spelling)
 RENAMED = {
     '2zarr': ('convert', 'zarrsmith convert'),
@@ -681,7 +726,7 @@ def _parse_arguments(argv=None):
         title='Commands',
         description="Run `zarrsmith <command> -h` for the options of a command.",
         dest='command',
-        metavar='{convert,fuse,chromatic-shift}',
+        metavar='{convert,fuse,chromatic-shift,resample}',
         required=True,
     )
 
@@ -728,6 +773,17 @@ def _parse_arguments(argv=None):
     )
     chromatic.set_defaults(mode='chromatic_shift', renamed_to=None)
     _add_chromatic_shift_arguments(chromatic)
+
+    #####################################################################################
+    # resample: one OME-Zarr image, or a CSV batch
+    resample = subparsers.add_parser(
+        'resample',
+        help='Change the pixel size of an OME-Zarr image (or a CSV batch with --batch).',
+        description=textwrap.dedent(RESAMPLE_HELP),
+        formatter_class=MultilineDefaultsHelpFormatter,
+    )
+    resample.set_defaults(mode='resample', renamed_to=None)
+    _add_resample_arguments(resample)
 
     #####################################################################################
     # Old names (not listed in the help), with their original arguments
@@ -779,4 +835,20 @@ def _parse_arguments(argv=None):
             args.input_file = args.batch
         elif args.input_path is None:
             command.error('the following arguments are required: -i/--input_path (or --batch CSV)')
+
+    # resample: -i, -z and -ps, or --batch
+    if args.mode == 'resample':
+        command = subparsers.choices['resample']
+        if args.batch is not None:
+            if args.input_path is not None or args.zarr_path is not None or args.pixel_size is not None:
+                command.error('--batch cannot be combined with -i/-z/-ps: the CSV file lists them.')
+            if args.overwrite or args.fast:
+                command.error('--batch cannot be combined with --overwrite or --fast: use the columns of the CSV file.')
+            args.mode = 'resample_batch'
+            args.input_file = args.batch
+        elif args.input_path is None or args.zarr_path is None or args.pixel_size is None:
+            command.error('the following arguments are required: -i/--input_path, -z/--zarr_path and '
+                          '-ps/--pixel_size (or --batch CSV)')
+        elif len(args.pixel_size) not in (1, 3):
+            command.error('-ps/--pixel_size takes one value, or three values in Z Y X order.')
     return args
