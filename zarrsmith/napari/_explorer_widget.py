@@ -18,8 +18,11 @@ histogram, ...). The plot is linked with the viewer:
 * click a point: the viewer goes to that object (its image, its plane, centred, zoomed in) and selects
   its label,
 * click an object in the viewer (a click, not a drag): its label is selected,
+* histograms of the plotted x and y features (the plotted objects only) are above and right of the plot,
 * the selected object is marked in the plot (a ring and a cross through its point, above all the
-  others), and a small window lists all its features (it stays open and follows the selection),
+  others, continued over the histograms), and a small window lists all its features, each number with
+  a small histogram of the plotted objects marking where it sits (the window stays open and follows
+  the selection),
 * hover a point: a thumbnail of the object (XY and XZ through its centre, the intensity with the
   object outlined in magenta) appears next to the mouse,
 * pick a label in napari (e.g. with the picker): its point is marked too.
@@ -113,6 +116,15 @@ OTHER_RGB = (0, 200, 255)
 MARKER_COLOR = "#ff00ff"
 #: A press and release of the mouse closer than this (screen pixels) is a click, not a drag (a pan).
 CLICK_TOLERANCE_PX = 4
+#: Histograms beside the plot: their size (a fraction of the plot), number of bins and colour.
+MARGIN_SIZE = 0.18
+MARGIN_BINS = 40
+HISTOGRAM_COLOR = "#9aa0a6"
+#: Histograms of the feature window: size (screen pixels), number of bins, colours (RGBA).
+STRIP_SIZE = (90, 18)
+STRIP_BINS = 30
+STRIP_BAR_RGBA = (154, 160, 166, 255)
+STRIP_MARK_RGBA = (*OBJECT_RGB, 255)
 
 # ---------------------------------------------------------------------------
 # napari-clusters-plotter
@@ -645,6 +657,19 @@ class Session:
             values = self.features([row])[0].iloc[0]
         return [(name, value) for name, value in values.items() if name != "index"]  # index: napari's label
 
+    def plotted_values(self, column):
+        """Values of a numeric feature for the plotted objects (those of the ticked images), else None.
+        Categories (clusters, images, text columns) and the label have no histogram."""
+        features = None if self.layer is None else self.layer.features
+        if (features is None or column not in features.columns or column == self.label_column
+                or len(features) != len(self.feature_rows)):
+            return None
+        values = features[column]
+        if (isinstance(values.dtype, pd.CategoricalDtype) or pd.api.types.is_bool_dtype(values)
+                or not pd.api.types.is_numeric_dtype(values)):
+            return None
+        return values.to_numpy(float)
+
     def keep_plotter_columns(self):
         """Columns that the plotter added to the layer features (clusters, ...), kept by table row."""
         if self.layer is None or len(self.layer.features) != len(self.feature_rows):
@@ -751,6 +776,30 @@ def format_value(value):
     return f"{value:.6g}" if isinstance(value, (float, np.floating)) else str(value)
 
 
+def histogram_strip(values, value, size=STRIP_SIZE, bins=STRIP_BINS):
+    """RGBA image (transparent background) of the histogram of ``values``, with a dotted magenta line at
+    ``value`` when it is in their range. None without finite values."""
+    width, height = size
+    values = np.asarray(values, float)
+    values = values[np.isfinite(values)]
+    if len(values) == 0:
+        return None
+    low, high = values.min(), values.max()
+    if high == low:
+        low, high = low - 0.5, high + 0.5
+    counts, _ = np.histogram(values, bins, (low, high))
+    bars = np.ceil(counts[np.arange(width) * bins // width] / counts.max() * height).astype(int)
+    image = np.zeros((height, width, 4), np.uint8)
+    image[np.arange(height)[:, None] >= height - bars] = STRIP_BAR_RGBA
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return image
+    if low <= value <= high:
+        image[np.arange(height) % 3 < 2, int(round((value - low) / (high - low) * (width - 1)))] = STRIP_MARK_RGBA
+    return image
+
+
 class FeaturesWindow(QFrame):
     """Small window with every feature of the selected object. It stays open, follows the selection, and
     opens next to the mouse."""
@@ -760,8 +809,9 @@ class FeaturesWindow(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)  # napari keeps the keyboard
         self.setWindowTitle("Object features")
         self.title = QLabel()
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Feature", "Value"])
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Feature", "Value", "Plotted objects"])
+        self.table.horizontalHeaderItem(2).setToolTip("Histogram of the plotted objects; magenta: this object")
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -769,16 +819,22 @@ class FeaturesWindow(QFrame):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.addWidget(self.title)
         layout.addWidget(self.table)
-        self.resize(320, 420)
+        self.resize(420, 420)
 
     def show_features(self, title, features):
-        """Show (name, value) pairs; a hidden window opens left of the mouse (the thumbnail is on its right)."""
+        """Show (name, value, histogram image or None) rows; a hidden window opens left of the mouse (the
+        thumbnail is on its right)."""
         self.title.setText(title)
         self.table.setRowCount(len(features))
-        for i, (name, value) in enumerate(features):
+        for i, (name, value, strip) in enumerate(features):
             self.table.setItem(i, 0, QTableWidgetItem(str(name)))
             self.table.setItem(i, 1, QTableWidgetItem(format_value(value)))
-        self.table.resizeColumnToContents(0)
+            cell = QLabel()
+            if strip is not None:
+                h, w = strip.shape[:2]
+                cell.setPixmap(QPixmap.fromImage(QImage(strip.tobytes(), w, h, 4 * w, QImage.Format.Format_RGBA8888)))
+            self.table.setCellWidget(i, 2, cell)
+        self.table.resizeColumnsToContents()
         if not self.isVisible():
             move_near_mouse(self, left=True)
             self.show()
@@ -866,6 +922,9 @@ class ObjectsExplorer(QWidget):
         self.show_features = QCheckBox("Feature window for the clicked object")
         self.show_features.setChecked(True)
         self.show_features.toggled.connect(lambda on: on or self.features_window.hide())
+        self.histograms = QCheckBox("Histograms beside the plot")
+        self.histograms.setChecked(True)
+        self.histograms.toggled.connect(lambda _: self._refresh_plot())
         self.channel = QComboBox()
         self.field_of_view = QDoubleSpinBox()
         self.field_of_view.setRange(0, 100000)
@@ -880,7 +939,8 @@ class ObjectsExplorer(QWidget):
 
         data = _form(("Intensity", self.image_field.native), ("Labels", self.labels_field.native),
                      ("Features", self.table_field.native), ("Label column", self.label_column), self.centroids_um)
-        links = _form(self.zoom, self.isolate, self.show_features, self.hover, ("Thumbnail channel", self.channel),
+        links = _form(self.zoom, self.isolate, self.show_features, self.histograms, self.hover,
+                      ("Thumbnail channel", self.channel),
                       ("Thumbnail width", self.field_of_view))
         self.images_section = make_section(make_title("Images of the table:"), hint, self.images, buttons)
         self.images_section.setVisible(False)
@@ -1178,10 +1238,21 @@ class ObjectsExplorer(QWidget):
             artist.highlighted_changed_signal.connect(self._on_highlighted)
         # label picked in napari: highlight its point (same row number problem in the plotter's own)
         self.plotter._update_selected_object_feature = self._on_label_selected
-        # the marker of the selected object follows the plot (other features, histogram, ...), once redrawn
+        # histograms of the plotted x and y features, above and right of the plot (sharing its axes: they
+        # follow its zoom); they and the marker follow the plot (other features, 2D histogram, ...)
+        axes = canvas.axes
+        self._margins = (axes.inset_axes([0, 1.02, 1, MARGIN_SIZE], sharex=axes),
+                         axes.inset_axes([1.02, 0, MARGIN_SIZE, 1], sharey=axes))
+        self._histograms = []
+        for margin in self._margins:
+            margin.set_facecolor(axes.get_facecolor())
+            margin.tick_params(which="both", bottom=False, top=False, left=False, right=False,
+                               labelbottom=False, labelleft=False)
+            for spine in margin.spines.values():
+                spine.set_visible(False)
         for signal in (*(artist.data_changed_signal for artist in canvas.artists.values()),
                        canvas.artist_changed_signal):
-            signal.connect(lambda *_: QTimer.singleShot(0, self._place_marker))
+            signal.connect(lambda *_: QTimer.singleShot(0, self._refresh_plot))
         canvas.canvas.mpl_connect("motion_notify_event", self._on_mouse_move)
         for event in ("axes_leave_event", "figure_leave_event"):  # a click keeps the thumbnail
             canvas.canvas.mpl_connect(event, self._hide_popup)
@@ -1362,7 +1433,33 @@ class ObjectsExplorer(QWidget):
             title = f"label {s.labels[row]}" + (f" of {s.sources[s.source_of_row[row]].name}" if s.multi else "")
             if rows is not None and not (rows == row).any():
                 title += " (not plotted)"
-            self.features_window.show_features(title, s.feature_values(row))
+            features = []
+            for name, value in s.feature_values(row):
+                plotted = s.plotted_values(name)
+                features.append((name, value, None if plotted is None else histogram_strip(plotted, value)))
+            self.features_window.show_features(title, features)
+
+    def _refresh_plot(self):
+        """The plot was redrawn: new histograms beside it, the marker where its point is now."""
+        for artist in self._histograms:
+            try:
+                artist.remove()
+            except (ValueError, NotImplementedError):
+                pass
+        self._histograms = []
+        data = self.plotter.plotting_widget.active_artist.data
+        on = self.histograms.isChecked()
+        for k, margin in enumerate(self._margins):
+            margin.set_visible(on)
+            values = np.zeros(0) if data is None or not on else data[:, k]
+            values = values[np.isfinite(values)]
+            if len(values) == 0:
+                continue
+            counts, edges = np.histogram(values, MARGIN_BINS)
+            self._histograms.append(margin.stairs(counts, edges, fill=True, color=HISTOGRAM_COLOR, alpha=0.8,
+                                                  orientation="vertical" if k == 0 else "horizontal"))
+            (margin.set_ylim if k == 0 else margin.set_xlim)(0, 1.05 * counts.max())
+        self._place_marker()
 
     def _deselect(self):
         """Clear the selection: no marker (unless a point is hovered), no highlight, the feature window closed."""
@@ -1404,8 +1501,9 @@ class ObjectsExplorer(QWidget):
             x, y = self._points_data[points[0]]
             axes = canvas.axes
             line = dict(color=MARKER_COLOR, linewidth=0.8, linestyle="--", alpha=0.6, zorder=10)
-            self._marker = [
-                axes.axvline(x, **line), axes.axhline(y, **line),
+            top, right = self._margins
+            self._marker = [  # the ring last
+                axes.axvline(x, **line), axes.axhline(y, **line), top.axvline(x, **line), right.axhline(y, **line),
                 axes.plot([x], [y], marker="o", markersize=16, markerfacecolor="none", markeredgewidth=2,
                           color=MARKER_COLOR, linestyle="none", zorder=11, scalex=False, scaley=False)[0],
             ]

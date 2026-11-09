@@ -388,6 +388,11 @@ def test_widget_with_several_images(app, multi_dataset, monkeypatch):
     assert s.feature_rows.tolist() == [2, 3]
     assert len(plotter.plotting_widget.active_artist.data) == 2
     unplotted = dict(s.feature_values(0))  # label 3 of image a, for the feature window
+    assert s.plotted_values("area").tolist() == [320, 48]  # histograms: the objects of image b only
+    _settle(app)
+    top, right = explorer._margins
+    assert [h.get_data().values.sum() for h in explorer._histograms] == [2, 2]
+    assert explorer._histograms[0].axes is top and explorer._histograms[1].axes is right
     assert unplotted["area"] == 256 and unplotted[ew.IMAGE_INDEX] == 1 and unplotted["MANUAL_CLUSTER_ID"] == 0
     explorer.images.item(0).setCheckState(Qt.CheckState.Checked)
     assert s.layer.features["MANUAL_CLUSTER_ID"].tolist() == [0, 1, 2, 2]
@@ -453,6 +458,21 @@ def _settle(app):
         time.sleep(0.01)
 
 
+def test_histogram_strip():
+    strip = ew.histogram_strip([0, 1, 1, 2, 2, 2, np.nan], 1.0, size=(30, 10), bins=3)
+    assert strip.shape == (10, 30, 4)
+    bars = (strip[..., 3] > 0) & (strip[..., 1] > 0)  # grey, not magenta (no green)
+    assert bars[:, 0].sum() < bars[:, 15].sum() < bars[:, 29].sum() == 10  # 1, 2 and 3 objects per bin
+    def magenta_columns(image):
+        return np.flatnonzero(((image[..., 1] == 0) & (image[..., 3] > 0)).any(axis=0)).tolist()
+
+    assert magenta_columns(strip) == [14]  # 1.0: the middle of 0-2
+    assert magenta_columns(ew.histogram_strip([0, 1, 2], 5.0)) == []  # out of range: no line
+    assert ew.histogram_strip([np.nan, np.inf], 1.0) is None
+    assert ew.histogram_strip([3, 3], 3) is not None  # a single value
+    assert ew.histogram_strip([0, 1], "a") is not None  # no line for a value that isn't a number
+
+
 def test_format_value():
     assert ew.format_value(0.123456789) == "0.123457"
     assert ew.format_value(np.float32(2.5)) == "2.5"
@@ -465,6 +485,7 @@ def test_click_in_the_viewer_marks_the_object_and_lists_its_features(app, datase
     viewer, explorer, plotter = _explorer(monkeypatch)
     image_path, table = dataset
     explorer._show(_read(str(image_path), "", str(table), "label")[1])
+    _settle(app)  # the histograms beside the plot are drawn once the plot is
     s, window = explorer.session, explorer.features_window
     artist = plotter.plotting_widget.active_artist
     lead = (0,) * (viewer.dims.ndim - 3)
@@ -492,6 +513,21 @@ def test_click_in_the_viewer_marks_the_object_and_lists_its_features(app, datase
     values = {window.table.item(i, 0).text(): window.table.item(i, 1).text() for i in range(window.table.rowCount())}
     assert values["label"] == "3" and values["area"] == "256" and values["solidity"] == "0.9"
     assert "index" not in values  # napari's label of the row, not a feature
+    strips = {window.table.item(i, 0).text(): window.table.cellWidget(i, 2).pixmap()
+              for i in range(window.table.rowCount())}
+    assert not strips["area"].isNull() and strips["label"].isNull() and strips["kind"].isNull()  # numbers only
+    top, right = explorer._margins
+    assert top.get_visible() and [h.get_data().values.sum() for h in explorer._histograms] == [2, 1]  # solidity: 1 finite
+    plot = plotter.plotting_widget.axes
+    assert [line.axes for line in explorer._marker] == [plot, plot, top, right, plot]
+    assert explorer._marker[2].get_xdata()[0] == pytest.approx(256)  # on the area histogram
+    assert explorer._marker[3].get_ydata()[0] == pytest.approx(0.9)  # on the solidity histogram
+
+    # the histograms beside the plot can be hidden
+    explorer.histograms.setChecked(False)
+    assert not top.get_visible() and not right.get_visible() and explorer._histograms == []
+    explorer.histograms.setChecked(True)
+    assert top.get_visible() and len(explorer._histograms) == 2
 
     # the marker follows the point when the plot shows other features
     explorer._set_plot_features("solidity", "area", "area")
@@ -507,7 +543,7 @@ def test_click_in_the_viewer_marks_the_object_and_lists_its_features(app, datase
     window.hide()
     s.layer.selected_label = 3
     explorer._on_label_selected()
-    assert not window.isVisible() and len(explorer._marker) == 3
+    assert not window.isVisible() and len(explorer._marker) == 5
     click((8, 4, 4))
     assert window.isVisible()
 
@@ -515,7 +551,7 @@ def test_click_in_the_viewer_marks_the_object_and_lists_its_features(app, datase
     explorer.show_features.setChecked(False)
     assert not window.isVisible()
     click((8, 4, 4))
-    assert not window.isVisible() and len(explorer._marker) == 3
+    assert not window.isVisible() and len(explorer._marker) == 5
 
     # a click on the background clears the selection
     explorer.show_features.setChecked(True)
