@@ -618,6 +618,17 @@ def test_hover_moves_the_marker_and_a_click_keeps_the_thumbnail(app, dataset, mo
         del canvas.draw_idle
     assert drawn == [] and all(artist.get_animated() for artist in explorer._marker)
 
+    # nor does a click: on a point (the plot keeps which one is highlighted, without drawing it) or in the viewer
+    canvas.draw_idle = lambda: drawn.append(1)
+    try:
+        _click(plotter, 1)
+        assert explorer._selected_row == 1 and plotter.plotting_widget.active_artist.highlighted.tolist() == [False, True]
+        explorer._select(0, open_window=True)
+        assert plotter.plotting_widget.active_artist.highlighted.tolist() == [True, False]
+    finally:
+        del canvas.draw_idle
+    assert drawn == []
+
     # hovering label 5, then away from the points: back on the selected object, the thumbnail gone
     explorer._on_mouse_move(_plot_event(plotter, "motion_notify_event", (224, 5)))
     assert marked() == pytest.approx((224, 5))

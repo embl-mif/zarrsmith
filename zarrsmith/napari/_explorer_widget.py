@@ -141,11 +141,15 @@ def _patch_plotter():
       objects they can't be seen any more. A scatter plot with ``zarrsmith_min_size`` keeps that size.
     * No warning that the labels missing from the colours are transparent (wanted: they aren't in
       the table), nor that a categorical colour (an image, a cluster) uses a categorical colormap.
+    * biaplotter shows a highlighted (clicked) point bigger, with a magenta edge: every point is drawn
+      again, slow with many points. A scatter plot with ``zarrsmith_marked`` keeps the highlight (which
+      point is clicked) without drawing it: the explorer marks the point itself, drawn alone.
     """
     if getattr(ncp_utilities, "_zarrsmith_patched", False):
         return
     unique_values = ncp_utilities._get_unique_values
     default_size = Scatter.default_size.fget
+    highlight_data = Scatter._highlight_data
     set_layer_color = PlotterWidget._set_layer_color
     overlay_colormap = Artist.overlay_colormap
 
@@ -164,7 +168,12 @@ def _patch_plotter():
             warnings.filterwarnings("ignore", "Categorical colormap detected")
             overlay_colormap.fset(self, value)
 
+    def highlight_unless_marked(self, mask):
+        if not getattr(self, "zarrsmith_marked", False):
+            highlight_data(self, mask)
+
     ncp_utilities._get_unique_values = labels_of_features
+    Scatter._highlight_data = highlight_unless_marked
     Scatter.default_size = property(lambda self: max(getattr(self, "zarrsmith_min_size", 0), default_size(self)))
     PlotterWidget._set_layer_color = set_layer_color_quietly
     Artist.overlay_colormap = overlay_colormap.setter(set_overlay_colormap_quietly)
@@ -1255,6 +1264,7 @@ class ObjectsExplorer(QWidget):
     def _connect_plotter(self):
         canvas = self.plotter.plotting_widget
         canvas.artists["SCATTER"].zarrsmith_min_size = MIN_POINT_SIZE
+        canvas.artists["SCATTER"].zarrsmith_marked = True  # a click only redraws our marker
         # click on a point: our jump (the plotter's own takes the row number as label and reads the whole image)
         canvas.artists["SCATTER"].highlighted_changed_signal.disconnect(self.plotter._on_highlighted_changed)
         for artist in canvas.artists.values():
