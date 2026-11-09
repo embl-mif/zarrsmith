@@ -159,7 +159,7 @@ Shared helpers live in one place each, so readers, writers and the napari viewer
 | `downsampling` | factor math and `downsample_nearest` (NumPy or Dask) |
 | `metadata`, `ome` | `build_metadata`, `ChannelInfo`, `scale_for_level`, `parse_ome_xml` |
 | `dataset_ops` | validation and in-place edits shared by `MicroscopeManager` and `ZarrManager` (`subset_levels`, `reorder_channels`, `apply_metadata_updates`) |
-| `ngff` | `ZarrWriteConfig`, array creation (`_array_create_kwargs`), sharding, multiscales metadata (`_build_multiscales`) and the pyramid writers |
+| `ngff` | `ZarrWriteConfig`, array creation (`_array_create_kwargs`), sharding, NGFF metadata (`_write_ngff_metadata`, through ome-zarr-py) and the pyramid writers |
 | `chromatic_shift` | Z chromatic shift estimation (`estimate_chromatic_shift`) and the writer of corrected stores that copies the input's array layout (`write_chromatic_shift_corrected`); see [Chromatic shift correction](chromatic-shift.md) |
 
 ## Documentation

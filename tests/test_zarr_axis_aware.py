@@ -39,9 +39,9 @@ def test_yx_intensity_roundtrip_v05(tmp_path):
 
     root = zarr.open_group(str(path), mode="r")
     ome = root.attrs.asdict()["ome"]
-    assert ome["data_type"] == "intensity"
+    assert "image-label" not in ome
     assert [axis["name"] for axis in ome["multiscales"][0]["axes"]] == ["y", "x"]
-    assert root["0"].attrs.asdict()["dimension_names"] == ["y", "x"]
+    assert root["0"].metadata.dimension_names == ("y", "x")
     assert "omero" in ome
 
     reader = mm.ZarrManager(path, mode="r")
@@ -67,11 +67,9 @@ def test_yx_label_roundtrip_v05_has_label_metadata(tmp_path):
 
     root = zarr.open_group(str(path), mode="r")
     ome = root.attrs.asdict()["ome"]
-    assert ome["data_type"] == "label"
-    assert ome["multiscales"][0]["type"] == "label"
     # Standalone label store: no source image to point at.
-    assert ome["image-label"] == {}
-    assert root["0"].attrs.asdict()["dimension_names"] == ["y", "x"]
+    assert ome["image-label"] == {"version": "0.5"}
+    assert root["0"].metadata.dimension_names == ("y", "x")
     assert "omero" not in ome
 
     reader = mm.ZarrManager(path, mode="r")
@@ -129,7 +127,7 @@ def test_explicit_channelled_label_group_keeps_c_axis(tmp_path, image_pyramid, m
     assert labels_ome["labels"] == ["classes"]
     assert tuple(label_group["0"].shape) == metadata["size"][0]
     ome = label_group.attrs.asdict()["ome"]
-    assert ome["data_type"] == "label"
+    assert "image-label" in ome
     assert [axis["name"] for axis in ome["multiscales"][0]["axes"]] == list("tczyx")
 
 

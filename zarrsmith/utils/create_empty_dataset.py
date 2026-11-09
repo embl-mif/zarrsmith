@@ -9,14 +9,11 @@ from .axes import normalize_axes, normalize_data_type
 from .ngff import (
     DEFAULT_COMPRESSOR_LEVEL,
     ZarrWriteConfig,
-    _build_multiscales,
-    _build_omero_metadata,
     _create_level_arrays,
     _resolve_creation_shards,
     _resolve_format,
-    _set_group_ngff_metadata,
-    _set_dimension_names,
     _validate_metadata,
+    _write_ngff_metadata,
 )
 
 def create_empty_dataset(
@@ -94,18 +91,10 @@ def write_empty_pyramid(
     )
     _create_level_arrays(
         group, sizes, chunks, dtype, shard_shapes,
+        axes=axes,
         zarr_format=zarr_format, compressor=compressor, compressor_level=compressor_level,
     )
-
-    multiscales = _build_multiscales(effective_metadata, axes, name)
-    _set_dimension_names(group, multiscales["datasets"], axes, zarr_format=zarr_format)
-
-    label = data_type == "label"
-    _set_group_ngff_metadata(
-        group,
-        ngff_version=ngff_version,
-        multiscales=multiscales,
-        omero=None if label else _build_omero_metadata(dummy_levels[0], axes, effective_metadata),
-        data_type=data_type,
-        extra={"image-label": label_source} if label else None,
+    _write_ngff_metadata(
+        group, effective_metadata, axes, dummy_levels[0],
+        ngff_version=ngff_version, name=name, label_source=label_source,
     )

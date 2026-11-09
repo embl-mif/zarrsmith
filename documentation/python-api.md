@@ -74,7 +74,7 @@ metadata = {
 mm.ArrayManager(levels, metadata).to_zarr("yx_image.zarr")
 ```
 
-Use `data_type="label"` for segmentation, mask, or annotation data. Label arrays must use an integer dtype. For NGFF v0.5/Zarr v3, ZarrSmith stores the semantic type under `attrs["ome"]["data_type"]`, writes array-level `dimension_names`, writes `multiscales[0]["type"] = "label"`, and adds `image-label` metadata. For NGFF v0.4/Zarr v2, the equivalent metadata is stored directly on the group attributes.
+Use `data_type="label"` for segmentation, mask, or annotation data. Label arrays must use an integer dtype. Label groups get the standard NGFF `image-label` block (pointing to the source image when the label is nested under `<image>/labels/<name>`) and are listed on the `labels` group; that is how readers tell labels from intensity images. The NGFF metadata is written with [ome-zarr-py](https://github.com/ome/ome-zarr-py): under `attrs["ome"]` for NGFF v0.5/Zarr v3, whose arrays also carry `dimension_names` in their `zarr.json`, and directly on the group attributes for NGFF v0.4/Zarr v2.
 
 Legacy calls that create labels from an intensity image metadata dictionary still work:
 
