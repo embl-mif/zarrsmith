@@ -608,12 +608,15 @@ def test_hover_moves_the_marker_and_a_click_keeps_the_thumbnail(app, dataset, mo
     assert explorer._selected_row == 0 and explorer.popup.isVisible()
 
     # hovering redraws the marker alone (blitting), not every point of the plot
-    drawn = []
-    monkeypatch.setattr(plotter.plotting_widget.canvas, "draw_idle", lambda: drawn.append(1))
-    explorer._on_mouse_move(_plot_event(plotter, "motion_notify_event", (224, 5)))
-    explorer._on_mouse_move(_plot_event(plotter, "motion_notify_event", (256, 3)))
+    canvas, drawn = plotter.plotting_widget.canvas, []
+    events = [_plot_event(plotter, "motion_notify_event", point) for point in ((224, 5), (256, 3))]
+    canvas.draw_idle = lambda: drawn.append(1)
+    try:
+        for event in events:
+            explorer._on_mouse_move(event)
+    finally:
+        del canvas.draw_idle
     assert drawn == [] and all(artist.get_animated() for artist in explorer._marker)
-    monkeypatch.undo()
 
     # hovering label 5, then away from the points: back on the selected object, the thumbnail gone
     explorer._on_mouse_move(_plot_event(plotter, "motion_notify_event", (224, 5)))
