@@ -116,13 +116,13 @@ OTHER_RGB = (0, 200, 255)
 MARKER_COLOR = "#ff00ff"
 #: A press and release of the mouse closer than this (screen pixels) is a click, not a drag (a pan).
 CLICK_TOLERANCE_PX = 4
-#: Histograms beside the plot: their size (a fraction of the plot), number of bins and colour.
+#: Number of bins of the histograms (beside the plot and in the feature window).
+HISTOGRAM_BINS = 40
+#: Histograms beside the plot: their size (a fraction of the plot) and colour.
 MARGIN_SIZE = 0.18
-MARGIN_BINS = 40
 HISTOGRAM_COLOR = "#9aa0a6"
-#: Histograms of the feature window: size (screen pixels), number of bins, colours (RGBA).
+#: Histograms of the feature window: size (screen pixels), colours (RGBA).
 STRIP_SIZE = (90, 18)
-STRIP_BINS = 30
 STRIP_BAR_RGBA = (154, 160, 166, 255)
 STRIP_MARK_RGBA = (*OBJECT_RGB, 255)
 
@@ -620,6 +620,7 @@ class Session:
         self.active = None  # index of the shown image
         self.layer, self.image_layers = None, []
         self.feature_rows = np.zeros(0, int)  # table row of every row of the layer features
+        self._histograms = {}  # feature -> histogram of the plotted objects (None: not a number)
         self.extra = {}  # columns added to the features by the plotter (clusters, ...): name -> (values, categorical)
 
     def data(self, index):
@@ -669,6 +670,21 @@ class Session:
                 or not pd.api.types.is_numeric_dtype(values)):
             return None
         return values.to_numpy(float)
+
+    def histogram(self, column):
+        """Histogram (:func:`histogram_counts`) of a numeric feature over the plotted objects, else None.
+        Computed once, until the features change."""
+        if column not in self._histograms:
+            values = self.plotted_values(column)
+            self._histograms[column] = None if values is None else histogram_counts(values)
+        return self._histograms[column]
+
+    def compute_histograms(self, *_):
+        """The features changed (other plotted objects, a new column, clusters): histograms of every feature."""
+        self._histograms = {}
+        if self.layer is not None:
+            for column in self.layer.features.columns:
+                self.histogram(column)
 
     def keep_plotter_columns(self):
         """Columns that the plotter added to the layer features (clusters, ...), kept by table row."""
@@ -776,10 +792,8 @@ def format_value(value):
     return f"{value:.6g}" if isinstance(value, (float, np.floating)) else str(value)
 
 
-def histogram_strip(values, value, size=STRIP_SIZE, bins=STRIP_BINS):
-    """RGBA image (transparent background) of the histogram of ``values``, with a dotted magenta line at
-    ``value`` when it is in their range. None without finite values."""
-    width, height = size
+def histogram_counts(values, bins=HISTOGRAM_BINS):
+    """(counts, bin edges) of the finite ``values``, or None without any."""
     values = np.asarray(values, float)
     values = values[np.isfinite(values)]
     if len(values) == 0:
@@ -787,7 +801,14 @@ def histogram_strip(values, value, size=STRIP_SIZE, bins=STRIP_BINS):
     low, high = values.min(), values.max()
     if high == low:
         low, high = low - 0.5, high + 0.5
-    counts, _ = np.histogram(values, bins, (low, high))
+    return np.histogram(values, bins, (low, high))
+
+
+def histogram_strip(histogram, value, size=STRIP_SIZE):
+    """RGBA image (transparent background) of a histogram (:func:`histogram_counts`), with a dotted magenta
+    line at ``value`` when it is in its range."""
+    (counts, edges), (width, height) = histogram, size
+    low, high, bins = edges[0], edges[-1], len(counts)
     bars = np.ceil(counts[np.arange(width) * bins // width] / counts.max() * height).astype(int)
     image = np.zeros((height, width, 4), np.uint8)
     image[np.arange(height)[:, None] >= height - bars] = STRIP_BAR_RGBA
@@ -872,6 +893,7 @@ class ObjectsExplorer(QWidget):
         self._worker = self._worker_key = None
         self._selected_row = None  # table row of the selected object
         self._marker, self._marked_row = [], None  # marker in the plot (matplotlib artists): hovered, else selected
+        self._background = None  # the plot drawn without the marker, for redrawing the marker alone
         self._plot_press = None  # where the mouse was pressed in the plot
         self.popup = ThumbnailPopup(self)
         self.features_window = FeaturesWindow(self)
@@ -1153,6 +1175,7 @@ class ObjectsExplorer(QWidget):
         if first:
             s.layer = self.viewer.add_labels(levels, multiscale=multiscale, opacity=0.7, **geometry,
                                              name=LABELS_LAYER if s.multi else data["labels_name"])
+            s.layer.events.features.connect(s.compute_histograms)
         else:
             s.layer.data = levels
             for name, value in geometry.items():
@@ -1258,6 +1281,7 @@ class ObjectsExplorer(QWidget):
             canvas.canvas.mpl_connect(event, self._hide_popup)
         canvas.canvas.mpl_connect("button_press_event", self._on_plot_press)
         canvas.canvas.mpl_connect("button_release_event", self._on_plot_release)
+        canvas.canvas.mpl_connect("draw_event", self._on_plot_drawn)
 
     def _plot_points(self):
         """Table row of every point of the plot (-1: another layer), updated when the plot data change."""
@@ -1435,8 +1459,8 @@ class ObjectsExplorer(QWidget):
                 title += " (not plotted)"
             features = []
             for name, value in s.feature_values(row):
-                plotted = s.plotted_values(name)
-                features.append((name, value, None if plotted is None else histogram_strip(plotted, value)))
+                histogram = s.histogram(name)
+                features.append((name, value, None if histogram is None else histogram_strip(histogram, value)))
             self.features_window.show_features(title, features)
 
     def _refresh_plot(self):
@@ -1449,17 +1473,22 @@ class ObjectsExplorer(QWidget):
         self._histograms = []
         data = self.plotter.plotting_widget.active_artist.data
         on = self.histograms.isChecked()
-        for k, margin in enumerate(self._margins):
+        rows = self._plot_points()
+        ours = self.session is not None and rows is not None and (rows >= 0).all()
+        for k, (margin, column) in enumerate(zip(self._margins, (self.plotter.x_axis, self.plotter.y_axis))):
             margin.set_visible(on)
-            values = np.zeros(0) if data is None or not on else data[:, k]
-            values = values[np.isfinite(values)]
-            if len(values) == 0:
+            if data is None or not on:
                 continue
-            counts, edges = np.histogram(values, MARGIN_BINS)
+            histogram = self.session.histogram(column) if ours else None
+            histogram = histogram if histogram is not None else histogram_counts(data[:, k])
+            if histogram is None:
+                continue
+            counts, edges = histogram
             self._histograms.append(margin.stairs(counts, edges, fill=True, color=HISTOGRAM_COLOR, alpha=0.8,
                                                   orientation="vertical" if k == 0 else "horizontal"))
             (margin.set_ylim if k == 0 else margin.set_xlim)(0, 1.05 * counts.max())
-        self._place_marker()
+        self._place_marker(blit=False)
+        self.plotter.plotting_widget.canvas.draw_idle()  # a full redraw: the histograms changed
 
     def _deselect(self):
         """Clear the selection: no marker (unless a point is hovered), no highlight, the feature window closed."""
@@ -1481,9 +1510,13 @@ class ObjectsExplorer(QWidget):
         if self._point_under(event) is None:
             self._deselect()
 
-    def _place_marker(self, force=True):
+    def _place_marker(self, force=True, blit=True):
         """Draw the marker above every point of the plot (a ring and a cross through it) on the hovered
-        point, else on the selected object's, or remove it. Unless ``force``, only when that point changes."""
+        point, else on the selected object's, or remove it. Unless ``force``, only when that point changes.
+
+        The marker is animated: a redraw of the plot leaves it out, and it is drawn alone on that drawing
+        (``blit``), so that following the mouse does not draw every point again.
+        """
         target = self._hover_row if self._hover_row is not None else self._selected_row
         if not force and target == self._marked_row:
             return
@@ -1500,14 +1533,35 @@ class ObjectsExplorer(QWidget):
         if len(points) and np.isfinite(self._points_data[points[0]]).all():
             x, y = self._points_data[points[0]]
             axes = canvas.axes
-            line = dict(color=MARKER_COLOR, linewidth=0.8, linestyle="--", alpha=0.6, zorder=10)
-            top, right = self._margins
-            self._marker = [  # the ring last
-                axes.axvline(x, **line), axes.axhline(y, **line), top.axvline(x, **line), right.axhline(y, **line),
+            line = dict(color=MARKER_COLOR, linewidth=0.8, linestyle="--", alpha=0.6, zorder=10, animated=True)
+            self._marker = [axes.axvline(x, **line), axes.axhline(y, **line)]
+            if self.histograms.isChecked():  # (drawn alone, a line of a hidden histogram would show)
+                top, right = self._margins
+                self._marker += [top.axvline(x, **line), right.axhline(y, **line)]
+            self._marker.append(  # the ring last
                 axes.plot([x], [y], marker="o", markersize=16, markerfacecolor="none", markeredgewidth=2,
-                          color=MARKER_COLOR, linestyle="none", zorder=11, scalex=False, scaley=False)[0],
-            ]
-        canvas.canvas.draw_idle()
+                          color=MARKER_COLOR, linestyle="none", zorder=11, scalex=False, scaley=False,
+                          animated=True)[0])
+        if blit:
+            self._blit_marker()
+
+    def _on_plot_drawn(self, event):
+        """The plot was drawn, without the marker: kept, then the marker is drawn on it."""
+        canvas = self.plotter.plotting_widget.canvas
+        self._background = canvas.copy_from_bbox(canvas.figure.bbox)
+        for artist in self._marker:
+            artist.axes.draw_artist(artist)
+
+    def _blit_marker(self):
+        """Show the marker drawn alone on the plot drawn without it (fast: the points aren't drawn again)."""
+        canvas = self.plotter.plotting_widget.canvas
+        if self._background is None:  # not drawn yet
+            canvas.draw_idle()
+            return
+        canvas.restore_region(self._background)
+        for artist in self._marker:
+            artist.axes.draw_artist(artist)
+        canvas.blit(canvas.figure.bbox)
 
     # ----------------------------------------------------------------- hover thumbnails
     def _on_mouse_move(self, event):

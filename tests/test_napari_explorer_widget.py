@@ -389,6 +389,9 @@ def test_widget_with_several_images(app, multi_dataset, monkeypatch):
     assert len(plotter.plotting_widget.active_artist.data) == 2
     unplotted = dict(s.feature_values(0))  # label 3 of image a, for the feature window
     assert s.plotted_values("area").tolist() == [320, 48]  # histograms: the objects of image b only
+    assert s.histogram("area")[0].sum() == 2 and "area" in s._histograms  # computed when the images changed
+    histogram = s.histogram("solidity")
+    assert s.histogram("solidity") is histogram  # then reused
     _settle(app)
     top, right = explorer._margins
     assert [h.get_data().values.sum() for h in explorer._histograms] == [2, 2]
@@ -458,19 +461,23 @@ def _settle(app):
         time.sleep(0.01)
 
 
-def test_histogram_strip():
-    strip = ew.histogram_strip([0, 1, 1, 2, 2, 2, np.nan], 1.0, size=(30, 10), bins=3)
+def test_histogram_counts_and_strip():
+    counts, edges = ew.histogram_counts([0, 1, 1, 2, 2, 2, np.nan], bins=3)
+    assert counts.tolist() == [1, 2, 3] and edges[[0, -1]].tolist() == [0, 2]
+    assert ew.histogram_counts([np.nan, np.inf]) is None
+    assert ew.histogram_counts([3, 3])[1][[0, -1]].tolist() == [2.5, 3.5]  # a single value
+
+    strip = ew.histogram_strip((counts, edges), 1.0, size=(30, 10))
     assert strip.shape == (10, 30, 4)
     bars = (strip[..., 3] > 0) & (strip[..., 1] > 0)  # grey, not magenta (no green)
     assert bars[:, 0].sum() < bars[:, 15].sum() < bars[:, 29].sum() == 10  # 1, 2 and 3 objects per bin
+
     def magenta_columns(image):
         return np.flatnonzero(((image[..., 1] == 0) & (image[..., 3] > 0)).any(axis=0)).tolist()
 
     assert magenta_columns(strip) == [14]  # 1.0: the middle of 0-2
-    assert magenta_columns(ew.histogram_strip([0, 1, 2], 5.0)) == []  # out of range: no line
-    assert ew.histogram_strip([np.nan, np.inf], 1.0) is None
-    assert ew.histogram_strip([3, 3], 3) is not None  # a single value
-    assert ew.histogram_strip([0, 1], "a") is not None  # no line for a value that isn't a number
+    assert magenta_columns(ew.histogram_strip((counts, edges), 5.0)) == []  # out of range: no line
+    assert magenta_columns(ew.histogram_strip((counts, edges), "a")) == []  # not a number: no line
 
 
 def test_format_value():
@@ -599,6 +606,14 @@ def test_hover_moves_the_marker_and_a_click_keeps_the_thumbnail(app, dataset, mo
     callbacks.process("button_release_event", _plot_event(plotter, "button_release_event", (256, 3), button=1))
     _settle(app)
     assert explorer._selected_row == 0 and explorer.popup.isVisible()
+
+    # hovering redraws the marker alone (blitting), not every point of the plot
+    drawn = []
+    monkeypatch.setattr(plotter.plotting_widget.canvas, "draw_idle", lambda: drawn.append(1))
+    explorer._on_mouse_move(_plot_event(plotter, "motion_notify_event", (224, 5)))
+    explorer._on_mouse_move(_plot_event(plotter, "motion_notify_event", (256, 3)))
+    assert drawn == [] and all(artist.get_animated() for artist in explorer._marker)
+    monkeypatch.undo()
 
     # hovering label 5, then away from the points: back on the selected object, the thumbnail gone
     explorer._on_mouse_move(_plot_event(plotter, "motion_notify_event", (224, 5)))
