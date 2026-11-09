@@ -12,12 +12,9 @@ from .axes import normalize_axes, normalize_data_type, spatial_axes_in_order
 from .output_path import check_output_path
 from .ngff import (
     ZarrWriteConfig,
-    _build_multiscales,
-    _build_omero_metadata,
     _resolve_format,
-    _set_group_ngff_metadata,
-    _set_dimension_names,
     _validate_metadata,
+    _write_ngff_metadata,
     _write_pyramid_v2,
     _write_pyramid_v3,
 )
@@ -162,27 +159,11 @@ def to_zarr(
     else:
         delayed = _write_pyramid_v2(root=root, data_levels=data_levels, cfg=cfg, desc=Path(path).name)
 
-    multiscales = _build_multiscales(
-        effective_metadata, axes, effective_metadata.get("name") or "dataset"
-    )
-
-    _set_dimension_names(root, multiscales["datasets"], axes, zarr_format=zarr_format)
-
-    data_type = normalize_data_type(effective_metadata.get("data_type"))
-    omero = None
-    extra = None
-    if data_type == "intensity":
-        omero = _build_omero_metadata(data_levels[0], axes, effective_metadata)
-    else:
-        extra = {"image-label": {}}  # standalone label store: no source image
-
-    _set_group_ngff_metadata(
-        root,
+    # A standalone label store has no source image, hence no ``label_source``.
+    _write_ngff_metadata(
+        root, effective_metadata, axes, data_levels[0],
         ngff_version=ngff_version,
-        multiscales=multiscales,
-        omero=omero,
-        data_type=data_type,
-        extra=extra,
+        name=effective_metadata.get("name") or "dataset",
     )
 
     return root if cfg.compute else delayed
@@ -230,29 +211,12 @@ def write_multiscale_to_group(
         label = name or group.name.strip('/') or 'raw'
         delayed = _write_pyramid_v2(root=group, data_levels=data_levels, cfg=cfg, desc=label)
 
-    multiscales = _build_multiscales(
-        effective_metadata, axes, name or effective_metadata.get("name") or "dataset"
-    )
-
-    _set_dimension_names(group, multiscales["datasets"], axes, zarr_format=zarr_format)
-
-    data_type = normalize_data_type(effective_metadata.get("data_type"))
-    omero = None
-    extra = None
-    if data_type == "intensity":
-        omero = _build_omero_metadata(data_levels[0], axes, effective_metadata)
-    else:
-        # Only labels nested in ``<image>/labels/<name>`` have a source image.
-        image_label = {"source": {"image": "../../"}} if is_label else {}
-        extra = {"image-label": image_label}
-
-    _set_group_ngff_metadata(
-        group,
+    # Only labels nested in ``<image>/labels/<name>`` have a source image.
+    _write_ngff_metadata(
+        group, effective_metadata, axes, data_levels[0],
         ngff_version=ngff_version,
-        multiscales=multiscales,
-        omero=omero,
-        data_type=data_type,
-        extra=extra,
+        name=name or effective_metadata.get("name") or "dataset",
+        label_source={"source": {"image": "../../"}} if is_label else None,
     )
 
     return group if cfg.compute else delayed

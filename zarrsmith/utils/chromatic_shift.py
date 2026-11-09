@@ -716,7 +716,8 @@ def _mirrored_array_kwargs(src: zarr.Array, shape: Sequence[int]) -> dict[str, A
             shards=src.shards,
             serializer=src.serializer,
             chunk_key_encoding=src.metadata.chunk_key_encoding,
-            dimension_names=src.metadata.dimension_names,
+            # Older zarrsmith versions stored them as an array attribute instead.
+            dimension_names=src.metadata.dimension_names or src.attrs.get("dimension_names"),
         )
     else:
         kwargs.update(

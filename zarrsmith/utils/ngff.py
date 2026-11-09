@@ -12,6 +12,8 @@ import dask.array as da
 import numpy as np
 import zarr
 from numcodecs import Blosc, GZip
+from ome_zarr.format import Format, FormatV04, FormatV05
+from ome_zarr.writer import add_metadata, get_metadata, write_multiscales_metadata
 
 from .chunks import get_chunks as _get_chunks
 from .chunks import rechunk_to_shape as _rechunk_to_shape
@@ -32,6 +34,12 @@ from .axes import (
 )
 
 SPATIAL_AXES = SPATIAL_AXIS_SET
+
+_NGFF_FORMATS: dict[str, type[Format]] = {"0.4": FormatV04, "0.5": FormatV05}
+
+# NGFF keys of an image group that every write replaces. ``data_type`` was a
+# zarrsmith-specific key of older versions, dropped so it does not go stale.
+_IMAGE_METADATA_KEYS: tuple[str, ...] = ("multiscales", "omero", "image-label", "data_type")
 
 # Axes that `shards="auto"` never merges chunks along by default. Timepoints
 # and channels are typically read/processed independently, so keeping each
@@ -165,8 +173,26 @@ def _infer_ngff_version(group: zarr.Group) -> str:
         return attrs["ome"].get("version", "0.5")
     return "0.4"
 
-def _label_entry(label_name: str) -> str:
-    return label_name
+def _ngff_format(ngff_version: str) -> Format:
+    """ome-zarr-py ``Format`` object of an NGFF version (``"0.4"`` or ``"0.5"``)."""
+    try:
+        return _NGFF_FORMATS[str(ngff_version)]()
+    except KeyError:
+        raise ValueError(
+            f"Unsupported ngff_version {ngff_version!r}; use '0.4' or '0.5'."
+        ) from None
+
+
+def _drop_ngff_keys(group: zarr.Group, fmt: Format, keys: Sequence[str]) -> None:
+    """Remove ``keys`` from the NGFF metadata of ``group`` (``attrs["ome"]`` for v0.5)."""
+    if fmt.zarr_format == 3:
+        ome = group.attrs.get("ome")
+        if isinstance(ome, dict) and any(k in ome for k in keys):
+            group.attrs["ome"] = {k: v for k, v in ome.items() if k not in keys}
+    else:
+        for key in keys:
+            if key in group.attrs:
+                del group.attrs[key]
 
 
 def _labels_contains(labels: Sequence[Any], label_name: str) -> bool:
@@ -181,34 +207,23 @@ def _labels_contains(labels: Sequence[Any], label_name: str) -> bool:
     return False
 
 def _register_label_on_labels_group(root: zarr.Group, label_name: str, ngff_version: str) -> None:
-    """Register a label image on the ``labels`` container group."""
+    """Register a label image on the ``labels`` container group.
+
+    Written with ome-zarr-py's ``add_metadata``; unlike its ``write_label_metadata``
+    an already registered name is not listed twice.
+    """
+    fmt = _ngff_format(ngff_version)
     labels_group = root.require_group("labels")
-    attrs = labels_group.attrs.asdict()
-    entry = _label_entry(label_name)
+    labels = list(get_metadata(labels_group).get("labels", []))
+    if not _labels_contains(labels, label_name):
+        labels.append(label_name)
+    entry: dict[str, Any] = {"labels": labels}
+    if fmt.zarr_format == 3:
+        entry["version"] = fmt.version  # every v0.5 "ome" block carries its version
+    add_metadata(labels_group, entry, fmt=fmt)
 
-    if ngff_version == "0.5":
-        ome = dict(attrs.get("ome", {}))
-        ome.setdefault("version", "0.5")
-        labels = list(ome.get("labels", []))
-        if not _labels_contains(labels, label_name):
-            labels.append(entry)
-        ome["labels"] = labels
-        labels_group.attrs["ome"] = ome
-
-        root_attrs = root.attrs.asdict()
-        root_ome = root_attrs.get("ome")
-        if isinstance(root_ome, dict) and "labels" in root_ome:
-            root_ome = dict(root_ome)
-            root_ome.pop("labels", None)
-            root.attrs["ome"] = root_ome
-    else:
-        labels = list(attrs.get("labels", []))
-        if not _labels_contains(labels, label_name):
-            labels.append(entry)
-        labels_group.attrs["labels"] = labels
-
-        if "labels" in root.attrs.asdict():
-            del root.attrs["labels"]
+    # Older zarrsmith versions also listed the labels on the image root.
+    _drop_ngff_keys(root, fmt, ("labels",))
 
 
 def _get_group_ome_attrs(group: zarr.Group) -> dict[str, Any]:
@@ -241,59 +256,56 @@ def _infer_data_type_from_group(group: zarr.Group) -> str:
 
     return "intensity"
 
-def _set_group_ngff_metadata(
+def _write_ngff_metadata(
     group: zarr.Group,
+    metadata: dict[str, Any],
+    axes: Sequence[str],
+    level0: Any,
     *,
     ngff_version: str,
-    multiscales: dict[str, Any],
-    omero: dict[str, Any] | None = None,
-    data_type: str | None = None,
-    extra: dict[str, Any] | None = None,
+    name: str,
+    label_source: dict[str, Any] | None = None,
 ) -> None:
-    """Write NGFF metadata to ``group`` using either the v0.4 or v0.5 layout."""
-    extra = dict(extra or {})
-    normalized_data_type = normalize_data_type(data_type)
-    multiscales = dict(multiscales)
-    multiscales.setdefault("type", "label" if normalized_data_type == "label" else "image")
+    """Write the NGFF metadata of the pyramid stored in ``group`` (arrays ``0``, ``1``, ...).
 
-    if normalized_data_type == "label":
-        # No ``source`` unless the caller knows where the source image lives
-        # (labels nested under ``<image>/labels/<name>`` pass ``../../``).
-        extra.setdefault("image-label", {})
+    The ``multiscales`` block (and the OMERO channels of intensity data) is written by
+    ome-zarr-py, which also validates the axes and coordinate transformations against
+    the spec. Label data gets an ``image-label`` block: ``label_source`` is its
+    ``source`` entry, e.g. ``{"source": {"image": "../../"}}`` for labels nested under
+    ``<image>/labels/<name>``, and is left out for a standalone label store.
 
-    if ngff_version == "0.5":
-        payload = {
-            "version": "0.5",
-            "data_type": normalized_data_type,
-            "multiscales": [multiscales],
-        }
-        if omero is not None and normalized_data_type == "intensity":
-            payload["omero"] = omero
-        payload.update(extra)
-        group.attrs["ome"] = payload
-    else:
-        group.attrs["data_type"] = normalized_data_type
-        group.attrs["multiscales"] = [multiscales]
-        if omero is not None and normalized_data_type == "intensity":
-            group.attrs["omero"] = omero
-        for key, value in extra.items():
-            group.attrs[key] = value
+    ``level0`` is the first pyramid level (anything with ``shape``, ``ndim`` and
+    ``dtype``), used for the channel count and the default display window. NGFF keys
+    from an earlier write are replaced; any other key on the group is kept.
+    """
+    fmt = _ngff_format(ngff_version)
+    axes = normalize_axes(axes)
+    data_type = normalize_data_type(metadata.get("data_type"))
+    _drop_ngff_keys(group, fmt, _IMAGE_METADATA_KEYS)
 
-def _set_dimension_names(
-    group: zarr.Group,
-    datasets: Sequence[dict[str, Any]],
-    axes: Sequence[str],
-    *,
-    zarr_format: int,
-) -> None:
-    """Write Zarr v3 array-level dimension names required by NGFF v0.5."""
-    if zarr_format != 3:
-        return
-    names = [str(axis) for axis in axes]
-    for dataset in datasets:
-        path = dataset.get("path")
-        if path in group:
-            group[path].attrs["dimension_names"] = names
+    transforms = _build_coordinate_transformations(
+        axes=axes,
+        scales=metadata["scales"],
+        time_increment=metadata.get("time_increment"),
+    )
+    extra: dict[str, Any] = {}
+    if data_type == "intensity":
+        extra["metadata"] = {"omero": _build_omero_metadata(level0, axes, metadata)}
+    write_multiscales_metadata(
+        group,
+        [{"path": str(i), "coordinateTransformations": ct} for i, ct in enumerate(transforms)],
+        fmt=fmt,
+        axes=list(axes),
+        axes_units=_axes_units(axes, metadata),
+        name=name,
+        **extra,
+    )
+    if data_type == "label":
+        add_metadata(
+            group,
+            {"image-label": {"version": fmt.version, **(label_source or {})}},
+            fmt=fmt,
+        )
 
 
 def _resolve_format(cfg: ZarrWriteConfig) -> tuple[str, int]:
@@ -478,6 +490,7 @@ def _write_pyramid_v3(
             compressor=cfg.compressor,
             compressor_level=cfg.compressor_level,
             shards=shard_shapes[i],
+            dimension_names=axes,
             storage_options=cfg.storage_options,
             always_pass_compressors=True,
         )
@@ -704,13 +717,15 @@ def _array_create_kwargs(
     compressor: str | None,
     compressor_level: int,
     shards: Sequence[int] | None = None,
+    dimension_names: Sequence[str] | None = None,
     storage_options: dict[str, Any] | None = None,
     always_pass_compressors: bool = False,
 ) -> dict[str, Any]:
     """Keyword arguments for ``Group.create_array`` of one pyramid level.
 
     Single place that knows the differences between zarr v2 (compressor +
-    ``/``-separated v2 chunk keys) and v3 (codec chain + optional sharding).
+    ``/``-separated v2 chunk keys) and v3 (codec chain + optional sharding +
+    the ``dimension_names`` NGFF v0.5 requires in every array's ``zarr.json``).
     For v3, ``compressors`` is only passed when a compressor is requested,
     unless ``always_pass_compressors`` is set (the writer passes ``None``
     explicitly, which stores uncompressed chunks).
@@ -730,6 +745,8 @@ def _array_create_kwargs(
             kwargs["compressors"] = compressors
         if shards is not None:
             kwargs["shards"] = tuple(shards)
+        if dimension_names is not None:
+            kwargs["dimension_names"] = tuple(str(name) for name in dimension_names)
     if storage_options is not None:
         kwargs.update(storage_options)
     return kwargs
@@ -788,6 +805,7 @@ def _create_level_arrays(
     dtype: Any,
     shard_shapes: Sequence[Sequence[int] | None],
     *,
+    axes: Sequence[str],
     zarr_format: int,
     compressor: str | None,
     compressor_level: int,
@@ -801,32 +819,9 @@ def _create_level_arrays(
                 compressor=compressor,
                 compressor_level=compressor_level,
                 shards=shard_shapes[i],
+                dimension_names=axes,
             )
         )
-
-
-def _build_multiscales(
-    metadata: dict[str, Any],
-    axes: Sequence[str],
-    name: str,
-) -> dict[str, Any]:
-    """NGFF ``multiscales`` entry (axes + per-level transforms) for ``metadata``."""
-    data_type = normalize_data_type(metadata.get("data_type"))
-    return {
-        "name": name,
-        "axes": _build_axes(axes, metadata),
-        "datasets": [
-            {"path": str(i), "coordinateTransformations": ct}
-            for i, ct in enumerate(
-                _build_coordinate_transformations(
-                    axes=axes,
-                    scales=metadata["scales"],
-                    time_increment=metadata.get("time_increment"),
-                )
-            )
-        ],
-        "type": "label" if data_type == "label" else "image",
-    }
 
 
 def _validate_metadata(
@@ -880,26 +875,19 @@ def _validate_metadata(
         raise ValueError("A 't' axis requires metadata['time_increment'].")
 
 
-def _build_axes(axes: tuple[str, ...], metadata: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build the NGFF ``axes`` description from the normalized ZarrSmith metadata."""
-    axes = normalize_axes(axes)
-    axis_types = {"t": "time", "c": "channel", "z": "space", "y": "space", "x": "space"}
-    spatial_labels = spatial_axes_in_order(axes)
-    spatial_units = [
-        normalize_unit(u) for u in metadata.get("units", [None] * len(spatial_labels))
-    ]
-    spatial_unit_map = dict(zip(spatial_labels, spatial_units))
-    time_unit = normalize_unit(metadata.get("time_increment_unit"))
+def _axes_units(axes: Sequence[str], metadata: dict[str, Any]) -> dict[str, str]:
+    """Unit of every axis that has one (``{"t": "second", "z": "micrometer", ...}``).
 
-    out = []
-    for ax in axes:
-        entry = {"name": ax, "type": axis_types[ax]}
-        if ax == "t" and time_unit:
-            entry["unit"] = time_unit
-        elif ax in spatial_unit_map and spatial_unit_map[ax]:
-            entry["unit"] = spatial_unit_map[ax]
-        out.append(entry)
-    return out
+    ome-zarr-py turns these into the NGFF ``axes`` entries (and fills in each
+    axis type); axes without a unit, such as ``c``, are left out.
+    """
+    axes = normalize_axes(axes)
+    units = dict(
+        zip(spatial_axes_in_order(axes), (normalize_unit(u) for u in metadata.get("units") or ()))
+    )
+    if "t" in axes:
+        units["t"] = normalize_unit(metadata.get("time_increment_unit"))
+    return {axis: unit for axis, unit in units.items() if unit}
 
 
 def _build_coordinate_transformations(
