@@ -97,13 +97,16 @@ The fusion options:
 | `-b`, `--blend` | `sigmoid`, `max`, `sum` or `midline` | `sigmoid` |
 | `-ss`, `--sigmoid_steepness` | steepness of the `sigmoid` transition, higher is sharper | 4 |
 | `-ch`, `--channels` / `-g`, `--groups` | tile channels and groups (e.g. `L R`) to fuse | all |
+| `-cam`, `--cameras` | cameras to fuse (MuVi SPIM: `left right`); several are blended into one image, see [MuVi SPIM](mosaic.md#muvi-spim-two-opposing-cameras) | all |
 | `-f`, `--fields` | the field to fuse (groups of touching tiles, `field0`, `field1`, ... listed when the mosaic is loaded). Tiles from several fields are not fused: an error is printed (see [Fields](mosaic.md#fields)) | the first field, unless `-t` is given |
 | `-t`, `--tiles` | only fuse these tiles, and fit the output to them: stacks such as `1-x00-y00` (every channel), or `channel/stack` ids | all |
 | `-st`, `--skip_tiles` | tiles to leave blank (the output keeps its size): `channel/stack` ids such as `cFos-647/1-x00-y00`, or a stack such as `1-x00-y00` for every channel | none |
 | `-tp`, `--timepoints` | timepoints to fuse; more than one gives an output with a `t` axis, see [Timepoints](mosaic.md#timepoints) | all |
 | `-rtp`, `--reference_timepoint` | timepoint whose tiles set the geometry of every timepoint, or `all` to place every timepoint at [its own positions](mosaic.md#own-positions-per-timepoint) | the first timepoint |
 | `-nff`, `--no_flatfield` | Opera: do not apply Harmony's flat-field correction (see [Opera](mosaic.md#opera-harmony-exports)) | off (the correction is applied) |
-| `-ma`, `--midline_axis` | axis along which `sigmoid`/`midline` separate the tile groups: `x`, `y` or `z` | `x` |
+| `-ma`, `--midline_axis` | axis along which `sigmoid`/`midline` separate the tile groups (or cameras): `x`, `y` or `z` | `z` for several cameras in 3D, `x` otherwise |
+| `-tf`, `--transforms` | a [transforms file](mosaic.md#transforms-file) giving the tile positions to use instead of the stage positions | the stage positions |
+| `-tfo`, `--transforms_only` | only write `<output>.transforms.json` (every fusion writes it first), fuse nothing | off |
 | `-od`, `--out_dtype` | output dtype | the input dtype (`float32` with `-b sum`) |
 | `-rw`, `--read_workers` | tiles read in parallel processes; not to be confused with `-nw` (write threads) | 4 |
 | `-td`, `--temp_dir` | folder for the temporary fused level 0 (a local disk is faster) | next to the output |
@@ -111,7 +114,7 @@ The fusion options:
 
 Every output option of `convert` is available too, applied to the fused output, with the same defaults. Two read differently for a mosaic: `-cs` is given in `C Z Y X` order (`C Y X` for projections, after `T` for several timepoints), and `-s/--subset` crops the fused output (`z`/`y`/`x` in output voxels, after `-rds`) and selects channels (`c`), e.g. `"z=0:100;y=200:900;c=1"`; timepoints are chosen with `-tp`. `-si` loads one scene of a Zeiss mosaic (default: every scene, one field each), ignored for the others.
 
-The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `fields`, `tiles`, `skip_tiles`, `timepoints`, `reference_timepoint`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
+The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `cameras`, `fields`, `tiles`, `skip_tiles`, `timepoints`, `reference_timepoint`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `transforms`, `transforms_only`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
 
 ```text
 input,microscope,output,downsample,projection,blend,num_levels,shards
