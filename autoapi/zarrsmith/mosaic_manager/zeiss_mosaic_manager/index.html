@@ -1,0 +1,277 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>zarrsmith.mosaic_manager.zeiss_mosaic_manager &mdash; ZarrSmith 0.6.7.dev4+ga20226f44 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../../../../_static/graphviz.css?v=4ae1632d" />
+
+  
+      <script src="../../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../../_static/documentation_options.js?v=44181bc7"></script>
+      <script src="../../../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+    <link rel="next" title="zarrsmith.napari" href="../../napari/index.html" />
+    <link rel="prev" title="zarrsmith.mosaic_manager.tile" href="../tile/index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../../index.html" class="icon icon-home">
+            ZarrSmith
+              <img src="../../../../_static/zarrsmith-icon.svg" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../installation.html">Installation and versioning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../readers.html">Readers and conventions</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Working with data</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../python-api.html">Python API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../mosaic.html">Mosaics: raw tiles and fusion</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../chromatic-shift.html">Chromatic shift correction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../advanced.html">Advanced writing options</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Interfaces</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../cli.html">Command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../napari-plugin.html">Napari plugin</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../../../api_reference.html">API reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../contributing.html">Contributing and extending ZarrSmith</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../../../index.html">API Reference</a><ul class="current">
+<li class="toctree-l2 current"><a class="reference internal" href="../../index.html">zarrsmith</a><ul class="current">
+<li class="toctree-l3 current"><a class="reference internal" href="../../index.html#submodules">Submodules</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="../../_version/index.html">zarrsmith._version</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../cli/index.html">zarrsmith.cli</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../microscope_manager/index.html">zarrsmith.microscope_manager</a></li>
+<li class="toctree-l4 current"><a class="reference internal" href="../index.html">zarrsmith.mosaic_manager</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../napari/index.html">zarrsmith.napari</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../utils/index.html">zarrsmith.utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../index.html#attributes">Attributes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../index.html#package-contents">Package Contents</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../../index.html">ZarrSmith</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../../../../api_reference.html">API reference</a></li>
+          <li class="breadcrumb-item"><a href="../../index.html">zarrsmith</a></li>
+          <li class="breadcrumb-item"><a href="../index.html">zarrsmith.mosaic_manager</a></li>
+      <li class="breadcrumb-item active">zarrsmith.mosaic_manager.zeiss_mosaic_manager</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../../../_sources/autoapi/zarrsmith/mosaic_manager/zeiss_mosaic_manager/index.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="module-zarrsmith.mosaic_manager.zeiss_mosaic_manager">
+<span id="zarrsmith-mosaic-manager-zeiss-mosaic-manager"></span><h1>zarrsmith.mosaic_manager.zeiss_mosaic_manager<a class="headerlink" href="#module-zarrsmith.mosaic_manager.zeiss_mosaic_manager" title="Link to this heading"></a></h1>
+<section id="attributes">
+<h2>Attributes<a class="headerlink" href="#attributes" title="Link to this heading"></a></h2>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.logger" title="zarrsmith.mosaic_manager.zeiss_mosaic_manager.logger"><code class="xref py py-obj docutils literal notranslate"><span class="pre">logger</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager._PIXEL_TYPES" title="zarrsmith.mosaic_manager.zeiss_mosaic_manager._PIXEL_TYPES"><code class="xref py py-obj docutils literal notranslate"><span class="pre">_PIXEL_TYPES</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager._FOCUS" title="zarrsmith.mosaic_manager.zeiss_mosaic_manager._FOCUS"><code class="xref py py-obj docutils literal notranslate"><span class="pre">_FOCUS</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="classes">
+<h2>Classes<a class="headerlink" href="#classes" title="Link to this heading"></a></h2>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager" title="zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ZeissMosaicManager</span></code></a></p></td>
+<td><p>Raw Zeiss tiles of one <code class="docutils literal notranslate"><span class="pre">.czi</span></code> file (a ZEN tile scan), before any stitching.</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="functions">
+<h2>Functions<a class="headerlink" href="#functions" title="Link to this heading"></a></h2>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.scene_names" title="zarrsmith.mosaic_manager.zeiss_mosaic_manager.scene_names"><code class="xref py py-obj docutils literal notranslate"><span class="pre">scene_names</span></code></a>(czi_metadata) → Dict[int, str]</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">{scene</span> <span class="pre">index:</span> <span class="pre">name}</span></code> of a CZI file (names may be missing).</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.channel_names" title="zarrsmith.mosaic_manager.zeiss_mosaic_manager.channel_names"><code class="xref py py-obj docutils literal notranslate"><span class="pre">channel_names</span></code></a>(czi_metadata, indices) → Dict[int, str]</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">{channel</span> <span class="pre">index:</span> <span class="pre">name}</span></code> for <code class="docutils literal notranslate"><span class="pre">indices</span></code>, unique so that channels are not fused together.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.field_name" title="zarrsmith.mosaic_manager.zeiss_mosaic_manager.field_name"><code class="xref py py-obj docutils literal notranslate"><span class="pre">field_name</span></code></a>(scene, name) → str</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">scene0_TR1</span></code>: the index keeps the acquisition order and spaces are not allowed</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="module-contents">
+<h2>Module Contents<a class="headerlink" href="#module-contents" title="Link to this heading"></a></h2>
+<dl class="py data">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager.logger">
+<span class="sig-prename descclassname"><span class="pre">zarrsmith.mosaic_manager.zeiss_mosaic_manager.</span></span><span class="sig-name descname"><span class="pre">logger</span></span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.logger" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager._PIXEL_TYPES">
+<span class="sig-prename descclassname"><span class="pre">zarrsmith.mosaic_manager.zeiss_mosaic_manager.</span></span><span class="sig-name descname"><span class="pre">_PIXEL_TYPES</span></span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager._PIXEL_TYPES" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager._FOCUS">
+<span class="sig-prename descclassname"><span class="pre">zarrsmith.mosaic_manager.zeiss_mosaic_manager.</span></span><span class="sig-name descname"><span class="pre">_FOCUS</span></span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager._FOCUS" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager.scene_names">
+<span class="sig-prename descclassname"><span class="pre">zarrsmith.mosaic_manager.zeiss_mosaic_manager.</span></span><span class="sig-name descname"><span class="pre">scene_names</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">czi_metadata</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.scene_names" title="Link to this definition"></a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">{scene</span> <span class="pre">index:</span> <span class="pre">name}</span></code> of a CZI file (names may be missing).</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager.channel_names">
+<span class="sig-prename descclassname"><span class="pre">zarrsmith.mosaic_manager.zeiss_mosaic_manager.</span></span><span class="sig-name descname"><span class="pre">channel_names</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">czi_metadata</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">indices</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.channel_names" title="Link to this definition"></a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">{channel</span> <span class="pre">index:</span> <span class="pre">name}</span></code> for <code class="docutils literal notranslate"><span class="pre">indices</span></code>, unique so that channels are not fused together.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager.field_name">
+<span class="sig-prename descclassname"><span class="pre">zarrsmith.mosaic_manager.zeiss_mosaic_manager.</span></span><span class="sig-name descname"><span class="pre">field_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">scene</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">str</span></span></span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.field_name" title="Link to this definition"></a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">scene0_TR1</span></code>: the index keeps the acquisition order and spaces are not allowed
+in field names, which the command line and batch CSV separate with spaces.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">zarrsmith.mosaic_manager.zeiss_mosaic_manager.</span></span><span class="sig-name descname"><span class="pre">ZeissMosaicManager</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scene_index</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="../mosaic/index.html#zarrsmith.mosaic_manager.mosaic.MosaicManager" title="zarrsmith.mosaic_manager.mosaic.MosaicManager"><code class="xref py py-obj docutils literal notranslate"><span class="pre">zarrsmith.mosaic_manager.mosaic.MosaicManager</span></code></a></p>
+<p>Raw Zeiss tiles of one <code class="docutils literal notranslate"><span class="pre">.czi</span></code> file (a ZEN tile scan), before any stitching.</p>
+<p>Not to be confused with <a class="reference internal" href="../../microscope_manager/index.html#zarrsmith.microscope_manager.ZeissManager" title="zarrsmith.microscope_manager.ZeissManager"><code class="xref py py-class docutils literal notranslate"><span class="pre">ZeissManager</span></code></a>, which
+reads one scene as a single image; a file without tiles, such as the output of
+ZEN’s <em>Stitching</em>, is read with it. Every tile (<code class="docutils literal notranslate"><span class="pre">M</span></code> index) of every channel and
+timepoint is one tile, and its planes stay on disk until read
+(<a class="reference internal" href="../index.html#zarrsmith.mosaic_manager.CziTileArray" title="zarrsmith.mosaic_manager.CziTileArray"><code class="xref py py-class docutils literal notranslate"><span class="pre">CziTileArray</span></code></a>).</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">channel</span></code>: the channel name in the metadata (<code class="docutils literal notranslate"><span class="pre">AF488-T2</span></code>);</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">field</span></code>: the scene: <code class="docutils literal notranslate"><span class="pre">scene0_TR1</span></code>, <code class="docutils literal notranslate"><span class="pre">scene1_P1</span></code>, … with the tile regions and
+positions of the ZEN experiment as <code class="docutils literal notranslate"><span class="pre">TR1</span></code> and <code class="docutils literal notranslate"><span class="pre">P1</span></code>;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">timepoint</span></code>: the <code class="docutils literal notranslate"><span class="pre">T</span></code> index;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">attrs</span></code>: <code class="docutils literal notranslate"><span class="pre">stack</span></code> (<code class="docutils literal notranslate"><span class="pre">scene0_TR1-m00</span></code>, the tile id without the channel),
+<code class="docutils literal notranslate"><span class="pre">scene</span></code>, <code class="docutils literal notranslate"><span class="pre">scene_name</span></code>, <code class="docutils literal notranslate"><span class="pre">mosaic_index</span></code> and <code class="docutils literal notranslate"><span class="pre">path</span></code>.</p></li>
+</ul>
+<p>Tiles are placed where the file says: <code class="docutils literal notranslate"><span class="pre">y</span></code> and <code class="docutils literal notranslate"><span class="pre">x</span></code> from the pixel coordinates
+of the tile in the file (the stage position, rounded to a pixel), <code class="docutils literal notranslate"><span class="pre">z</span></code> from the
+<code class="docutils literal notranslate"><span class="pre">FocusPosition</span></code> of its first plane. They are not registered, unlike the images
+stitched by ZEN. Positions in the file change a little between timepoints: by
+default a fusion uses those of one reference timepoint, as ZEN uses one offset for
+all; <code class="docutils literal notranslate"><span class="pre">reference_timepoint=&quot;all&quot;</span></code> uses those of every timepoint.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager.scene_index">
+<span class="sig-name descname"><span class="pre">scene_index</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager.scene_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager._scan">
+<span class="sig-name descname"><span class="pre">_scan</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">List</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="../tile/index.html#zarrsmith.mosaic_manager.tile.Tile" title="zarrsmith.mosaic_manager.tile.Tile"><span class="pre">zarrsmith.mosaic_manager.tile.Tile</span></a><span class="p"><span class="pre">]</span></span></span></span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager._scan" title="Link to this definition"></a></dt>
+<dd><p>Discover the tiles under <code class="xref py py-attr docutils literal notranslate"><span class="pre">path</span></code> (lazy data, positions in the sample frame).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager._stacks">
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">_stacks</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">czi</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">Tuple</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager._stacks" title="Link to this definition"></a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">{(scene,</span> <span class="pre">m,</span> <span class="pre">t,</span> <span class="pre">c):</span> <span class="pre">{&quot;coords&quot;:</span> <span class="pre">...,</span> <span class="pre">&quot;boxes&quot;:</span> <span class="pre">{z:</span> <span class="pre">box}}}</span></code>, from the directory of the file.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager._focus_positions">
+<span class="property"><span class="k"><span class="pre">static</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">_focus_positions</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">czi</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">z</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">c</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">int</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">Tuple</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></span></span><a class="reference external" href="https://github.com/embl-mif/zarrsmith/blob/main/zarrsmith/mosaic_manager/zeiss_mosaic_manager.py"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#zarrsmith.mosaic_manager.zeiss_mosaic_manager.ZeissMosaicManager._focus_positions" title="Link to this definition"></a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">{(scene,</span> <span class="pre">m,</span> <span class="pre">t):</span> <span class="pre">focus</span> <span class="pre">position</span> <span class="pre">(um)}</span></code> of plane <code class="docutils literal notranslate"><span class="pre">z</span></code> of channel <code class="docutils literal notranslate"><span class="pre">c</span></code> (one read per tile).</p>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../tile/index.html" class="btn btn-neutral float-left" title="zarrsmith.mosaic_manager.tile" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../../napari/index.html" class="btn btn-neutral float-right" title="zarrsmith.napari" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023, European Molecular Biology Laboratory (EMBL).</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

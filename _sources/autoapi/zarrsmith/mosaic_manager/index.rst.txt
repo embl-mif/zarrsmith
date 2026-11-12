@@ -1,0 +1,1481 @@
+zarrsmith.mosaic_manager
+========================
+
+.. py:module:: zarrsmith.mosaic_manager
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /autoapi/zarrsmith/mosaic_manager/czi_array/index
+   /autoapi/zarrsmith/mosaic_manager/fields/index
+   /autoapi/zarrsmith/mosaic_manager/fusion/index
+   /autoapi/zarrsmith/mosaic_manager/h5_array/index
+   /autoapi/zarrsmith/mosaic_manager/luxendo_mosaic_manager/index
+   /autoapi/zarrsmith/mosaic_manager/mosaic/index
+   /autoapi/zarrsmith/mosaic_manager/opera_mosaic_manager/index
+   /autoapi/zarrsmith/mosaic_manager/readers/index
+   /autoapi/zarrsmith/mosaic_manager/tiff_array/index
+   /autoapi/zarrsmith/mosaic_manager/tile/index
+   /autoapi/zarrsmith/mosaic_manager/zeiss_mosaic_manager/index
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   zarrsmith.mosaic_manager.MOSAIC_READERS
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   zarrsmith.mosaic_manager.MultipleFieldsError
+   zarrsmith.mosaic_manager.WrongReaderError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   zarrsmith.mosaic_manager.Tile
+   zarrsmith.mosaic_manager.H5Array
+   zarrsmith.mosaic_manager.PlaneStackArray
+   zarrsmith.mosaic_manager.TiffStackArray
+   zarrsmith.mosaic_manager.CziTileArray
+   zarrsmith.mosaic_manager.MosaicManager
+   zarrsmith.mosaic_manager.FusionPlan
+   zarrsmith.mosaic_manager.LuxendoMosaicManager
+   zarrsmith.mosaic_manager.OperaFlatfield
+   zarrsmith.mosaic_manager.OperaMosaicManager
+   zarrsmith.mosaic_manager.ZeissMosaicManager
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   zarrsmith.mosaic_manager.connected_components
+   zarrsmith.mosaic_manager.label_fields
+   zarrsmith.mosaic_manager.reader_options
+   zarrsmith.mosaic_manager.default_transforms_path
+   zarrsmith.mosaic_manager.display_windows
+   zarrsmith.mosaic_manager.fuse_tiles
+   zarrsmith.mosaic_manager.load_transforms
+   zarrsmith.mosaic_manager.plan_fusion
+   zarrsmith.mosaic_manager.transforms_document
+   zarrsmith.mosaic_manager.write_transforms
+   zarrsmith.mosaic_manager.check_reader
+   zarrsmith.mosaic_manager.detect_microscope
+
+
+Package Contents
+----------------
+
+.. py:class:: Tile
+
+   One acquired tile of a mosaic: a lazy ``(z, y, x)`` array and where it sits.
+
+   Placement is a translation, after optional axis flips: the data is first
+   mirrored along the axes where ``flip`` is true (e.g. the mirror image seen by an
+   opposing camera), then ``origin`` is the position (in ``units``) of voxel
+   ``[0, 0, 0]`` of the flipped data in the common sample frame and ``voxel_size``
+   the voxel spacing. All tiles of a mosaic must use the same units and voxel size.
+
+   Parameters
+   ----------
+   data
+       Anything with ``shape``, ``dtype`` and numpy-style slicing that returns
+       array data: an ``h5py.Dataset``, a dask or a numpy array. It is only
+       read when a fusion needs it.
+   origin, voxel_size
+       ``(z, y, x)`` position of the first voxel and voxel spacing.
+   channel
+       Channel (dye) name. Tiles with the same name are fused into one output
+       channel.
+   group
+       Optional label of tiles that should be merged among themselves first,
+       e.g. ``"L"``/``"R"`` illumination side. Used by ``blend="sigmoid"`` and ``"midline"``.
+   timepoint
+       Index of the timepoint the tile belongs to (``0`` for a single timepoint).
+       Tiles of one position at different timepoints are matched by
+       :func:`series_keys`.
+   attrs
+       Free-form, reader specific metadata (stack, grid position, ...). ``stack``
+       names the position of the tile, the same at every timepoint.
+   units
+       Units of ``origin`` and ``voxel_size``.
+   field
+       Name of the field (connected group of touching tiles) the tile belongs to,
+       e.g. ``"field0"``. Set by :class:`~zarrsmith.mosaic_manager.MosaicManager` when
+       the mosaic is loaded (see :func:`~zarrsmith.mosaic_manager.fields.label_fields`),
+       unless the reader gives one.
+   camera
+       Optional name of the camera (detection view) the tile was taken with, e.g.
+       ``"left"``/``"right"`` for the opposing cameras of a MuVi SPIM. Tiles of
+       several cameras are fused as separate views, blended along their detection
+       axis (see :func:`~zarrsmith.mosaic_manager.fuse_tiles`); ``attrs["detection_direction"]``
+       (``(z, y, x)``, in the frame of ``origin``) says which side each camera images best.
+   flip
+       ``(z, y, x)`` axes along which the data is mirrored before it is placed.
+
+
+   .. py:attribute:: data
+      :type:  Any
+
+
+   .. py:attribute:: origin
+      :type:  Tuple[float, float, float]
+
+
+   .. py:attribute:: voxel_size
+      :type:  Tuple[float, float, float]
+
+
+   .. py:attribute:: channel
+      :type:  str
+
+
+   .. py:attribute:: group
+      :type:  Optional[str]
+      :value: None
+
+
+
+   .. py:attribute:: timepoint
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: attrs
+      :type:  Dict[str, Any]
+
+
+   .. py:attribute:: units
+      :type:  str
+      :value: 'micrometer'
+
+
+
+   .. py:attribute:: field
+      :type:  Optional[str]
+      :value: None
+
+
+
+   .. py:attribute:: camera
+      :type:  Optional[str]
+      :value: None
+
+
+
+   .. py:attribute:: flip
+      :type:  Tuple[bool, bool, bool]
+      :value: (False, False, False)
+
+
+
+   .. py:method:: __post_init__() -> None
+
+
+   .. py:property:: shape
+      :type: Tuple[int, int, int]
+
+
+
+   .. py:property:: dtype
+      :type: numpy.dtype
+
+
+
+   .. py:property:: extent
+      :type: Tuple[Tuple[float, ...], Tuple[float, ...]]
+
+
+      ``(min, max)`` corners of the tile in sample coordinates.
+
+
+
+.. py:class:: H5Array(path: str | pathlib.Path, dataset: str = 'Data', shape=None, dtype=None)
+
+   Lazy, picklable view of one HDF5 dataset.
+
+   The file is opened for every read, so the object holds no handle: it can be
+   sent to worker processes (which is what lets :func:`~zarrsmith.mosaic_manager.fuse_tiles`
+   read many tiles in parallel despite h5py's per-process lock) and needs no
+   ``close()``. It behaves like a read-only array: ``shape``, ``dtype``, ``ndim``
+   and numpy-style slicing, so ``dask.array.from_array`` accepts it directly.
+
+   Files are opened without HDF5 file locking, so do not read a file that is still
+   being written. On NFS, locking made reads 1.5x slower, and 3x when the file was
+   already cached (raw Luxendo tiles, 16 workers).
+
+
+   .. py:attribute:: picklable
+      :value: True
+
+
+
+   .. py:attribute:: path
+      :value: ''
+
+
+
+   .. py:attribute:: dataset
+      :value: 'Data'
+
+
+
+   .. py:attribute:: shape
+      :type:  Tuple[int, ...]
+
+
+   .. py:attribute:: dtype
+
+
+   .. py:attribute:: ndim
+
+
+   .. py:method:: __getitem__(key)
+
+
+   .. py:method:: __len__() -> int
+
+
+   .. py:method:: __repr__() -> str
+
+
+.. py:class:: PlaneStackArray(shape, dtype)
+
+   Lazy, picklable ``(z, y, x)`` stack read one whole plane at a time.
+
+   Subclasses implement :meth:`_read`. Slicing reads only the planes it needs (``chunks``
+   is ``(1, y, x)``, which the fusion uses to size its regions).
+
+
+   .. py:attribute:: picklable
+      :value: True
+
+
+
+   .. py:attribute:: shape
+      :type:  Tuple[int, ...]
+
+
+   .. py:attribute:: dtype
+
+
+   .. py:attribute:: ndim
+      :value: 3
+
+
+
+   .. py:attribute:: chunks
+
+
+   .. py:attribute:: _ready
+      :type:  Optional[Tuple[int, numpy.ndarray]]
+      :value: None
+
+
+
+   .. py:method:: prefetch(z: int) -> None
+
+      Read plane ``z`` ahead (e.g. in a thread, for many tiles at once). The next
+      read of this stack uses it, or drops it if it asks for another plane.
+
+
+
+   .. py:method:: _plane(z: int) -> numpy.ndarray
+
+
+   .. py:method:: _read(z: int) -> numpy.ndarray
+      :abstractmethod:
+
+
+
+   .. py:method:: __getitem__(key) -> numpy.ndarray
+
+
+   .. py:method:: __getstate__()
+
+
+   .. py:method:: __len__() -> int
+
+
+.. py:class:: TiffStackArray(paths: Sequence[Optional[str | pathlib.Path]], shape, dtype, folder: Optional[str | pathlib.Path] = None, transform: Optional[Callable[[numpy.ndarray], numpy.ndarray]] = None)
+
+   Bases: :py:obj:`PlaneStackArray`
+
+
+   Lazy, picklable ``(z, y, x)`` stack of single-plane TIFF files (one file per plane).
+
+   Like :class:`~zarrsmith.mosaic_manager.H5Array`, it holds no open file, so it can be
+   sent to worker processes and needs no ``close()``. Slicing reads only the planes it
+   needs; every plane is decoded in full (``chunks`` is ``(1, y, x)``, which the fusion
+   uses to size its regions).
+
+   Parameters
+   ----------
+   paths
+       One file per plane, in z order. ``None`` marks a missing plane, read as zeros.
+   shape, dtype
+       ``(z, y, x)`` shape and data type, from the metadata (no file is opened).
+   folder
+       Folder of relative ``paths`` (keeps memory low for plates with many planes).
+   transform
+       Optional picklable callable applied to every whole plane after reading (e.g. a
+       flat-field correction). It returns floats, which are rounded and clipped to ``dtype``.
+
+
+   .. py:attribute:: paths
+
+
+   .. py:attribute:: folder
+      :value: None
+
+
+
+   .. py:attribute:: transform
+      :value: None
+
+
+
+   .. py:method:: path(z: int) -> Optional[str]
+
+      Full path of plane ``z`` (``None`` for a missing plane).
+
+
+
+   .. py:method:: _read(z: int) -> numpy.ndarray
+
+
+   .. py:method:: __repr__() -> str
+
+
+.. py:class:: CziTileArray(path: str | pathlib.Path, coords: Dict[str, int], planes: Sequence[Optional[int]], shape, dtype, blocks: Optional[Sequence[Optional[zarrsmith.utils.czi.CziBlock]]] = None)
+
+   Bases: :py:obj:`zarrsmith.mosaic_manager.tiff_array.PlaneStackArray`
+
+
+   Lazy, picklable ``(z, y, x)`` stack of one tile of a CZI file.
+
+   Like :class:`~zarrsmith.mosaic_manager.H5Array`, it holds no open file, so it can be
+   sent to worker processes and needs no ``close()``. CZI planes are stored whole, so
+   slicing reads only the planes it needs, each one in full.
+
+   Parameters
+   ----------
+   path
+       The ``.czi`` file.
+   coords
+       Coordinates of the tile in the file, without ``Z``, e.g. ``{"S": 0, "T": 1, "C": 2, "M": 1}``.
+   planes
+       ``Z`` index in the file of every plane, in order. ``None`` marks a missing plane, read as zeros.
+   shape, dtype
+       ``(z, y, x)`` shape and data type, from the metadata (no plane is read).
+   blocks
+       Where every plane is stored (:func:`~zarrsmith.utils.czi.read_block_index`), to read
+       it directly. A plane without one is read with aicspylibczi, which goes through the
+       whole directory of the file: seconds per plane if it holds a million subblocks.
+
+
+   .. py:attribute:: path
+      :value: ''
+
+
+
+   .. py:attribute:: coords
+
+
+   .. py:attribute:: planes
+
+
+   .. py:attribute:: blocks
+
+
+   .. py:method:: _read(z: int) -> numpy.ndarray
+
+
+   .. py:method:: __repr__() -> str
+
+
+.. py:exception:: MultipleFieldsError
+
+   Bases: :py:obj:`ValueError`
+
+
+   Tiles of more than one field were given to one fusion, which is not allowed.
+
+
+.. py:function:: connected_components(tiles: Sequence[zarrsmith.mosaic_manager.tile.Tile], tolerance: Optional[Sequence[float]] = None) -> List[int]
+
+   Component index of every tile: tiles whose boxes overlap or touch are connected.
+
+   Two tiles touch when their ``(z, y, x)`` boxes (:attr:`Tile.extent`) overlap or
+   are less than ``tolerance`` apart on every axis (default: one voxel). Components
+   are numbered by their position: by the ``y`` then ``x`` then ``z`` start of their
+   bounding box, so the numbering does not depend on the tile order. A position
+   counts once, where it is first seen, and its tiles at later timepoints share its
+   component: stage drift over time neither joins nor splits fields.
+
+
+.. py:function:: label_fields(tiles: Sequence[zarrsmith.mosaic_manager.tile.Tile], tolerance: Optional[Sequence[float]] = None) -> List[str]
+
+   Set ``tile.field`` on every tile to the name of its connected component.
+
+   Tiles that already have a field (given by the reader) keep it. Returns the
+   field names in order. See :func:`connected_components`.
+
+
+.. py:class:: MosaicManager(path: str | pathlib.Path)
+
+   Bases: :py:obj:`abc.ABC`
+
+
+   A set of separately acquired, positioned tiles (not yet one image).
+
+   Unlike a :class:`~zarrsmith.microscope_manager.MicroscopeManager`, which wraps one
+   image, a mosaic exposes the raw tiles lazily and fuses them on request with
+   :meth:`fuse`. Subclasses implement :meth:`_scan` only.
+
+   Mosaics can be used as context managers so that open file handles are closed::
+
+       with mosaic_manager.LuxendoMosaicManager("raw_folder") as mosaic:
+           mosaic.fuse("overview.ome.zarr", ds=(4, 8, 8), projection="max")
+
+   When loaded, every tile is labelled with the **field** it belongs to: tiles
+   whose boxes overlap or touch form one field (a connected component), named
+   ``field0``, ``field1``, ... by position (see :attr:`fields`). :meth:`fuse`
+   fuses the first field by default; pick another with
+   ``mosaic.fuse(out, field="field1")``. Tiles of several fields are never fused
+   together: that raises a :class:`~zarrsmith.mosaic_manager.fields.MultipleFieldsError`.
+
+   A mosaic can hold several **timepoints** (:attr:`timepoints`): :attr:`tiles` then
+   has the tiles of all of them. :meth:`fuse` places every timepoint with the geometry
+   of one reference timepoint and :meth:`visualize` adds a time slider.
+
+
+   .. py:attribute:: path
+
+
+   .. py:attribute:: _open_files
+      :type:  list
+      :value: []
+
+
+
+   .. py:attribute:: tiles
+      :type:  List[zarrsmith.mosaic_manager.tile.Tile]
+
+
+   .. py:method:: _scan() -> List[zarrsmith.mosaic_manager.tile.Tile]
+      :abstractmethod:
+
+
+      Discover the tiles under :attr:`path` (lazy data, positions in the sample frame).
+
+
+
+   .. py:property:: channels
+      :type: List[str]
+
+
+      Channel names in order of first appearance.
+
+
+
+   .. py:property:: timepoints
+      :type: List[int]
+
+
+      Timepoints of the tiles, sorted (``[0]`` for a single timepoint).
+
+
+
+   .. py:property:: positions
+      :type: List[zarrsmith.mosaic_manager.tile.Tile]
+
+
+      One tile per acquired position: the earliest of each (all of them for a
+      single timepoint), in mosaic order.
+
+
+
+   .. py:property:: groups
+      :type: List[Optional[str]]
+
+
+      Tile group labels in order of first appearance.
+
+
+
+   .. py:property:: fields
+      :type: List[str]
+
+
+      Field names (connected groups of touching tiles), ordered by position.
+
+
+
+   .. py:method:: field_tiles(fields: str | Sequence[str]) -> List[zarrsmith.mosaic_manager.tile.Tile]
+
+      Tiles of one field (``"field0"``) or of several (``["field0", "field2"]``).
+      Unknown fields raise ``KeyError``.
+
+
+
+   .. py:method:: select(channel: Optional[str] = None, group: Optional[str] = None, field: Optional[str] = None, timepoint: Optional[int] = None, **attrs: Any) -> List[zarrsmith.mosaic_manager.tile.Tile]
+
+      Tiles matching ``channel``, ``group``, ``field``, ``timepoint`` and any ``attrs``
+      entries, e.g. ``select(field="field1", stack=1)``.
+
+
+
+   .. py:property:: cameras
+      :type: List[Optional[str]]
+
+
+      Camera names in order of first appearance (``[None]`` without cameras).
+
+
+
+   .. py:method:: tile_id(tile: zarrsmith.mosaic_manager.tile.Tile) -> str
+
+      Stable name of a tile, ``"<channel>/<stack>"`` (e.g. ``"cFos-647/1-x00-y00"``),
+      or ``"<channel>/<stack>/<camera>"`` (``"DAPI/0-x00-y00/right"``) when the mosaic
+      has several cameras.
+
+      ``<stack>`` is the reader's stack name (``attrs["stack"]``) or, without
+      one, the index of the earliest tile at that position. The tiles of a position
+      share their id at every timepoint. Used to skip tiles from the command line or
+      a batch CSV.
+
+
+
+   .. py:method:: tiles_by_ids(ids: Sequence[str]) -> List[zarrsmith.mosaic_manager.tile.Tile]
+
+      Tiles named by ``ids``: a full :meth:`tile_id` for one tile (at every timepoint),
+      ``"<stack>"`` for that stack position in every channel, and with several cameras
+      also ``"<channel>/<stack>"`` (every camera) or ``"<stack>/<camera>"`` (every
+      channel). Unknown ids raise ``KeyError``.
+
+
+
+   .. py:method:: bounding_box(tiles: Optional[Sequence[zarrsmith.mosaic_manager.tile.Tile]] = None) -> Tuple[Tuple[float, ...], Tuple[float, ...]]
+
+      ``(min, max)`` corners, ``(z, y, x)``, of ``tiles`` (default: all :attr:`positions`).
+
+
+
+   .. py:method:: tile(i: int)
+
+      Tile ``i`` as an :class:`~zarrsmith.microscope_manager.ArrayManager` (axes ``zyx``).
+
+
+
+   .. py:method:: _lazy(t: zarrsmith.mosaic_manager.tile.Tile) -> dask.array.Array
+      :staticmethod:
+
+
+      The tile's data as a dask array, flipped along the axes of ``Tile.flip``.
+
+
+
+   .. py:method:: _lazy_series(series: Dict[int, zarrsmith.mosaic_manager.tile.Tile], timepoints: Sequence[int]) -> Tuple[dask.array.Array, Tuple[float, ...], Dict[int, Tuple[int, ...]]]
+      :classmethod:
+
+
+      ``(t, z, y, x)`` array of the tiles of one position over ``timepoints``, read lazily.
+
+      The array covers every place the tile reaches, and every timepoint holds the tile
+      at its own position, rounded to a voxel, with zeros around it (which read nothing).
+      A timepoint without a tile, or whose tile has another shape than the earliest
+      one, is shown as zeros.
+
+      Returns the array, the position of its first voxel and, per timepoint with a tile,
+      the ``(z, y, x)`` voxel where the tile starts.
+
+
+
+   .. py:method:: contrast_limits(tiles: Optional[Sequence[zarrsmith.mosaic_manager.tile.Tile]] = None, n_tiles: int = 6, block: int = 64, percentiles: Tuple[float, float] = (0.5, 99.9)) -> Dict[str, Tuple[float, float]]
+
+      Display range of every channel, estimated from a small sample.
+
+      For each channel, one ``block``-sized cube is read from the centre of up to
+      ``n_tiles`` tiles (about 0.5 MB each for uint16 and ``block=64``, the HDF5
+      chunk size of Luxendo tiles), and the given percentiles of those voxels are
+      returned as ``(low, high)``. The sampled tiles are the ones closest to the
+      centre of each tile group (e.g. each illumination side), where the sample
+      usually is; edge tiles often only show background. Only the earliest timepoint
+      of every position is sampled.
+
+
+
+   .. py:method:: visualize(tiles: Optional[Sequence[zarrsmith.mosaic_manager.tile.Tile]] = None, viewer: napari.Viewer | None = None, contrast_limits: str | Dict[str, Tuple[float, float]] | None = 'range')
+
+      Show tiles in napari, each as its own layer at its stage position.
+
+      One colour per channel and additive blending, so overlaps and gaps are
+      easy to see. Data stays lazy: only the planes napari displays are read.
+      All tiles of a channel share one contrast setting, and their layers are
+      linked: changing the contrast or gamma of one tile changes all of them.
+
+      When ``tiles`` span several timepoints, each position is one ``(t, z, y, x)``
+      layer in which the tile sits at its stage position of that timepoint, rounded to
+      a voxel, so it moves as the napari slider scrolls through time, starting on the
+      first timepoint. The layer covers every place the tile reaches. Slider step ``i``
+      is the ``i``-th of the timepoints shown. Only the planes displayed at the current
+      timepoint are read.
+
+      Parameters
+      ----------
+      tiles
+          Tiles to show (default: all), e.g. ``mosaic.select(channel="cFos-647")``.
+          Every displayed plane reads whole HDF5 chunks of every tile, so
+          showing fewer tiles keeps napari responsive.
+      viewer
+          Viewer to add the layers to; a new one is created by default.
+      contrast_limits
+          ``"range"`` (default) uses the whole range of the data type (0 to
+          65535 for uint16), which reads nothing: set the contrast of one tile
+          and the linked tiles follow. ``"auto"`` estimates it per channel with
+          :meth:`contrast_limits` (reads a small sample, slow on network drives);
+          a ``{channel: (low, high)}`` dict uses those, with the whole range for
+          the channels it leaves out; ``None`` lets napari compute them per
+          tile (slow on large tiles).
+
+
+
+   .. py:method:: fusion_tiles(tiles: Optional[Sequence[Tile | str]] = None, field: str | Sequence[str] | None = None) -> List[zarrsmith.mosaic_manager.tile.Tile]
+
+      The tiles a fusion uses: ``tiles`` (default: all) restricted to ``field``.
+
+      ``tiles`` are ``Tile`` objects or ids accepted by :meth:`tiles_by_ids`;
+      ``field`` is one field name or a list of them (see :meth:`field_tiles`).
+      Without ``tiles`` and ``field``, the tiles of the first field. The tiles keep
+      the mosaic order. Tiles of several fields are returned as asked, but
+      :func:`~zarrsmith.mosaic_manager.fuse_tiles` refuses them. Tile ids and fields
+      name the tiles of every timepoint.
+
+
+
+   .. py:method:: fuse(out: str | pathlib.Path, tiles: Optional[Sequence[Tile | str]] = None, field: str | Sequence[str] | None = None, skip: Optional[Sequence[Tile | str]] = None, **kwargs)
+
+      Fuse tiles into an OME-Zarr image; see :func:`~zarrsmith.mosaic_manager.fuse_tiles`.
+
+      Parameters
+      ----------
+      out
+          Output ``.ome.zarr`` path.
+      tiles
+          Only fuse these tiles, as ``Tile`` objects or ids accepted by
+          :meth:`tiles_by_ids` (``"cFos-647/1-x00-y00"``, or ``"1-x00-y00"`` for every
+          channel). The output fits them.
+      field
+          Only fuse the tiles of this field (``"field1"``); combined with ``tiles``,
+          only the given tiles of that field. The output fits the field. Without
+          ``tiles`` and ``field``, the first field (:attr:`fields`) is fused.
+      skip
+          Tiles to leave blank (same forms as ``tiles``): they are not read, but the
+          output keeps the size and position it has with them. An id blanks that
+          position at every timepoint, a ``Tile`` only at its own timepoint.
+      **kwargs
+          Options of :func:`~zarrsmith.mosaic_manager.fuse_tiles`, among them
+          ``timepoints`` and ``reference_timepoint`` for a mosaic with several timepoints
+          (``reference_timepoint="all"`` places each at its own stage positions).
+
+      Tiles of more than one field are not fused: a
+      :class:`~zarrsmith.mosaic_manager.fields.MultipleFieldsError` is raised.
+
+
+
+   .. py:method:: apply_transforms(transforms) -> Dict[str, Any]
+
+      Place the tiles with the positions of a transforms file instead of the stage positions.
+
+      ``transforms`` is a path to a JSON file written by a fusion (see
+      :func:`~zarrsmith.mosaic_manager.fusion.transforms_document`) or that document as a
+      dict. Every listed tile (matched by :meth:`tile_id` and timepoint) gets the listed
+      ``translation`` as its ``origin`` and the listed ``flip``, in place. Tiles that are
+      not listed keep their stage positions. Returns the document.
+
+
+
+   .. py:method:: reset_transforms() -> None
+
+      Undo :meth:`apply_transforms`: every tile back at the position (and flips) of the reader.
+
+
+
+   .. py:method:: _resolve_tiles(tiles) -> List[zarrsmith.mosaic_manager.tile.Tile]
+
+      ``Tile`` objects of a list mixing tiles and tile ids.
+
+
+
+   .. py:method:: close() -> None
+
+      Close all open file handles.
+
+
+
+   .. py:method:: __enter__() -> MosaicManager
+
+
+   .. py:method:: __exit__(exc_type, exc, tb) -> None
+
+
+.. py:function:: reader_options(reader, **options) -> Dict[str, Any]
+
+   The ``options`` that the mosaic ``reader`` class accepts, e.g. ``flatfield``,
+   which only :class:`~zarrsmith.mosaic_manager.OperaMosaicManager` takes.
+
+
+.. py:class:: FusionPlan
+
+   Level-0 geometry of a fusion, computed without reading any pixel data.
+
+
+   .. py:attribute:: tiles
+      :type:  List[zarrsmith.mosaic_manager.tile.Tile]
+
+
+   .. py:attribute:: placed
+      :type:  Dict[str, List[_Placed]]
+
+
+   .. py:attribute:: layout
+      :type:  Dict[str, List[_Placed]]
+
+
+   .. py:attribute:: channels
+      :type:  List[str]
+
+
+   .. py:attribute:: ds
+      :type:  Tuple[int, int, int]
+
+
+   .. py:attribute:: blend
+      :type:  str
+
+
+   .. py:attribute:: dtype
+      :type:  numpy.dtype
+
+
+   .. py:attribute:: axes
+      :type:  str
+
+
+   .. py:attribute:: grid_shape
+      :type:  Tuple[int, int, int]
+
+
+   .. py:attribute:: shape
+      :type:  Tuple[int, ...]
+
+
+   .. py:attribute:: scale
+      :type:  Tuple[float, ...]
+
+
+   .. py:attribute:: origin
+      :type:  Tuple[float, float, float]
+
+
+   .. py:attribute:: n_skipped
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: fields
+      :type:  List[str]
+      :value: []
+
+
+
+   .. py:attribute:: timepoints
+      :type:  List[int]
+      :value: []
+
+
+
+   .. py:attribute:: reference_timepoint
+      :type:  Union[int, str]
+      :value: 0
+
+
+
+   .. py:attribute:: frames
+      :type:  Dict[int, Dict[str, List[Optional[_Placed]]]]
+
+
+   .. py:attribute:: n_missing
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: n_available
+      :type:  int
+      :value: 1
+
+
+
+   .. py:attribute:: layouts
+      :type:  Dict[int, Dict[str, List[_Placed]]]
+
+
+   .. py:attribute:: blend_by
+      :type:  str
+      :value: 'group'
+
+
+
+   .. py:attribute:: group_order
+      :type:  Dict[Optional[str], float]
+
+
+   .. py:attribute:: midline_axis
+      :type:  str
+      :value: 'x'
+
+
+
+   .. py:property:: cameras
+      :type: List[Optional[str]]
+
+
+      Cameras of the fused tiles, in order of first appearance.
+
+
+
+   .. py:property:: per_timepoint
+      :type: bool
+
+
+      Whether every timepoint is placed at its own positions.
+
+
+
+   .. py:property:: nbytes
+      :type: int
+
+
+      Size of level 0 in bytes.
+
+
+
+   .. py:method:: summary() -> str
+
+      One line such as ``2 ch x 260 x 1100 x 1500 px (czyx), 1.71 GB, voxel 12 x 11.7 x 11.7 micrometer`` (MB below 0.1 GB);
+      ``5 t x 2 ch x ...`` for several timepoints, followed by the reference timepoint
+      or by ``own positions per timepoint``.
+
+
+
+   .. py:property:: multiple_fields
+      :type: bool
+
+
+      Whether the fused tiles come from more than one field (such a plan is not fused).
+
+
+
+   .. py:property:: error
+      :type: Optional[str]
+
+
+      Why the plan cannot be fused (tiles from separate fields), or ``None``.
+
+
+
+.. py:function:: default_transforms_path(out: str | pathlib.Path) -> pathlib.Path
+
+   Transforms file of a fused output: ``fused.ome.zarr`` -> ``fused.transforms.json`` next to it.
+
+
+.. py:function:: display_windows(path) -> List[Tuple[float, float]]
+
+   Display window ``(start, end)`` of every channel of an OME-Zarr image, from its
+   OMERO metadata (written by :func:`fuse_tiles` from the fused values).
+
+
+.. py:function:: fuse_tiles(tiles: Sequence[zarrsmith.mosaic_manager.tile.Tile], out: str | pathlib.Path, *, ds: Sequence[int] = (1, 1, 1), projection: Optional[str] = None, blend: str = 'sigmoid', channels: Optional[Sequence[str]] = None, channel_names: Optional[Sequence[str]] = None, channel_colors: Optional[Sequence[str]] = None, crop: Optional[dict] = None, skip: Optional[Sequence[zarrsmith.mosaic_manager.tile.Tile]] = None, levels: int = 1, downscale_factor=2, workers: int = 1, executor: str = 'auto', out_dtype=None, midline_axis: Optional[str] = None, sigmoid_steepness: float = SIGMOID_STEEPNESS, timepoints: Optional[Sequence[int]] = None, reference_timepoint: Union[int, str, None] = None, overwrite: bool = False, name: Optional[str] = None, temp_dir: str | pathlib.Path | None = None, temp_compression: bool = False, progress: bool = True, transforms_path: str | pathlib.Path | bool | None = True, tile_id: Optional[Callable[[zarrsmith.mosaic_manager.tile.Tile], str]] = None, source: Optional[str] = None, **write_options)
+
+   Fuse ``tiles`` into an OME-Zarr image and return it as a ``ZarrManager``.
+
+   Parameters
+   ----------
+   tiles
+       Tiles to fuse (all must share voxel size and unit).
+   out
+       Output ``.ome.zarr`` path.
+   ds
+       ``(z, y, x)`` integer downsampling factors applied while reading the tiles
+       (each output voxel is the mean of its block).
+   projection
+       ``None`` for a 3D volume, ``"max"``/``"sum"`` for a 2D projection along z.
+   blend
+       How tiles that overlap are merged:
+
+       * ``"sigmoid"`` (default) -- smooth transition: across an overlap, the
+         share of each tile follows a sigmoid of the log ratio of the distances
+         to the two tile borders, from 0 at a tile's border through 1/2 in the
+         middle of the overlap to 1 at the other tile's border, so no seam is
+         visible. The tiles of each ``group`` are fused separately, then the
+         groups are merged the same way across their overlap along
+         ``midline_axis`` (the switch is centred where ``"midline"`` cuts);
+       * ``"max"`` -- keep the brighter value;
+       * ``"sum"`` -- add the values, so overlaps show up as brighter bands;
+       * ``"midline"`` -- ``max`` within each tile ``group``; where groups
+         overlap, the image switches sharply from one group to the next at the
+         middle of their overlap, along ``midline_axis``.
+
+       Tiles of several **cameras** (``Tile.camera``, e.g. the opposing views of a
+       MuVi SPIM) are blended like groups, one view per camera: the tiles of each
+       camera are fused first, then the views are blended along ``midline_axis``
+       (default ``z``, the detection axis), each camera on the side its
+       ``attrs["detection_direction"]`` points to, where it images sharply. Tiles
+       with several cameras and several groups are refused. Projections of several
+       cameras are merged with the maximum (``projection="max"``) or the mean
+       (``"sum"``) of the views. With ``"max"``/``"sum"`` the cameras are merged like
+       any other tiles.
+   channels
+       Tile channels to fuse, in output order. Default: all, in tile order.
+   channel_names, channel_colors
+       Names and colours (hex or matplotlib names) written for the output
+       channels. Default: the tile channel names and the ZarrSmith palette.
+   crop
+       Part of the output to write, in output voxels (after ``ds``), e.g.
+       ``{"y": slice(100, 900), "z": slice(0, 50)}``. For projections, a ``z``
+       crop limits the planes that are projected.
+   skip
+       Tiles to leave blank: they are not read, but the output keeps the size and
+       position it has with them, so their area stays 0 (where no other tile
+       covers it). With ``blend="midline"``/``"sigmoid"`` they still count for
+       the position of the switch between groups.
+   levels
+       Number of pyramid levels.
+   downscale_factor
+       Factor between pyramid levels: one integer or ``(z, y, x)``.
+   workers
+       Number of regions fused in parallel (threads or processes, see ``executor``).
+   executor
+       ``"process"``, ``"thread"`` or ``"auto"`` (processes when ``workers > 1`` and
+       every tile's data is picklable, e.g. :class:`~zarrsmith.mosaic_manager.H5Array`;
+       threads otherwise). h5py serialises reads inside one process, so processes
+       are what actually speeds up reading from HDF5 tiles.
+   out_dtype
+       Output dtype. Default: input dtype for ``sigmoid``/``max``/``midline``,
+       ``float32`` for ``sum``.
+   midline_axis
+       ``"x"``, ``"y"`` or ``"z"``: axis along which groups (or cameras) are separated
+       (``midline`` and ``sigmoid``). Default: ``"z"`` for the views of several cameras
+       in 3D, ``"x"`` otherwise.
+   sigmoid_steepness
+       Steepness of the ``sigmoid`` transition (> 0). The share of a tile
+       goes from 10% to 90% over the central ``1 - 2 / (1 + 9 ** (1 / s))``
+       of the overlap: about 27% for the default 4, 14% for 8, 50% for 2.
+   timepoints
+       Timepoints to fuse (``Tile.timepoint`` values). Default: all. With more than
+       one, the output has a leading ``t`` axis (``tczyx``, or ``tcyx`` for
+       projections), in increasing order; with one, it has none.
+   reference_timepoint
+       Timepoint whose tiles set the geometry (output grid, tile offsets, transitions
+       between tiles and groups); it need not be among ``timepoints``. Every timepoint
+       is fused with this geometry, so ``crop``, tile selections and the output shape
+       hold for all of them, and timepoints fused in separate runs line up. Default:
+       the first timepoint of ``tiles``. Tiles are matched across timepoints with
+       :func:`~zarrsmith.mosaic_manager.tile.series_keys`. A tile missing at a timepoint
+       stays blank there (with a warning), a tile without a counterpart at the reference
+       is not fused (with a warning), and a tile with another shape, voxel size or
+       unit than its reference tile raises ``ValueError``.
+
+       ``"all"`` places every timepoint at its own positions instead. The output grid
+       covers the tiles of all timepoints of ``tiles``, also those not in ``timepoints``,
+       so ``crop`` and the output shape hold for all of them and timepoints fused in
+       separate runs line up. Tile offsets and transitions are computed for each
+       timepoint, so tiles and the overlaps between them follow the reported positions.
+       A tile missing at a timepoint stays blank there (with a warning).
+   overwrite
+       Replace ``out`` if it is an existing Zarr store (with a warning, once the
+       fusion has succeeded). Otherwise an existing non-empty ``out`` raises
+       ``FileExistsError``.
+   name
+       Image name stored in the metadata.
+   temp_dir
+       Folder for the temporary fused level 0 (deleted at the end). Default:
+       next to ``out``. A local disk is faster when ``out`` is on a network share.
+   temp_compression
+       Compress the temporary level 0. Off by default: skipping compression (and
+       decoding it again for the pyramid) is noticeably faster, but the temporary
+       store then takes the full uncompressed size of level 0 (``plan_fusion(...).nbytes``),
+       so ``temp_dir`` needs room for it. Turn it on when disk space is short.
+   transforms_path
+       Where to write the transforms of the fusion (JSON, see :func:`transforms_document`):
+       the position and flips of every fused tile at every timepoint, before anything
+       is fused. ``True`` (default): next to ``out``, see :func:`default_transforms_path`;
+       ``False``/``None``: not written. Load it back with
+       :meth:`MosaicManager.apply_transforms <zarrsmith.mosaic_manager.MosaicManager.apply_transforms>`.
+   tile_id, source
+       Name of every tile in the transforms (default: ``channel/stack[/camera]``) and
+       the mosaic they come from; :meth:`MosaicManager.fuse` sets both.
+   progress
+       Show progress bars.
+   **write_options
+       Any other :meth:`~zarrsmith.microscope_manager.MicroscopeManager.to_zarr`
+       option, as for ``zarrsmith convert``: ``chunks``, ``shards``, ``shard_target_mb``,
+       ``shard_exclude_axes``, ``zarr_format``, ``ngff_version``, ``compressor``,
+       ``compressor_level``, ``drop_singleton``, ``num_workers``, ``storage_options``.
+       ``chunks`` is given in the output axis order (``c, z, y, x``, or ``c, y, x``
+       for projections, after a leading ``t`` for several timepoints).
+
+   The display window of every channel (OMERO ``window`` metadata) is set to the
+   0.5th-99.9th percentile of the fused values of all timepoints, ignoring blank
+   areas, so viewers open the result with a usable contrast; see :func:`display_windows`.
+
+   When ``tiles`` hold several timepoints, the root attribute ``zarrsmith_fusion``
+   records the acquired timepoints of the output's ``t`` axis and the reference.
+
+   Use :func:`plan_fusion` with the same arguments to get the output shape and
+   size without reading or writing anything.
+
+   ``tiles`` must come from one field (``Tile.field``, set by
+   :class:`~zarrsmith.mosaic_manager.MosaicManager`; skipped tiles count): tiles of
+   separate fields are not fused, a
+   :class:`~zarrsmith.mosaic_manager.fields.MultipleFieldsError` is raised before
+   anything is read or written.
+
+
+.. py:function:: load_transforms(transforms) -> Dict
+
+   A transforms document from a JSON file (or the dict itself), checked.
+
+
+.. py:function:: plan_fusion(tiles: Sequence[zarrsmith.mosaic_manager.tile.Tile], *, ds: Sequence[int] = (1, 1, 1), projection: Optional[str] = None, blend: str = 'sigmoid', channels: Optional[Sequence[str]] = None, crop: Optional[dict] = None, skip: Optional[Sequence[zarrsmith.mosaic_manager.tile.Tile]] = None, out_dtype=None, midline_axis: Optional[str] = None, timepoints: Optional[Sequence[int]] = None, reference_timepoint: Union[int, str, None] = None) -> FusionPlan
+
+   Validate fusion arguments and compute the level-0 geometry (see :func:`fuse_tiles`).
+
+
+.. py:function:: transforms_document(plan: FusionPlan, tile_id: Optional[Callable[[zarrsmith.mosaic_manager.tile.Tile], str]] = None, source: Optional[str] = None) -> Dict
+
+   The transforms of a fusion plan, as a JSON-ready dict.
+
+   Positions are ``(z, y, x)`` in ``units``, in the frame of the tile origins (for
+   Luxendo, the stage frame). ``output`` is the fused grid: ``origin`` (position of output
+   voxel ``[0, 0, 0]``), ``voxel_size``, ``shape`` and the ``downsampling`` of the tiles.
+   ``tiles`` lists every fused tile at every fused timepoint:
+
+   * ``id`` (``tile_id(tile)``, default ``channel/stack[/camera]``) and ``timepoint``
+     identify it (see :meth:`MosaicManager.apply_transforms
+     <zarrsmith.mosaic_manager.MosaicManager.apply_transforms>`), ``channel``,
+     ``camera``, ``group``, ``stack``, ``field`` and ``path`` describe it;
+   * ``translation`` is the position of voxel ``[0, 0, 0]`` of the tile after its ``flip``
+     (``Tile.origin``), ``stage_translation`` the one given by the reader, and
+     ``method`` how ``translation`` was obtained (``"stage"``, or the method of a
+     transforms file that was applied);
+   * ``offset`` is the output voxel where the tile starts and ``placed_at`` the matching
+     position: with a reference timepoint, the tiles of every timepoint are placed where
+     their reference tile is;
+   * ``affine`` (4 x 4) maps a voxel index ``(z, y, x, 1)`` of the raw tile data to its
+     position as fused (``placed_at``, with the flips).
+
+
+.. py:function:: write_transforms(path: str | pathlib.Path, document: Dict) -> pathlib.Path
+
+   Write a :func:`transforms_document` to ``path`` (JSON); returns the path.
+
+
+.. py:class:: LuxendoMosaicManager(path, scan_workers: int = 16, progress: bool = True)
+
+   Bases: :py:obj:`zarrsmith.mosaic_manager.mosaic.MosaicManager`
+
+
+   Raw Luxendo tiles (``*.lux.h5`` + ``*.json``) of one acquisition, before any fusion.
+
+   Not to be confused with :class:`~zarrsmith.microscope_manager.LuxendoManager`, which
+   reads images already fused by the Luxendo software. This manager scans a raw
+   acquisition folder such as ``2026-10-14_103957`` (tiles live in
+   ``raw/<stack folder>/Cam_*.lux.h5``) and exposes every tile lazily:
+
+   * ``channel``: the dye, with the illumination side removed
+     (``autofluo-488-L`` and ``autofluo-488-R`` both give ``autofluo-488``), so
+     both halves of a sample end up in the same fused channel;
+   * ``group``: the illumination side, ``"L"`` or ``"R"`` (used by ``blend="sigmoid"`` and ``"midline"``);
+   * ``timepoint``: the JSON ``time_point``, or the order of the acquisitions of a
+     stack when the JSON has none;
+   * ``attrs``: ``stack``, ``stack_description``, ``grid`` (``(ix, iy)``),
+     ``channel_description`` and ``path``.
+
+   Tile positions come from ``affine_to_sample`` in the JSON (the tile is centred
+   on the stage translation in x/y; z is the plane position along the stacking
+   direction). A negative x or y scale in that affine (the mirror image of an
+   opposing camera) sets ``Tile.flip`` on that axis, so the tile is mirrored back
+   when it is fused. A last, rotation entry of the affine (the stage rotation) is
+   not applied: tiles are placed in the stage frame, which is the same for all the
+   tiles of one stack. If a stack was re-acquired (``*_R_<n>.lux.h5``) only the latest
+   retake is used. Tiles are :class:`~zarrsmith.mosaic_manager.H5Array` objects, so no
+   file stays open. Scanning reads only the JSON files (in parallel) and opens a
+   single ``.h5`` file, which keeps loading fast on network drives.
+
+   **MuVi SPIM** acquisitions (two opposing cameras, ``Cam_left``/``Cam_right``) also give:
+
+   * ``camera``: the JSON ``camera``. The cameras are fused as two views blended
+     along z, each one on the side it images sharply (``attrs["detection_direction"]``);
+   * ``field``: one field per stack, from the stack name (``0-x00-y00`` and
+     ``0-x01-y00`` are tiles of stack ``0``, i.e. ``field0``): MuVi experiments often
+     hold several samples, each imaged as its own stack, possibly at another stage
+     rotation, so fields are not guessed from which tiles touch.
+
+
+   .. py:attribute:: _GRID_SUFFIX
+
+
+   .. py:method:: _retake(h5: pathlib.Path) -> int
+      :staticmethod:
+
+
+      ``Cam_bottom_00000.lux.h5`` -> 0, ``Cam_bottom_00000_R_1.lux.h5`` -> 1.
+
+
+
+   .. py:method:: _scan() -> List[zarrsmith.mosaic_manager.tile.Tile]
+
+      Discover the tiles under :attr:`path` (lazy data, positions in the sample frame).
+
+
+
+   .. py:attribute:: scan_workers
+
+
+   .. py:attribute:: progress
+      :value: True
+
+
+
+   .. py:method:: _acquisitions(folder) -> List[pathlib.Path]
+      :classmethod:
+
+
+      The ``*.lux.h5`` acquisitions of a stack folder (those with a ``.json`` sibling).
+
+      Files sharing a base name are retakes (``*_R_<n>``) of one acquisition and
+      only the latest is kept. Different base names are separate acquisitions of
+      the same stack (e.g. timepoints); they are returned in name order.
+
+
+
+   .. py:method:: _read_info(h5: pathlib.Path) -> dict
+      :staticmethod:
+
+
+
+   .. py:method:: _shape(info: dict) -> tuple
+      :staticmethod:
+
+
+
+   .. py:method:: _tile_from(h5: pathlib.Path, info: Optional[dict] = None, dtype=None, default_timepoint: int = 0) -> zarrsmith.mosaic_manager.tile.Tile
+      :classmethod:
+
+
+      Tile of one ``.lux.h5`` file; the file is only opened when ``dtype`` is not given.
+
+      The timepoint is the JSON ``time_point``, or ``default_timepoint`` without one.
+
+
+
+.. py:class:: OperaFlatfield(mean: float, coefficients, dims=None, origin=None, scale=None)
+
+   Harmony's background flat-field correction of one channel (picklable).
+
+   Harmony describes the uneven background of a channel as a 2D polynomial ``P``,
+   normalised to a mean of 1, and its mean level ``Mean`` (``FlatfieldProfile`` of
+   the index, ``Background`` entry). It corrects every plane with::
+
+       raw >= Mean * P :  raw - Mean * (P - 1)    (above the background: remove its unevenness)
+       raw <  Mean * P :  raw / P                 (below it: rescale it to the flat level)
+
+   Both branches give ``Mean`` at ``raw = Mean * P``. This reproduces the images
+   stitched by Harmony to within rounding.
+
+   ``P(u, v) = sum_k sum_i c[k][i] * u**(k - i) * v**i``, with ``u = (x - Origin[0]) * Scale[0]``
+   along image columns and ``v = (y - Origin[1]) * Scale[1]`` along rows, in the
+   pixels of a ``Dims`` image (rescaled to the image size, e.g. for another binning).
+
+
+   .. py:attribute:: mean
+
+
+   .. py:attribute:: coefficients
+
+
+   .. py:attribute:: dims
+      :value: None
+
+
+
+   .. py:attribute:: origin
+      :value: None
+
+
+
+   .. py:attribute:: scale
+      :value: None
+
+
+
+   .. py:attribute:: _cache
+      :type:  Dict[Tuple[int, int], numpy.ndarray]
+
+
+   .. py:method:: from_profile(profile, channel: str = '') -> Optional[OperaFlatfield]
+      :classmethod:
+
+
+      Correction described by a ``FlatfieldProfile`` (text or parsed), or ``None``
+      when it leaves the images as they are (``Identity`` profile, ``Null`` character).
+
+
+
+   .. py:method:: profile(shape: Tuple[int, int]) -> numpy.ndarray
+
+      ``P`` for an image of ``shape`` (rows, columns), as float32.
+
+
+
+   .. py:method:: __call__(plane: numpy.ndarray) -> numpy.ndarray
+
+
+   .. py:method:: __getstate__()
+
+
+   .. py:method:: __repr__() -> str
+
+
+.. py:class:: OperaMosaicManager(path, flatfield: bool = True, progress: bool = True)
+
+   Bases: :py:obj:`zarrsmith.mosaic_manager.mosaic.MosaicManager`
+
+
+   Raw Opera Phenix / Operetta (Revvity Harmony) tiles, before any stitching.
+
+   Not to be confused with :class:`~zarrsmith.microscope_manager.OperaManager`, which
+   reads images stitched by Harmony (``stitchresult/*.ome.tiff``). This manager reads
+   a Harmony export: ``Images/Index.xml`` and one TIFF file per plane
+   (``r01c03f01p01-ch1sk1fk1fl1.tiff``: row 1, column 3, Opera field 1, plane 1, channel 1).
+   Every Opera field of every channel is one tile; its planes stay on disk until read.
+
+   * ``channel``: the ``ChannelName`` of the index;
+   * ``field``: tiles are grouped per well into fields of touching tiles, named
+     ``<well>_field<k>`` (``A3_field0``, ``A3_field1``, ...);
+   * ``timepoint``: ``TimepointID - 1``;
+   * ``attrs``: ``stack`` (``r01c03f01``, the tile id without the channel), ``well``,
+     ``row``, ``col``, ``opera_field``, ``channel_id``, ``flatfield`` and ``folder``.
+
+   Geometry, consistent with the images stitched by Harmony: the x/y pixel size is the
+   ``ImageResolution`` of the index scaled by the channel's ``OrientationMatrix``
+   (a calibration of a few percent, which Harmony applies to its stitched images),
+   tiles are centred on the field position, and stage ``y`` runs against image rows
+   when the matrix says so (negative ``y`` scale). Planes are placed at their
+   ``PositionZ``, without the matrix's ``z`` scale and offset.
+
+   Stage positions are relative to the centre of each well, so every well is shifted
+   to its place on the plate (A1 at the top left, ``y`` along rows, ``x`` along columns),
+   by the well pitch of the plate format (``PlateRows`` x ``PlateColumns``, see
+   :data:`WELL_PITCH`). The fused images do not depend on it.
+
+   With ``flatfield=True`` (default), every plane is corrected with the background
+   flat-field profile stored by Harmony (see :class:`OperaFlatfield`), as in the
+   Harmony stitched images. The profiles are read from the index, or from
+   ``FFC_Profile/*.xml`` next to ``Images/`` when the index has none.
+
+
+   .. py:attribute:: flatfield
+      :value: True
+
+
+
+   .. py:attribute:: progress
+      :value: True
+
+
+
+   .. py:attribute:: flatfields
+      :type:  Dict[str, Optional[OperaFlatfield]]
+
+
+   .. py:method:: find_index(path: str | pathlib.Path) -> Optional[pathlib.Path]
+      :staticmethod:
+
+
+      The Harmony index of an export folder, its ``Images`` folder or the index itself.
+
+
+
+   .. py:method:: _profiles(index: pathlib.Path, channels) -> Dict[int, str]
+
+      ``FlatfieldProfile`` text of every channel: from the index, else from ``FFC_Profile/``.
+
+
+
+   .. py:method:: _scan() -> List[zarrsmith.mosaic_manager.tile.Tile]
+
+      Discover the tiles under :attr:`path` (lazy data, positions in the sample frame).
+
+
+
+   .. py:method:: _label_wells(tiles: List[zarrsmith.mosaic_manager.tile.Tile]) -> None
+      :staticmethod:
+
+
+      Fields of touching tiles within each well: ``A3_field0``, ``A3_field1``, ...
+
+
+
+   .. py:method:: _well_pitch(plate: Optional[Tuple[int, int]], stacks, tile_um: float) -> float
+      :staticmethod:
+
+
+      Distance (um) between the centres of neighbouring wells.
+
+      The pitch of the plate format (:data:`WELL_PITCH`), widened when the fields of a
+      well (``tile_um`` wide tiles) would reach the next well; without a known format,
+      the widest well plus 10%.
+
+
+
+   .. py:method:: _channel_names(channels, used) -> Dict[int, str]
+      :staticmethod:
+
+
+
+   .. py:method:: _flips(settings) -> Tuple[float, float]
+      :staticmethod:
+
+
+      Signs of the ``y`` and ``x`` stage axes along image rows and columns.
+
+
+
+   .. py:method:: _pixel_sizes(channels, names) -> Tuple[float, float]
+      :staticmethod:
+
+
+      ``(y, x)`` pixel size in micrometres, calibrated by the ``OrientationMatrix``.
+
+
+
+   .. py:method:: _image_size(settings) -> Optional[Tuple[int, int]]
+      :staticmethod:
+
+
+
+   .. py:method:: _header(folder: pathlib.Path, name: str) -> Tuple[numpy.dtype, Tuple[int, int]]
+      :staticmethod:
+
+
+      Data type and ``(y, x)`` shape of the planes, from the header of one file.
+
+
+
+.. py:class:: ZeissMosaicManager(path, scene_index: Optional[int] = None)
+
+   Bases: :py:obj:`zarrsmith.mosaic_manager.mosaic.MosaicManager`
+
+
+   Raw Zeiss tiles of one ``.czi`` file (a ZEN tile scan), before any stitching.
+
+   Not to be confused with :class:`~zarrsmith.microscope_manager.ZeissManager`, which
+   reads one scene as a single image; a file without tiles, such as the output of
+   ZEN's *Stitching*, is read with it. Every tile (``M`` index) of every channel and
+   timepoint is one tile, and its planes stay on disk until read
+   (:class:`~zarrsmith.mosaic_manager.CziTileArray`).
+
+   * ``channel``: the channel name in the metadata (``AF488-T2``);
+   * ``field``: the scene: ``scene0_TR1``, ``scene1_P1``, ... with the tile regions and
+     positions of the ZEN experiment as ``TR1`` and ``P1``;
+   * ``timepoint``: the ``T`` index;
+   * ``attrs``: ``stack`` (``scene0_TR1-m00``, the tile id without the channel),
+     ``scene``, ``scene_name``, ``mosaic_index`` and ``path``.
+
+   Tiles are placed where the file says: ``y`` and ``x`` from the pixel coordinates
+   of the tile in the file (the stage position, rounded to a pixel), ``z`` from the
+   ``FocusPosition`` of its first plane. They are not registered, unlike the images
+   stitched by ZEN. Positions in the file change a little between timepoints: by
+   default a fusion uses those of one reference timepoint, as ZEN uses one offset for
+   all; ``reference_timepoint="all"`` uses those of every timepoint.
+
+
+   .. py:attribute:: scene_index
+      :value: None
+
+
+
+   .. py:method:: _scan() -> List[zarrsmith.mosaic_manager.tile.Tile]
+
+      Discover the tiles under :attr:`path` (lazy data, positions in the sample frame).
+
+
+
+   .. py:method:: _stacks(czi) -> Dict[Tuple, dict]
+      :staticmethod:
+
+
+      ``{(scene, m, t, c): {"coords": ..., "boxes": {z: box}}}``, from the directory of the file.
+
+
+
+   .. py:method:: _focus_positions(czi, z: int, c: int) -> Dict[Tuple, float]
+      :staticmethod:
+
+
+      ``{(scene, m, t): focus position (um)}`` of plane ``z`` of channel ``c`` (one read per tile).
+
+
+
+.. py:data:: MOSAIC_READERS
+   :type:  Dict[str, Type[zarrsmith.mosaic_manager.mosaic.MosaicManager]]
+
+.. py:exception:: WrongReaderError(message: str, detected: str)
+
+   Bases: :py:obj:`ValueError`
+
+
+   The acquisition was recorded by another microscope than the reader's (``detected``).
+
+
+   .. py:attribute:: detected
+
+
+.. py:function:: check_reader(reader: Type[zarrsmith.mosaic_manager.mosaic.MosaicManager], path: str | pathlib.Path) -> None
+
+   Raise :class:`WrongReaderError` when ``path`` is recognised as the acquisition of
+   another microscope than ``reader``'s (unrecognised folders pass).
+
+
+.. py:function:: detect_microscope(path: str | pathlib.Path) -> Optional[str]
+
+   Microscope of the acquisition at ``path``, from its layout, or ``None`` if not recognised.
+
+   * ``"zeiss"``: a ``.czi`` file;
+   * ``"opera"``: a Harmony export (``Images/Index.xml``), its ``Images`` folder or the index;
+   * ``"luxendo"``: ``*.lux.h5`` files in ``raw/<stack>/``, in ``<stack>/`` or in the folder.
+
+   Opera is checked first: it takes a few file checks, Luxendo lists folders (slow
+   for an Opera ``Images`` folder of thousands of files on a network drive).
+
+

@@ -1,0 +1,169 @@
+zarrsmith.utils.resample
+========================
+
+.. py:module:: zarrsmith.utils.resample
+
+.. autoapi-nested-parse::
+
+   Resample a dataset to a new pixel size.
+
+   Every output pixel ``i`` samples the input at ``i * factor``, with
+   ``factor = new pixel size / old pixel size``. The grid is global, so the result
+   does not depend on the chunking or on the batches, and index 0 stays in place:
+   this is the convention of the pyramid builder, and the output overlays the input
+   in a viewer.
+
+   :func:`resample_levels` is lazy and suits data that fit in one dask graph.
+   :func:`write_resampled` scales to large stores: it computes one batch at a time,
+   so the graph and the memory depend on the batch and not on the dataset.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   zarrsmith.utils.resample.MAX_BLOCKS_PER_BATCH
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   zarrsmith.utils.resample._resample_axis
+   zarrsmith.utils.resample._resample_block
+   zarrsmith.utils.resample._effective_factors
+   zarrsmith.utils.resample._output_shape
+   zarrsmith.utils.resample.resample_region
+   zarrsmith.utils.resample.resample_array
+   zarrsmith.utils.resample._normalize_target_scale
+   zarrsmith.utils.resample._is_label
+   zarrsmith.utils.resample._source_level
+   zarrsmith.utils.resample.resample_levels
+   zarrsmith.utils.resample._batches
+   zarrsmith.utils.resample._write_level
+   zarrsmith.utils.resample._fitted_array_kwargs
+   zarrsmith.utils.resample._set_level_scales
+   zarrsmith.utils.resample.write_resampled
+
+
+Module Contents
+---------------
+
+.. py:data:: MAX_BLOCKS_PER_BATCH
+   :value: 2048
+
+
+.. py:function:: _resample_axis(block, coords, width, axis, nearest)
+
+   Sample ``block`` along ``axis`` at the (fractional) positions ``coords``.
+
+   The triangular kernel spans ``width`` input pixels on each side: with a width
+   of 1 this is linear interpolation, and wider it averages all the input pixels
+   under a new one (anti-aliasing), computed only at the output positions.
+
+
+.. py:function:: _resample_block(block, plan, nearest, block_id)
+
+   Resample one chunk (with its overlap) axis by axis.
+
+
+.. py:function:: _effective_factors(factors: collections.abc.Mapping[int, float]) -> dict[int, float]
+
+   Drop the axes that do not change, so they are never read with an overlap.
+
+
+.. py:function:: _output_shape(shape: collections.abc.Sequence[int], factors: collections.abc.Mapping[int, float]) -> tuple[int, ...]
+
+   An axis of length ``n`` becomes ``ceil(n / factor)`` long, as in the pyramid builder.
+
+
+.. py:function:: resample_region(source: dask.array.Array, factors: collections.abc.Mapping[int, float], region: collections.abc.Sequence[slice], chunks: collections.abc.Sequence[int], *, nearest: bool = False) -> dask.array.Array
+
+   Lazily compute ``region`` of the output of resampling ``source``.
+
+   ``factors`` must come from :func:`_effective_factors`, and ``region`` holds one
+   slice per axis, in output pixels. Output blocks are multiples of ``chunks``
+   from the start of the region. Only the input under the region is read.
+
+
+.. py:function:: resample_array(arr: dask.array.Array, factors: collections.abc.Mapping[int, float], *, nearest: bool = False, chunks: collections.abc.Sequence[int] | None = None) -> dask.array.Array
+
+   Resample ``arr``, given ``{axis index: new pixel size / old pixel size}``.
+
+   Linear interpolation, anti-aliased on the axes that shrink, or nearest
+   neighbour with ``nearest=True``. Output chunks are ``chunks`` (default: those
+   of ``arr``), except when a small chunk cannot hold the overlap on its own.
+
+
+.. py:function:: _normalize_target_scale(target_scale, axes, base_scale) -> tuple[float, ...]
+
+   Return the target pixel size per spatial axis; a dict may omit axes to keep them.
+
+
+.. py:function:: _is_label(metadata: dict[str, Any]) -> bool
+
+.. py:function:: _source_level(scales, target, *, use_pyramid: bool) -> int
+
+   The coarsest level at least as fine as ``target`` on every axis, or level 0.
+
+   Pyramid levels are usually built by skipping pixels, so an image read from one
+   keeps its aliasing: only labels, or a request for speed, should use them.
+
+
+.. py:function:: resample_levels(data: collections.abc.Sequence[dask.array.Array], metadata: dict[str, Any], target_scale: float | collections.abc.Sequence[float] | collections.abc.Mapping[str, float], *, fast: bool = False) -> tuple[list[dask.array.Array], dict[str, Any]]
+
+   Lazily resample a dataset to ``target_scale`` and rebuild its pyramid.
+
+   ``target_scale`` is the new pixel size in the units of the dataset: one value,
+   one per spatial axis, or a dict such as ``{"z": 1.0}`` (omitted axes are kept).
+
+   Labels use nearest neighbour and images linear interpolation. Images are read
+   from level 0 unless ``fast``, which reads the coarsest level still fine enough:
+   much less data, but it keeps the aliasing of that level. Labels always do this.
+   The number of levels is preserved.
+
+
+.. py:function:: _batches(shape: collections.abc.Sequence[int], block: collections.abc.Sequence[int], max_pixels: float) -> collections.abc.Iterator[tuple[slice, ...]]
+
+   Split an output array into regions of at most ``max_pixels``, computed in turn.
+
+   Regions stay as large as allowed, because only the blocks of one region run in
+   parallel: axes are split in array order (usually ``t`` first) and only as far
+   as needed. Regions are whole blocks, so two of them never share a shard.
+
+
+.. py:function:: _write_level(source, dst, factors, *, nearest, cfg, desc) -> None
+
+   Resample ``source`` into the array ``dst``, one batch at a time.
+
+
+.. py:function:: _fitted_array_kwargs(src: zarr.Array, shape: collections.abc.Sequence[int]) -> dict[str, Any]
+
+   ``create_array`` keywords of ``src``, with chunks and shards fitted to ``shape``.
+
+   Zarr stores every chunk in full, so a chunk reaching past the end of the array
+   stores padding, which takes real space when uncompressed. Chunks therefore divide
+   each axis evenly, and neither they nor the shards outgrow the input's or the array.
+
+
+.. py:function:: _set_level_scales(group: zarr.Group, scales, axes) -> None
+
+   Write the pixel size of every level in the NGFF metadata copied from the input.
+
+
+.. py:function:: write_resampled(source_root: zarr.Group, datasets: collections.abc.Sequence[tuple[str, Any]], path: str | pathlib.Path, target_scale: float | collections.abc.Sequence[float] | collections.abc.Mapping[str, float], *, fast: bool = False, overwrite: bool = False, num_workers: int | None = None, progress: bool = True) -> zarr.Group
+
+   Write a copy of an OME-Zarr store with a new pixel size.
+
+   ``datasets`` are ``(name, dataset)`` pairs as yielded by
+   ``ZarrManager._iter_datasets``. Every array copies the codecs and attributes of
+   its source, with chunks and shards fitted to its new shape (see
+   :func:`_fitted_array_kwargs`), and every group its attributes. Level 0 is
+   resampled first (see :func:`resample_levels` for ``target_scale`` and ``fast``)
+   and every other level is built from the level below it, read back from the
+   output, keeping the downscale factors of the input.
+
+
