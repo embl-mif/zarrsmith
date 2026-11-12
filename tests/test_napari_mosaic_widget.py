@@ -551,3 +551,72 @@ def test_batch_row_flatfield():
     assert mw.batch_row(microscope="opera", flatfield=False, **common)["flatfield"] == "false"
     assert mw.batch_row(microscope="opera", flatfield=True, **common)["flatfield"] == "true"
     assert "flatfield" in mw.MOSAIC_BATCH_COLUMNS
+
+
+def test_widget_with_two_cameras(app, tmp_path, monkeypatch):
+    """MuVi SPIM: cameras are offered, the tile map has one rectangle per stack, the
+    transforms are written (or only written) and a transforms file places the tiles."""
+    import json
+
+    import pandas as pd
+    from napari.components import ViewerModel
+
+    from zarrsmith.mosaic_manager import LuxendoMosaicManager, load_transforms
+
+    from .test_muvi_fusion import _muvi
+
+    viewer = ViewerModel()
+    monkeypatch.setattr(mw, "current_viewer", lambda: viewer)
+    acq = _muvi(tmp_path)
+    m = LuxendoMosaicManager(acq, progress=False)
+    dock = mw.mosaic_widget()
+    dock.state["mosaic"] = m
+    dock.populate(m, acq)
+    fw = dock.fuse_widget
+    assert mw.camera_labels(m) == ["left", "right"]
+    assert list(fw.cameras.value) == ["left", "right"] and not fw.cameras.native.isHidden()
+    tile_map = mw.find_tile_map(viewer.layers, m.path)
+    assert sorted(tile_map.features["stack"]) == ["0-x00-y00", "0-x01-y00", "1"]  # not one per camera
+    fw.ds_z.value, fw.ds_y.value, fw.ds_x.value = 1, 1, 1
+    assert "2 cameras (blended along z, right -> left)" in dock.plan_label.text()
+    fw.cameras.value = ["left"]
+    assert "cameras" not in dock.plan_label.text()
+    fw.cameras.value = ["left", "right"]
+
+    out = tmp_path / "w.ome.zarr"
+    fw.output_path.value = out
+    fw.transforms_only.value = True
+    fw()  # writes the transforms, fuses nothing
+    transforms = tmp_path / "w.transforms.json"
+    assert transforms.is_file() and not out.exists()
+    doc = load_transforms(transforms)
+    assert {e["id"] for e in doc["tiles"]} >= {"DAPI/0-x00-y00/left", "DAPI/0-x00-y00/right"}
+
+    # a transforms file moves the tiles, clearing it puts them back
+    moved = next(e for e in doc["tiles"] if e["id"] == "DAPI/0-x01-y00/right")
+    moved["translation"][1] += 1.0
+    edited = tmp_path / "edited.transforms.json"
+    edited.write_text(json.dumps(doc))
+    fw.transforms_file.value = edited
+    tile = m.tiles_by_ids(["DAPI/0-x01-y00/right"])[0]
+    assert tile.attrs.get("transform_method") == "stage" and dock.state["transforms"] == edited
+    fw.transforms_file.value = Path()
+    assert "transform_method" not in tile.attrs and dock.state["transforms"] is None
+
+    fw.transforms_file.value = edited
+    fw.cameras.value = ["right"]
+    csv = tmp_path / "b.csv"
+    dock.batch_widget.batch_csv_path.value = csv
+    dock.batch_widget()
+    row = pd.read_csv(csv, dtype=str).fillna("").iloc[0]
+    assert row["cameras"] == "right" and row["transforms"] == str(edited) and row["transforms_only"] == "true"
+
+
+def test_batch_row_cameras_and_transforms(tmp_path):
+    values = {"channels": ["A"], "groups": ["(none)"], "cameras": ["left", "right"], "projection": "none (3D)",
+              "blend": "sigmoid", "ds_z": 1, "ds_y": 1, "ds_x": 1, "levels": 1, "workers": 1,
+              "overwrite": False, "transforms": Path(), "transforms_only": False}
+    row = mw.batch_row(input_path="acq", microscope="luxendo", output="o.zarr", values=values,
+                       all_groups=["(none)"], skip_ids=[], all_cameras=["left", "right"])
+    assert row["cameras"] == "" and row["transforms"] == "" and row["transforms_only"] == ""
+    assert mw.transforms_choice(Path()) is None and mw.transforms_choice(tmp_path / "missing.json") is None

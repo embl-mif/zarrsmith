@@ -384,6 +384,8 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
                              '(the switch takes the central ~27%% of the overlap).')
     parser.add_argument('-ch', '--channels', nargs='+', help='Tile channels to fuse, in output order. Default: all.')
     parser.add_argument('-g', '--groups', nargs='+', help='Tile groups to fuse (e.g. L R). Default: all.')
+    parser.add_argument('-cam', '--cameras', nargs='+',
+                        help='Cameras to fuse (MuVi SPIM: left right). Default: all, blended into one image.')
     parser.add_argument(
         '-f', '--fields', nargs='+',
         help='Field to fuse (the output fits it): fields are groups of touching tiles, named field0, field1, '
@@ -411,8 +413,19 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
              'timepoint is fused with it. It need not be among --timepoints. "all" places every timepoint '
              'at its own stage positions instead. Default: the first timepoint.',
     )
-    parser.add_argument('-ma', '--midline_axis', choices=['x', 'y', 'z'], default='x',
-                        help='Axis along which blend=midline/sigmoid separates the groups.')
+    parser.add_argument('-ma', '--midline_axis', choices=['x', 'y', 'z'],
+                        help='Axis along which blend=midline/sigmoid separates the groups (or the cameras). '
+                             'Default: z for the opposing cameras of a MuVi SPIM, x otherwise.')
+    parser.add_argument(
+        '-tf', '--transforms',
+        help='Transforms JSON (written by an earlier fuse, possibly edited) giving the tile positions to use '
+             'instead of the stage positions. Tiles not listed keep their stage positions.',
+    )
+    parser.add_argument(
+        '-tfo', '--transforms_only', action='store_true',
+        help='Only compute the transforms and write them (next to the output, <output>.transforms.json): '
+             'nothing is fused. Every fuse writes this file before fusing.',
+    )
     parser.add_argument('-od', '--out_dtype', help='Output dtype, e.g. uint16 or float32. Default: input dtype '
                         '(float32 for blend=sum).')
     parser.add_argument('-rw', '--read_workers', type=int, default=4,
@@ -496,14 +509,23 @@ FUSE_HELP = """\
     reference timepoint (-rtp, default: the first) and every timepoint is fused with it; -rtp all places
     every timepoint at its own stage positions instead. -tp selects the timepoints to fuse.
 
+    MuVi SPIM acquisitions (two opposing cameras) get one field per stack (sample): field0 for stack 0
+    (0-x00-y00, 0-x01-y00, ...). The two camera views are fused into one image: the right one is
+    mirrored back, and they are blended along z, each camera on the side it images sharply. Tile ids
+    then end with the camera (DAPI/0-x00-y00/right); DAPI/0-x00-y00 still names both cameras.
+
+    Before fusing, the position of every tile at every timepoint is written to
+    <output>.transforms.json (fused.ome.zarr -> fused.transforms.json). -tfo only writes this file;
+    -tf FILE fuses with the positions of such a file instead of the stage positions.
+
     The --batch CSV file has the columns input | microscope | output, plus any of the output columns of
     `zarrsmith convert --batch` (chunk_size | max_size(MB) | zarr_format | downscale_factor | subset | channel_colors |
     channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | compressor | compressor_level |
     drop_singleton | num_workers | overwrite)
     and of the fusion columns
-    downsample | projection | blend | sigmoid_steepness | channels | groups | fields | tiles | skip_tiles | timepoints |
-    reference_timepoint | midline_axis | out_dtype | read_workers | temp_dir |
-    flatfield (true/false, Opera only, default true), e.g.
+    downsample | projection | blend | sigmoid_steepness | channels | groups | cameras | fields | tiles | skip_tiles | timepoints |
+    reference_timepoint | midline_axis | out_dtype | read_workers | temp_dir | transforms |
+    transforms_only (true/false) | flatfield (true/false, Opera only, default true), e.g.
       input                  | microscope | output                 | downsample | projection | blend   | num_levels
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_3D.zarr  | 4 8 8      | none       | sigmoid | 3
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_MIP.zarr | 1 8 8      | max        | midline |

@@ -42,8 +42,9 @@ _CLICK_TOLERANCE = 4
 #: Columns of the CSV read by ``zarrsmith fuse --batch``.
 MOSAIC_BATCH_COLUMNS = [
     "input", "microscope", "output",
-    "downsample", "projection", "blend", "channels", "groups", "fields", "tiles", "skip_tiles",
+    "downsample", "projection", "blend", "channels", "groups", "cameras", "fields", "tiles", "skip_tiles",
     "timepoints", "reference_timepoint", "midline_axis", "out_dtype", "read_workers", "temp_dir", "overwrite", "flatfield",
+    "transforms", "transforms_only",
     "chunk_size", "max_size(MB)", "scene_index", "zarr_format", "downscale_factor", "subset",
     "channel_colors", "channel_names", "num_levels", "shards", "shard_target_mb", "shard_exclude_axes",
     "drop_singleton", "num_workers",
@@ -58,16 +59,33 @@ def group_labels(mosaic) -> list[str]:
     return [NO_GROUP if g is None else str(g) for g in mosaic.groups]
 
 
-def select_tiles(mosaic, channels: Sequence[str], groups: Sequence[str], fields: Optional[Sequence[str]] = None):
-    """Tiles whose channel is in ``channels``, group label in ``groups`` and field in
-    ``fields`` (``None``: any field)."""
+def camera_labels(mosaic) -> list[str]:
+    """Camera names of a mosaic as shown in the widget (empty with fewer than two cameras)."""
+    cameras = [c for c in mosaic.cameras if c is not None]
+    return [str(c) for c in cameras] if len(cameras) > 1 else []
+
+
+def select_tiles(mosaic, channels: Sequence[str], groups: Sequence[str], fields: Optional[Sequence[str]] = None,
+                 cameras: Optional[Sequence[str]] = None):
+    """Tiles whose channel is in ``channels``, group label in ``groups``, field in
+    ``fields`` and camera in ``cameras`` (``None``: any field, any camera)."""
     channels, groups = set(channels), set(groups)
     fields = None if fields is None else set(fields)
+    cameras = None if cameras is None or not camera_labels(mosaic) else set(cameras)
     return [
         t for t in mosaic.tiles
         if t.channel in channels and (NO_GROUP if t.group is None else str(t.group)) in groups
         and (fields is None or t.field in fields)
+        and (cameras is None or str(t.camera) in cameras)
     ]
+
+
+def transforms_choice(path) -> Optional[Path]:
+    """The transforms file chosen in the widget, or ``None`` when the field holds no ``.json`` file."""
+    if path is None or str(path) in ("", "."):
+        return None
+    path = Path(path)
+    return path if path.suffix.lower() == ".json" and path.is_file() else None
 
 
 def field_summary(mosaic) -> str:
@@ -173,8 +191,8 @@ def skipped_tile_ids(layers, selection, mosaic_path, mode: Optional[str], all_ch
 
 
 def stack_id(mosaic, tile) -> str:
-    """Stack position of a tile, shared by all its channels (the ``<stack>`` of its tile id)."""
-    return mosaic.tile_id(tile).split("/", 1)[1]
+    """Stack position of a tile, shared by all its channels and cameras (the ``<stack>`` of its tile id)."""
+    return mosaic.tile_id(tile).split("/")[1]
 
 
 def tile_footprints(mosaic) -> dict:
@@ -345,7 +363,8 @@ def picked_tiles(mosaic, tiles, picked: Optional[Sequence[str]]):
 def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: Sequence[str],
               skip_ids: Sequence[str], picked: Optional[Sequence[str]] = None,
               all_stacks: Sequence[str] = (), all_fields: Sequence[str] = (),
-              flatfield: Optional[bool] = None, all_timepoints: Sequence[int] = ()) -> dict:
+              flatfield: Optional[bool] = None, all_timepoints: Sequence[int] = (),
+              all_cameras: Sequence[str] = ()) -> dict:
     """One ``zarrsmith fuse --batch`` CSV row from the fusion widget ``values``.
 
     ``picked`` are the stack ids picked on the tile map (``None``: all); the ``tiles``
@@ -354,12 +373,16 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
     field (``all_fields``); otherwise it names the fields, since an empty cell means
     the first field. ``flatfield`` is the reader's flat-field option (``None``: the
     reader has none, and the column stays empty). The ``timepoints`` column stays empty
-    (every timepoint) when ``values["timepoints"]`` is missing or covers ``all_timepoints``.
+    (every timepoint) when ``values["timepoints"]`` is missing or covers ``all_timepoints``;
+    likewise ``cameras`` with ``all_cameras``. ``transforms`` (a file, or ``None``) and
+    ``transforms_only`` are the transforms options.
     """
     groups = list(values["groups"])
     fields = list(values.get("fields") or ())
     timepoints = list(values.get("timepoints") or ())
+    cameras = list(values.get("cameras") or ())
     reference = values.get("reference_timepoint")
+    transforms = transforms_choice(values.get("transforms"))
     return {
         "input": str(Path(input_path)),
         "microscope": microscope,
@@ -379,6 +402,9 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
         "read_workers": str(values["workers"]),
         "overwrite": str(bool(values["overwrite"])).lower(),
         "flatfield": "" if flatfield is None else str(bool(flatfield)).lower(),
+        "cameras": "" if not cameras or set(cameras) >= set(all_cameras) else " ".join(cameras),
+        "transforms": "" if transforms is None else str(transforms),
+        "transforms_only": "true" if values.get("transforms_only") else "",
     }
 
 
@@ -559,7 +585,12 @@ def mosaic_widget():
         fuse_widget.reference_timepoint.choices = list(timepoints) + [ALL_TIMEPOINTS]
         fuse_widget.reference_timepoint.value = timepoints[0]
         fuse_widget.timepoints.visible = fuse_widget.reference_timepoint.visible = len(timepoints) > 1
+        cameras = camera_labels(mosaic)
+        state["transforms"] = None  # new tiles, at their stage positions
         for w in (show_widget, fuse_widget):
+            w.cameras.choices = cameras
+            w.cameras.value = cameras
+            w.cameras.visible = bool(cameras)
             w.channels.choices = channels
             w.groups.choices = groups
             w.groups.value = groups
@@ -570,6 +601,9 @@ def mosaic_widget():
         fuse_widget.blend.value = "sigmoid"  # smooth between tiles and between groups
         lo, hi = mosaic.bounding_box()
         print(f"{len(mosaic.tiles)} tiles, channels {channels}, groups {groups}, fields {fields}")
+        if cameras:
+            print(f"{len(cameras)} cameras {cameras}: fused into one image, blended along z (the right view "
+                  "mirrored back); pick cameras to fuse only some of them.")
         if len(timepoints) > 1:
             print(f"{len(timepoints)} timepoints: {timepoints}. Shown tiles have a time slider, starting on "
                   f"timepoint {timepoints[0]}; every timepoint is fused with the geometry of the reference timepoint.")
@@ -595,18 +629,27 @@ def mosaic_widget():
         call_button="Show tiles in napari",
         channels={"widget_type": "Select", "choices": [], "allow_multiple": True},
         groups={"widget_type": "Select", "choices": [], "allow_multiple": True},
+        cameras={"widget_type": "Select", "choices": [], "allow_multiple": True,
+                 "tooltip": "Cameras (opposing views of a MuVi SPIM)."},
         fields={"widget_type": "Select", "choices": [], "allow_multiple": True,
                 "tooltip": "Fields: groups of touching tiles (field0, field1, ... by position)."},
         clear_layers={"label": "Remove existing layers", "widget_type": "CheckBox", "value": True,
                       "tooltip": "Remove the layers shown before (the tile map stays)."},
     )
-    def show_widget(channels=(), groups=(), fields=(), clear_layers=True):
+    def show_widget(channels=(), groups=(), cameras=(), fields=(), clear_layers=True):
         mosaic = state["mosaic"]
-        tiles = picked_tiles(mosaic, select_tiles(mosaic, channels, groups, fields), _picked())
-        if not tiles:
-            print("No picked tile matches the selected channels, groups and fields.")
-            return
         _capture()
+        try:
+            _sync_transforms()
+        except (OSError, ValueError, KeyError) as e:
+            print(f"Cannot use the transforms file: {e}")
+            _release()
+            return
+        tiles = picked_tiles(mosaic, select_tiles(mosaic, channels, groups, fields, cameras), _picked())
+        if not tiles:
+            print("No picked tile matches the selected channels, groups, cameras and fields.")
+            _release()
+            return
         try:
             limits = shown_contrast_limits(viewer.layers, mosaic)  # keep the contrast set by hand
             if clear_layers:
@@ -636,6 +679,9 @@ def mosaic_widget():
         call_button="Fuse to OME-Zarr",
         channels={"widget_type": "Select", "choices": [], "allow_multiple": True},
         groups={"widget_type": "Select", "choices": [], "allow_multiple": True},
+        cameras={"widget_type": "Select", "choices": [], "allow_multiple": True,
+                 "tooltip": "Cameras to fuse. The opposing views of a MuVi SPIM are blended along z, each "
+                            "camera on the side it images sharply."},
         fields={"widget_type": "Select", "choices": [], "allow_multiple": True,
                 "tooltip": "Field to fuse: fields are groups of touching tiles. Fields are fused one at a "
                            "time; tiles from several fields are not fused."},
@@ -658,12 +704,21 @@ def mosaic_widget():
         levels={"label": "Resolution levels", "min": 1, "max": 10, "value": 3},
         workers={"label": "Workers", "min": 1, "max": 64, "value": 4},
         overwrite={"label": "Overwrite output", "widget_type": "CheckBox", "value": False},
+        transforms_file={"widget_type": "FileEdit", "mode": "r", "label": "Transforms (optional)",
+                         "filter": "*.json",
+                         "tooltip": "A .transforms.json written by an earlier fusion (possibly edited): the tiles "
+                                    "are placed with its positions instead of the stage positions. Leave empty "
+                                    "for the stage positions."},
+        transforms_only={"label": "Only write transforms", "widget_type": "CheckBox", "value": False,
+                         "tooltip": "Write <output>.transforms.json (the position of every tile) and stop. "
+                                    "Every fusion writes this file before fusing."},
         open_result={"label": "Open result when done", "widget_type": "CheckBox", "value": True},
         output_path={"widget_type": "FileEdit", "mode": "d", "label": "Output .ome.zarr"},
     )
     def fuse_widget(
         channels=(),
         groups=(),
+        cameras=(),
         fields=(),
         timepoints=(),
         reference_timepoint=None,
@@ -677,17 +732,25 @@ def mosaic_widget():
         levels=3,
         workers=4,
         overwrite=False,
+        transforms_file: Path = Path(),
+        transforms_only=False,
         open_result=True,
         output_path: Path = Path(),
     ):
         mosaic = state["mosaic"]
-        tiles = picked_tiles(mosaic, select_tiles(mosaic, channels, groups, fields), _picked())
+        try:
+            _sync_transforms()
+        except (OSError, ValueError, KeyError) as e:
+            print(f"Cannot use the transforms file: {e}")
+            return
+        tiles = picked_tiles(mosaic, select_tiles(mosaic, channels, groups, fields, cameras), _picked())
         kwargs = fuse_kwargs(channels=channels, projection=projection, blend=blend, ds_z=ds_z,
                              ds_y=ds_y, ds_x=ds_x, levels=levels,
                              workers=workers, overwrite=overwrite)
         skip = _skipped_tiles()
         kwargs["skip"] = skip
         kwargs.update(_time_options())
+        kwargs.update(tile_id=mosaic.tile_id, source=str(mosaic.path))
         try:
             plan = mos.plan_fusion(tiles, **{k: kwargs[k] for k in ("channels", "projection", "blend", "ds", "skip")},
                                    **_time_options())
@@ -701,6 +764,17 @@ def mosaic_widget():
             return
         out = Path(output_path)
         _capture()
+        if transforms_only:
+            try:
+                path = mos.write_transforms(mos.default_transforms_path(out),
+                                            mos.transforms_document(plan, tile_id=mosaic.tile_id,
+                                                                    source=str(mosaic.path)))
+                print(f"Transforms of {len(plan.tiles)} tiles written to {path} (nothing fused).")
+            except OSError as e:
+                print(f"Could not write the transforms: {e}")
+            finally:
+                _release()
+            return
         if not output_allowed(out, overwrite=overwrite, sources=[state["input_path"]]):
             _release()
             return
@@ -742,8 +816,9 @@ def mosaic_widget():
             return None
         v = {name: getattr(fuse_widget, name).value for name in
              ("channels", "projection", "blend", "ds_z", "ds_y", "ds_x")}
+        _sync_transforms()
         tiles = picked_tiles(mosaic, select_tiles(mosaic, v["channels"], fuse_widget.groups.value,
-                                                  fuse_widget.fields.value), _picked())
+                                                  fuse_widget.fields.value, fuse_widget.cameras.value), _picked())
         return mos.plan_fusion(
             tiles,
             ds=(v["ds_z"], v["ds_y"], v["ds_x"]),
@@ -753,6 +828,20 @@ def mosaic_widget():
             skip=_skipped_tiles(),
             **_time_options(),
         )
+
+    def _sync_transforms() -> None:
+        """Place the tiles with the chosen transforms file, or back at their stage positions
+        when it is cleared (only when the choice changed)."""
+        mosaic = state["mosaic"]
+        choice = transforms_choice(fuse_widget.transforms_file.value)
+        if mosaic is None or choice == state.get("transforms"):
+            return
+        mosaic.reset_transforms()
+        state["transforms"] = None
+        if choice is not None:
+            doc = mosaic.apply_transforms(choice)
+            state["transforms"] = choice
+            print(f"Tiles placed with {choice.name} ({doc.get('method')}, {len(doc['tiles'])} tile(s)).")
 
     def _time_options() -> dict:
         """Timepoint options of the fusion (none for a mosaic with a single timepoint)."""
@@ -775,7 +864,7 @@ def mosaic_widget():
     def _update_plan(*_):
         try:
             plan = _current_plan()
-        except ValueError as e:
+        except (ValueError, KeyError, OSError) as e:
             plan_label.setText(f"Output: {e}")
             return
         if plan is not None:
@@ -794,8 +883,8 @@ def mosaic_widget():
             fuse_widget.output_path.value = new
             state["auto_output"] = new
 
-    for name in ("channels", "groups", "fields", "timepoints", "reference_timepoint", "tiles_to_fuse",
-                 "skip_all_channels", "projection", "blend", "ds_z", "ds_y", "ds_x"):
+    for name in ("channels", "groups", "cameras", "fields", "timepoints", "reference_timepoint", "tiles_to_fuse",
+                 "skip_all_channels", "projection", "blend", "ds_z", "ds_y", "ds_x", "transforms_file"):
         getattr(fuse_widget, name).changed.connect(_update_plan)
     if viewer is not None:
         viewer.layers.selection.events.changed.connect(_update_plan)
@@ -810,12 +899,13 @@ def mosaic_widget():
     def batch_widget(batch_csv_path: Path = Path("mosaic_batch.csv")):
         mosaic = state["mosaic"]
         values = {name: getattr(fuse_widget, name).value for name in
-                  ("channels", "groups", "fields", "projection", "blend", "ds_z", "ds_y", "ds_x",
-                   "levels", "workers", "overwrite")}
+                  ("channels", "groups", "cameras", "fields", "projection", "blend", "ds_z", "ds_y", "ds_x",
+                   "levels", "workers", "overwrite", "transforms_only")}
+        values["transforms"] = fuse_widget.transforms_file.value
         values.update(_time_options())
         try:
             plan = _current_plan()
-        except ValueError:
+        except (ValueError, KeyError, OSError):
             plan = None  # e.g. no tile picked: zarrsmith fuse reports it when the row runs
         if plan is not None and plan.error:
             _capture()
@@ -827,7 +917,8 @@ def mosaic_widget():
                         output=fuse_widget.output_path.value, values=values,
                         all_groups=group_labels(mosaic), skip_ids=skip_ids, picked=_picked(),
                         all_stacks={stack_id(mosaic, t) for t in mosaic.tiles}, all_fields=mosaic.fields,
-                        flatfield=state.get("flatfield"), all_timepoints=mosaic.timepoints)
+                        flatfield=state.get("flatfield"), all_timepoints=mosaic.timepoints,
+                        all_cameras=camera_labels(mosaic))
         _capture()  # print into this widget's log, not wherever sys.stdout points
         try:
             if not output_allowed(row["output"], overwrite=values["overwrite"], sources=[state["input_path"]]):
@@ -853,6 +944,8 @@ def mosaic_widget():
     for w in (show_widget, fuse_widget):
         w.channels.native.setMaximumHeight(64)
         w.groups.native.setMaximumHeight(48)
+        w.cameras.native.setMaximumHeight(48)
+        w.cameras.visible = False  # until a mosaic with several cameras is loaded
         w.fields.native.setMaximumHeight(48)
         w.native.layout().setSpacing(2)
         w.native.layout().setContentsMargins(0, 0, 0, 0)
