@@ -185,5 +185,5 @@ def test_cli_transforms_only_then_fuse_with_them(tmp_path, capsys):
     assert {e["camera"] for e in doc["tiles"]} == {"left", "right"}
     cli_main(["fuse", "-i", str(acq), "-z", str(out), "-f", "field1", "-tf", str(transforms), "-cam", "left"])
     zm = ZarrManager(str(out), mode="r")
-    assert zm.metadata["channel_names"] == ["DAPI", "GFP"]
+    assert zm.metadata["channel_names"] == ["GFP", "DAPI"]  # folder order
     assert {e["camera"] for e in load_transforms(transforms)["tiles"]} == {"left"}  # rewritten for this fusion
