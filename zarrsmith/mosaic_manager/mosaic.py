@@ -189,8 +189,15 @@ class MosaicManager(ABC):
             out.append(t)
         return out
 
+    @property
+    def cameras(self) -> List[Optional[str]]:
+        """Camera names in order of first appearance (``[None]`` without cameras)."""
+        return list(dict.fromkeys(t.camera for t in self.tiles))
+
     def tile_id(self, tile: Tile) -> str:
-        """Stable name of a tile, ``"<channel>/<stack>"`` (e.g. ``"cFos-647/1-x00-y00"``).
+        """Stable name of a tile, ``"<channel>/<stack>"`` (e.g. ``"cFos-647/1-x00-y00"``),
+        or ``"<channel>/<stack>/<camera>"`` (``"DAPI/0-x00-y00/right"``) when the mosaic
+        has several cameras.
 
         ``<stack>`` is the reader's stack name (``attrs["stack"]``) or, without
         one, the index of the earliest tile at that position. The tiles of a position
@@ -200,17 +207,25 @@ class MosaicManager(ABC):
         key = tile.attrs.get("stack")
         if key is None:
             key = first_of_series(self.tiles)[self.tiles.index(tile)]
+        if tile.camera is not None and len(self.cameras) > 1:
+            return f"{tile.channel}/{key}/{tile.camera}"
         return f"{tile.channel}/{key}"
 
     def tiles_by_ids(self, ids: Sequence[str]) -> List[Tile]:
-        """Tiles named by ``ids``: ``"<channel>/<stack>"`` for one tile (at every timepoint),
-        or ``"<stack>"`` for that stack position in every channel. Unknown ids raise ``KeyError``."""
+        """Tiles named by ``ids``: a full :meth:`tile_id` for one tile (at every timepoint),
+        ``"<stack>"`` for that stack position in every channel, and with several cameras
+        also ``"<channel>/<stack>"`` (every camera) or ``"<stack>/<camera>"`` (every
+        channel). Unknown ids raise ``KeyError``."""
         by_id: Dict[str, List[Tile]] = {}
         by_stack: Dict[str, List[Tile]] = {}
         for t in self.tiles:
             tid = self.tile_id(t)
+            parts = tid.split("/")
             by_id.setdefault(tid, []).append(t)
-            by_stack.setdefault(tid.split("/", 1)[1], []).append(t)
+            by_stack.setdefault(parts[1], []).append(t)
+            if len(parts) > 2:  # channel/stack (every camera) and stack/camera (every channel)
+                by_id.setdefault("/".join(parts[:2]), []).append(t)
+                by_stack.setdefault("/".join(parts[1:]), []).append(t)
         out: List[Tile] = []
         unknown = []
         for i in ids:
@@ -248,10 +263,16 @@ class MosaicManager(ABC):
 
     @staticmethod
     def _lazy(t: Tile) -> da.Array:
+        """The tile's data as a dask array, flipped along the axes of ``Tile.flip``."""
         z, y, x = t.shape
         if isinstance(t.data, PlaneStackArray):  # stored per plane: read whole planes, one at a time
-            return da.from_array(t.data, chunks=(1, y, x))
-        return da.from_array(t.data, chunks=(min(16, z), min(1024, y), min(1024, x)))
+            arr = da.from_array(t.data, chunks=(1, y, x))
+        else:
+            arr = da.from_array(t.data, chunks=(min(16, z), min(1024, y), min(1024, x)))
+        for axis, flipped in enumerate(t.flip):
+            if flipped:
+                arr = da.flip(arr, axis)
+        return arr
 
     @classmethod
     def _lazy_series(cls, series: Dict[int, Tile], timepoints: Sequence[int]
@@ -395,9 +416,10 @@ class MosaicManager(ABC):
             label = t.attrs.get("stack") or i
             # added hidden: napari would read a plane at z = 0 (on creation) before the
             # one at the current z (on insertion); a hidden layer is read once, when shown
+            camera = t.camera if t.camera is not None and len(self.cameras) > 1 else ""
             layer = viewer.add_image(
                 data,
-                name=f"{t.channel} {t.group or ''} [{label}]".replace("  ", " ")
+                name=f"{t.channel} {t.group or ''} {camera} [{label}]".replace("   ", " ").replace("  ", " ")
                 + (f" {t.field}" if len(self.fields) > 1 else ""),
                 scale=((1.0,) if over_time else ()) + t.voxel_size,
                 translate=((0.0,) if over_time else ()) + origin,
@@ -496,7 +518,50 @@ class MosaicManager(ABC):
         use = self.fusion_tiles(tiles, field)
         if skip:
             skip = self._resolve_tiles(skip)
+        kwargs.setdefault("tile_id", self.tile_id)
+        kwargs.setdefault("source", str(self.path))
         return fuse_tiles(use, out, skip=skip, **kwargs)
+
+    def apply_transforms(self, transforms) -> Dict[str, Any]:
+        """Place the tiles with the positions of a transforms file instead of the stage positions.
+
+        ``transforms`` is a path to a JSON file written by a fusion (see
+        :func:`~zarrsmith.mosaic_manager.fusion.transforms_document`) or that document as a
+        dict. Every listed tile (matched by :meth:`tile_id` and timepoint) gets the listed
+        ``translation`` as its ``origin`` and the listed ``flip``, in place. Tiles that are
+        not listed keep their stage positions. Returns the document.
+        """
+        from .fusion import load_transforms
+
+        doc = load_transforms(transforms)
+        by_key = {(self.tile_id(t), t.timepoint): t for t in self.tiles}
+        unknown = []
+        for entry in doc["tiles"]:
+            t = by_key.pop((entry["id"], int(entry["timepoint"])), None)
+            if t is None:
+                unknown.append(f"{entry['id']} (t={entry['timepoint']})")
+                continue
+            t.attrs.setdefault("stage_origin", t.origin)
+            t.attrs.setdefault("stage_flip", t.flip)
+            t.attrs["transform_method"] = entry.get("method") or doc.get("method") or "file"
+            t.origin = tuple(float(v) + 0.0 for v in entry["translation"])
+            t.flip = tuple(bool(v) for v in entry.get("flip", t.flip))
+        if unknown:
+            logger.warning("%d tile(s) of the transforms are not in the mosaic and are ignored: %s",
+                           len(unknown), ", ".join(unknown[:10]) + (" ..." if len(unknown) > 10 else ""))
+        listed = len(doc["tiles"]) - len(unknown)
+        logger.info("Placed %d tile(s) with the transforms (%s); %d keep their stage positions.",
+                    listed, doc.get("method", "?"), len(by_key))
+        return doc
+
+    def reset_transforms(self) -> None:
+        """Undo :meth:`apply_transforms`: every tile back at the position (and flips) of the reader."""
+        for t in self.tiles:
+            if "stage_origin" in t.attrs:
+                t.origin = tuple(t.attrs.pop("stage_origin"))
+            if "stage_flip" in t.attrs:
+                t.flip = tuple(t.attrs.pop("stage_flip"))
+            t.attrs.pop("transform_method", None)
 
     def _resolve_tiles(self, tiles) -> List[Tile]:
         """``Tile`` objects of a list mixing tiles and tile ids."""

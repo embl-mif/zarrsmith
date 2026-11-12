@@ -29,6 +29,7 @@ are computed for each timepoint.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import math
 import shutil
@@ -82,6 +83,10 @@ ALL_TIMEPOINTS = "all"
 
 #: Root attribute recording the timepoints and the reference of a fused timelapse.
 PROVENANCE_KEY = "zarrsmith_fusion"
+
+#: ``format`` and ``version`` of the transforms files (see :func:`transforms_document`).
+TRANSFORMS_FORMAT = "zarrsmith-fusion-transforms"
+TRANSFORMS_VERSION = 1
 
 #: ``to_zarr`` options that fusion sets itself.
 _RESERVED_WRITE_OPTIONS = {"overwrite", "compute", "data_type"}
@@ -172,33 +177,45 @@ def _combine(acc: np.ndarray, cov: np.ndarray, blk: np.ndarray, blend: str) -> N
     cov[...] = True
 
 
-def _group_extents(placed: Sequence[_Placed], axis: int) -> Dict[Optional[str], Tuple[int, int]]:
-    """``(start, stop)`` of every group along ``axis``, in output voxels."""
+def _group_extents(placed: Sequence[_Placed], axis: int, key: str = "group") -> Dict[Optional[str], Tuple[int, int]]:
+    """``(start, stop)`` of every group along ``axis``, in output voxels. ``key`` is the
+    tile attribute that names the groups: ``"group"`` or ``"camera"``."""
     extents: Dict[Optional[str], List[int]] = {}
     for p in placed:
         lo, hi = p.offset[axis], p.offset[axis] + p.size[axis]
-        e = extents.setdefault(p.tile.group, [lo, hi])
+        e = extents.setdefault(getattr(p.tile, key), [lo, hi])
         e[0], e[1] = min(e[0], lo), max(e[1], hi)
     return {g: (lo, hi) for g, (lo, hi) in extents.items()}
 
 
-def _midline_ranges(placed: Sequence[_Placed], axis: int) -> Dict[Optional[str], Tuple[float, float]]:
+def _ordered_groups(placed: Sequence[_Placed], axis: int, key: str, order: Optional[Dict]) -> List[tuple]:
+    """``(group, (start, stop))`` along ``axis``, by ``order`` (rank of each group, lowest
+    first) when given, then by the centre of their extent."""
+    order = order or {}
+    return sorted(_group_extents(placed, axis, key).items(),
+                  key=lambda kv: (order.get(kv[0], 0), kv[1][0] + kv[1][1]))
+
+
+def _midline_ranges(placed: Sequence[_Placed], axis: int, key: str = "group",
+                    order: Optional[Dict] = None) -> Dict[Optional[str], Tuple[float, float]]:
     """Owner interval (output voxels, along ``axis``) of every group.
 
-    Groups are ordered by the centre of their extent; consecutive groups are
-    separated at the middle of their overlap (or of the gap between them).
+    Groups are ordered by the centre of their extent (or by ``order``, see
+    :func:`_ordered_groups`); consecutive groups are separated at the middle of their
+    overlap (or of the gap between them).
     """
-    ordered = sorted(_group_extents(placed, axis).items(), key=lambda kv: kv[1][0] + kv[1][1])
+    ordered = _ordered_groups(placed, axis, key, order)
     cuts = [(a[1][1] + b[1][0]) / 2 for a, b in zip(ordered[:-1], ordered[1:])]
     bounds = [-math.inf] + cuts + [math.inf]
     return {g: (bounds[i], bounds[i + 1]) for i, (g, _) in enumerate(ordered)}
 
 
-def _sigmoid_transitions(placed: Sequence[_Placed], axis: int) -> Dict[Optional[str], List[Tuple[int, int, int]]]:
+def _sigmoid_transitions(placed: Sequence[_Placed], axis: int, key: str = "group",
+                         order: Optional[Dict] = None) -> Dict[Optional[str], List[Tuple[int, int, int]]]:
     """Overlaps of every group with its neighbours along ``axis`` (groups ordered as for
     ``midline``), as ``(start, stop, direction)`` in output voxels: ``+1`` if the
     group's weight rises across the overlap, ``-1`` if it falls."""
-    ordered = sorted(_group_extents(placed, axis).items(), key=lambda kv: kv[1][0] + kv[1][1])
+    ordered = _ordered_groups(placed, axis, key, order)
     out: Dict[Optional[str], List[Tuple[int, int, int]]] = {g: [] for g, _ in ordered}
     for (ga, (alo, ahi)), (gb, (blo, bhi)) in zip(ordered[:-1], ordered[1:]):
         start, stop = max(alo, blo), min(ahi, bhi)
@@ -224,6 +241,7 @@ class _Region:
     zrange: Tuple[int, int] = (0, 0)  # z0, z1 in output voxels (whole depth for projections)
     time_index: Optional[int] = None  # position on the output t axis, None without one
     samples: int = _WINDOW_SAMPLES  # values kept for the display window
+    key: str = "group"  # tile attribute naming the groups that are blended: "group" or "camera"
 
 
 def _source_chunks(data) -> Optional[Tuple[int, int, int]]:
@@ -295,11 +313,13 @@ def _target(p: _Placed, region, zrange: Tuple[int, int], flat: bool):
 
 
 def _layout_blocks(index: int, channel: str, placed: Sequence[_Placed], yx: Tuple[int, int], depth: int,
-                   region: Tuple[int, int, int], blend: str, axis: int) -> List[tuple]:
+                   region: Tuple[int, int, int], blend: str, axis: int, key: str = "group",
+                   order: Optional[Dict] = None) -> List[tuple]:
     """The regions of one channel that hold tiles of the layout ``placed``, see :class:`_RegionSeries`.
 
     ``region`` is the ``(z, y, x)`` size of a region. Looks up the regions of every tile, so
-    the cost follows the tiles and not the regions of the whole output.
+    the cost follows the tiles and not the regions of the whole output. ``key`` and
+    ``order`` name and order the blended groups (see :func:`_ordered_groups`).
     """
     cz, cy, cx = region
     cells: Dict[Tuple[int, int, int], List[int]] = {}
@@ -312,8 +332,8 @@ def _layout_blocks(index: int, channel: str, placed: Sequence[_Placed], yx: Tupl
             for j in ranges[1]:
                 for n in ranges[2]:
                     cells.setdefault((j, n, k), []).append(i)
-    midline = (axis, _midline_ranges(placed, axis)) if blend == "midline" else None
-    transitions = (axis, _sigmoid_transitions(placed, axis)) if blend == "sigmoid" else None
+    midline = (axis, _midline_ranges(placed, axis, key, order)) if blend == "midline" else None
+    transitions = (axis, _sigmoid_transitions(placed, axis, key, order)) if blend == "sigmoid" else None
     return [(index, channel,
              (j * cy, min((j + 1) * cy, yx[0]), n * cx, min((n + 1) * cx, yx[1])),
              (k * cz, min((k + 1) * cz, depth)),
@@ -324,24 +344,32 @@ def _layout_blocks(index: int, channel: str, placed: Sequence[_Placed], yx: Tupl
 def _read_block(job) -> np.ndarray:
     """Read and downsample the part of one tile inside one region (runs in workers).
 
-    Returns float32 ``(h, w)`` for projections, ``(d, h, w)`` otherwise.
+    Returns float32 ``(h, w)`` for projections, ``(d, h, w)`` otherwise. Positions are
+    those of the tile flipped along ``Tile.flip``: the matching data range is read and
+    mirrored.
     """
     p, region, zrange, ds, projection = job
     k0, k1, j0, j1, i0, i1 = _overlap(p, region, zrange)
     oz, oy, ox = p.offset
     dz, dy, dx = ds
-    src_y = slice((j0 - oy) * dy, (j1 - oy) * dy)
-    src_x = slice((i0 - ox) * dx, (i1 - ox) * dx)
+    nz, ny, nx = p.tile.shape
+    fz, fy, fx = p.tile.flip
+    src_y = _source_slice((j0 - oy) * dy, (j1 - oy) * dy, ny, fy)
+    src_x = _source_slice((i0 - ox) * dx, (i1 - ox) * dx, nx, fx)
     data = p.tile.data
+
+    def read(z_start: int, z_stop: int) -> np.ndarray:
+        raw = np.asarray(data[_source_slice(z_start, z_stop, nz, fz), src_y, src_x])
+        return _flip(raw, (fz, fy, fx))
 
     if projection is not None:  # reduce over z at full resolution first, then downsample in yx
         if k0 == oz and k1 == oz + p.size[0]:
-            z_start, z_stop = 0, p.tile.shape[0]  # whole tile, including trailing planes
+            z_start, z_stop = 0, nz  # whole tile, including trailing planes
         else:  # z crop
             z_start, z_stop = (k0 - oz) * dz, (k1 - oz) * dz
         reduced = None
         for z in range(z_start, z_stop, _SLAB_PLANES):
-            raw = np.asarray(data[z : min(z + _SLAB_PLANES, z_stop), src_y, src_x])
+            raw = read(z, min(z + _SLAB_PLANES, z_stop))
             if projection == "max":
                 part = raw.max(axis=0)
                 reduced = part if reduced is None else np.maximum(reduced, part)
@@ -354,9 +382,20 @@ def _read_block(job) -> np.ndarray:
     step = max(1, _SLAB_PLANES // dz)
     for a in range(k0, k1, step):
         b = min(a + step, k1)
-        raw = np.asarray(data[(a - oz) * dz : (b - oz) * dz, src_y, src_x])
-        out[a - k0 : b - k0] = _downsample(raw, ds)
+        out[a - k0 : b - k0] = _downsample(read((a - oz) * dz, (b - oz) * dz), ds)
     return out
+
+
+def _source_slice(start: int, stop: int, n: int, flipped: bool) -> slice:
+    """Data indices of the range ``[start, stop)`` of an axis of length ``n``, counted on
+    the flipped axis when ``flipped`` (the data read must then be reversed)."""
+    return slice(n - stop, n - start) if flipped else slice(start, stop)
+
+
+def _flip(arr: np.ndarray, flips: Sequence[bool]) -> np.ndarray:
+    """``arr`` reversed along the axes where ``flips`` is true (a view)."""
+    axes = tuple(i for i, f in enumerate(flips) if f)
+    return np.flip(arr, axes) if axes else arr
 
 
 def _merge_groups(canvases, midline, region, flat: bool, shape, z0: int = 0) -> np.ndarray:
@@ -550,6 +589,29 @@ def _merge_sigmoid(canvases, transitions, region, flat: bool, shape, steepness: 
     return result
 
 
+def _merge_views(canvases, sigmoid: bool, shape, projection: str) -> np.ndarray:
+    """Projections of several cameras: the maximum of the views (``projection="max"``) or
+    their mean (``"sum"``), where they cover the region."""
+    result = np.zeros(shape, np.float32)
+    count = np.zeros(shape, np.uint8)
+    for canvas in canvases.values():
+        if sigmoid:
+            acc, wsum, _ = canvas
+            cov = wsum > 0
+            view = np.zeros(shape, np.float32)
+            np.divide(acc, wsum, out=view, where=cov)
+        else:
+            view, cov = canvas
+        if projection == "max":
+            np.copyto(result, np.where(count > 0, np.maximum(result, view), view), where=cov)
+        else:
+            np.add(result, view, out=result, where=cov)
+        count += cov
+    if projection != "max":
+        np.divide(result, count, out=result, where=count > 1)
+    return result
+
+
 def _fuse_region(r: _Region, arr, ds, projection, blend, dtype,
                  steepness: float = SIGMOID_STEEPNESS) -> np.ndarray:
     """Read the tiles of region ``r``, merge them, write the region into ``arr`` and
@@ -566,7 +628,7 @@ def _fuse_region(r: _Region, arr, ds, projection, blend, dtype,
     canvases: Dict[Optional[str], tuple] = {}
     filled: Dict[Optional[str], List[tuple]] = {}  # sigmoid: canvas slices of the tiles added so far
     for p in r.placed:
-        key = p.tile.group if blend in ("midline", "sigmoid") else None
+        key = getattr(p.tile, r.key) if blend in ("midline", "sigmoid") else None
         if key not in canvases:
             canvases[key] = (_new_softmax_state(shape) if sigmoid
                              else (np.zeros(shape, np.float32), np.zeros(shape, bool)))
@@ -580,7 +642,10 @@ def _fuse_region(r: _Region, arr, ds, projection, blend, dtype,
             _combine(acc[sl], cov[sl], blk, blend)
         del blk
 
-    if sigmoid:
+    if flat and r.key == "camera" and len(canvases) > 1:
+        # projected views of opposing cameras cannot be blended along their (projected) detection axis
+        merged = _merge_views(canvases, sigmoid, shape, projection)
+    elif sigmoid:
         merged = _merge_sigmoid(canvases, r.transitions, r.bounds, flat, shape, steepness, z0=z0)
     else:
         merged = _merge_groups(canvases, r.midline, r.bounds, flat, shape, z0=z0)
@@ -670,7 +735,7 @@ class _RegionSeries:
                 inside = [frame[channel][i] for i in indices if frame[channel][i] is not None]
                 if inside:
                     yield _Region(ci, bounds, inside, midline, transitions, zrange,
-                                  ti if self.stacked else None, self.samples)
+                                  ti if self.stacked else None, self.samples, self.plan.blend_by)
 
 
 def _display_windows(samples: Dict[int, np.ndarray], n_channels: int, dtype) -> List[Tuple[float, float]]:
@@ -747,6 +812,16 @@ class FusionPlan:
     n_available: int = 1  # timepoints of the tiles the plan was made from
     # reference_timepoint="all": the layout of every timepoint, aligned with ``frames``; empty otherwise
     layouts: Dict[int, Dict[str, List[_Placed]]] = dataclasses.field(default_factory=dict)
+    # tile attribute naming the groups blended by sigmoid/midline: "group" (e.g. illumination
+    # side) or "camera" (opposing camera views); and their rank along ``midline_axis``
+    blend_by: str = "group"
+    group_order: Dict[Optional[str], float] = dataclasses.field(default_factory=dict)
+    midline_axis: str = "x"  # axis along which the groups are blended
+
+    @property
+    def cameras(self) -> List[Optional[str]]:
+        """Cameras of the fused tiles, in order of first appearance."""
+        return list(dict.fromkeys(t.camera for t in self.tiles))
 
     @property
     def per_timepoint(self) -> bool:
@@ -774,8 +849,14 @@ class FusionPlan:
                          else f", reference timepoint {self.reference_timepoint}")
         fields = f"; ERROR: {len(self.fields)} separate fields ({', '.join(self.fields)}), cannot be fused" \
             if len(self.fields) > 1 else ""
+        cameras = ""
+        if self.blend_by == "camera":
+            views = sorted(self.cameras, key=lambda c: self.group_order.get(c, 0))
+            how = (f"blended along {self.midline_axis}, {' -> '.join(views)}" if len(self.scale) == 3
+                   else "projections merged")
+            cameras = f", {len(views)} cameras ({how})"
         return (f"{time}{len(self.channels)} ch x {dims} px ({self.axes}), {size}, voxel {vox} {self.tiles[0].units}"
-                f"{reference}{blank}{missing}{fields}")
+                f"{reference}{cameras}{blank}{missing}{fields}")
 
     @property
     def multiple_fields(self) -> bool:
@@ -893,7 +974,7 @@ def plan_fusion(
     crop: Optional[dict] = None,
     skip: Optional[Sequence[Tile]] = None,
     out_dtype=None,
-    midline_axis: str = "x",
+    midline_axis: Optional[str] = None,
     timepoints: Optional[Sequence[int]] = None,
     reference_timepoint: Union[int, str, None] = None,
 ) -> FusionPlan:
@@ -908,11 +989,20 @@ def plan_fusion(
     ds = tuple(int(v) for v in ds)
     if len(ds) != 3 or min(ds) < 1:
         raise ValueError(f"ds must be three positive integers (z, y, x), got {ds}.")
+    flat = projection is not None
+    rotations = {t.attrs.get("rotation_deg") for t in tiles}
+    if len(rotations) > 1:
+        raise ValueError(f"Tiles were acquired at several stage rotations ({sorted(rotations, key=str)}): "
+                         "fuse one rotation (one stack/field) at a time.")
+    blend_by, order = _blend_groups(tiles, blend)
+    if midline_axis is None:  # opposing cameras: blended along their detection axis
+        midline_axis = "z" if blend_by == "camera" and not flat else "x"
     if midline_axis not in ("x", "y", "z"):
         raise ValueError("midline_axis must be 'x', 'y' or 'z'.")
-    flat = projection is not None
     if flat and midline_axis == "z":
         raise ValueError("midline_axis='z' is not available for projections.")
+    if blend_by == "camera" and not flat:
+        order = _camera_order(tiles, "zyx".index(midline_axis))
 
     names = list(dict.fromkeys(t.channel for t in tiles))
     if channels is not None:
@@ -954,7 +1044,7 @@ def plan_fusion(
         raise ValueError("Every tile is skipped: nothing to fuse.")
     placed_by_channel = {n: [p for p in layout[n] if id(p.tile) not in skipped] for n in names}
 
-    if blend == "midline" and all(t.group is None for t in tiles):
+    if blend == "midline" and all(getattr(t, blend_by) is None for t in tiles):
         logger.warning("blend='midline' but tiles have no group; falling back to 'max'.")
         blend = "max"
 
@@ -985,7 +1075,45 @@ def plan_fusion(
         n_missing=n_missing,
         n_available=len(available),
         layouts=layouts,
+        blend_by=blend_by,
+        group_order=order,
+        midline_axis=midline_axis,
     )
+
+
+def _blend_groups(tiles: Sequence[Tile], blend: str) -> Tuple[str, Dict]:
+    """``(tile attribute naming the blended groups, empty order)``: ``"camera"`` when the
+    tiles come from several cameras (opposing views), ``"group"`` otherwise."""
+    cameras = {t.camera for t in tiles}
+    if len(cameras) < 2:
+        return "group", {}
+    if None in cameras:
+        raise ValueError("Some tiles have a camera and others not: they cannot be fused together.")
+    if blend in ("sigmoid", "midline") and any(t.group is not None for t in tiles):
+        raise ValueError("Tiles come from several cameras and several groups (e.g. illumination sides): "
+                         "blending both is not supported yet. Fuse one group at a time (--groups).")
+    return "camera", {}
+
+
+def _camera_order(tiles: Sequence[Tile], axis: int) -> Dict[Optional[str], float]:
+    """Rank of every camera along ``axis``: the component of its detection direction
+    (``attrs["detection_direction"]``), so each camera is given the side it images
+    sharply, towards which its detection direction points. Empty (cameras ordered by
+    position) when a tile has no detection direction."""
+    found: Dict[Optional[str], List[float]] = {}
+    for t in tiles:
+        d = t.attrs.get("detection_direction")
+        if d is None:
+            logger.warning("Tile %s of camera %s has no detection direction: the cameras are blended "
+                           "in the order of their positions.", t.attrs.get("stack"), t.camera)
+            return {}
+        found.setdefault(t.camera, []).append(float(d[axis]))
+    order = {c: float(np.mean(v)) for c, v in found.items()}
+    if len(set(np.sign(list(order.values())))) < len(order):
+        logger.warning("Cameras %s do not look along opposite directions on %s: blended in the order of "
+                       "their positions.", sorted(order, key=str), "zyx"[axis])
+        return {}
+    return order
 
 
 def _spatial_factor(value, flat: bool):
@@ -1013,6 +1141,124 @@ def _check_write_options(options: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# transforms: where every tile goes, written before it is fused
+# ---------------------------------------------------------------------------
+
+def default_transforms_path(out: str | Path) -> Path:
+    """Transforms file of a fused output: ``fused.ome.zarr`` -> ``fused.transforms.json`` next to it."""
+    out = Path(out)
+    name = out.name
+    for suffix in (".ome.zarr", ".zarr"):
+        if name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return out.with_name(f"{name}.transforms.json")
+
+
+def _default_tile_id(t: Tile) -> str:
+    stack = t.attrs.get("stack")
+    return "/".join(str(v) for v in (t.channel, "?" if stack is None else stack, t.camera) if v is not None)
+
+
+def transforms_document(plan: FusionPlan, tile_id: Optional[Callable[[Tile], str]] = None,
+                        source: Optional[str] = None) -> Dict:
+    """The transforms of a fusion plan, as a JSON-ready dict.
+
+    Positions are ``(z, y, x)`` in ``units``, in the frame of the tile origins (for
+    Luxendo, the stage frame). ``output`` is the fused grid: ``origin`` (position of output
+    voxel ``[0, 0, 0]``), ``voxel_size``, ``shape`` and the ``downsampling`` of the tiles.
+    ``tiles`` lists every fused tile at every fused timepoint:
+
+    * ``id`` (``tile_id(tile)``, default ``channel/stack[/camera]``) and ``timepoint``
+      identify it (see :meth:`MosaicManager.apply_transforms
+      <zarrsmith.mosaic_manager.MosaicManager.apply_transforms>`), ``channel``,
+      ``camera``, ``group``, ``stack``, ``field`` and ``path`` describe it;
+    * ``translation`` is the position of voxel ``[0, 0, 0]`` of the tile after its ``flip``
+      (``Tile.origin``), ``stage_translation`` the one given by the reader, and
+      ``method`` how ``translation`` was obtained (``"stage"``, or the method of a
+      transforms file that was applied);
+    * ``offset`` is the output voxel where the tile starts and ``placed_at`` the matching
+      position: with a reference timepoint, the tiles of every timepoint are placed where
+      their reference tile is;
+    * ``affine`` (4 x 4) maps a voxel index ``(z, y, x, 1)`` of the raw tile data to its
+      position as fused (``placed_at``, with the flips).
+    """
+    tile_id = tile_id or _default_tile_id
+    out_vox = np.array(plan.tiles[0].voxel_size) * np.array(plan.ds)
+    origin = np.array(plan.origin)
+    entries = []
+    for tp in plan.timepoints:
+        for channel in plan.channels:
+            for p in plan.frames[tp][channel]:
+                if p is None:
+                    continue
+                t = p.tile
+                placed_at = origin + np.array(p.offset) * out_vox
+                affine = np.eye(4)
+                for a in range(3):
+                    v = t.voxel_size[a]
+                    affine[a, a] = -v if t.flip[a] else v
+                    affine[a, 3] = placed_at[a] + ((t.shape[a] - 1) * v if t.flip[a] else 0.0)
+                entries.append({
+                    "id": tile_id(t),
+                    "timepoint": int(tp),
+                    "channel": t.channel,
+                    "camera": t.camera,
+                    "group": t.group,
+                    "stack": t.attrs.get("stack"),
+                    "field": t.field,
+                    "path": t.attrs.get("path"),
+                    "shape": list(t.shape),
+                    "voxel_size": list(t.voxel_size),
+                    "flip": list(t.flip),
+                    "translation": [float(v) for v in t.origin],
+                    "stage_translation": [float(v) for v in t.attrs.get("stage_origin", t.origin)],
+                    "method": t.attrs.get("transform_method", "stage"),
+                    "offset": [int(v) for v in p.offset],
+                    "placed_at": [float(v) for v in placed_at],
+                    "affine": affine.tolist(),
+                })
+    methods = sorted({e["method"] for e in entries})
+    return {
+        "format": TRANSFORMS_FORMAT,
+        "version": TRANSFORMS_VERSION,
+        "source": source,
+        "axes": "zyx",
+        "units": plan.tiles[0].units,
+        "method": methods[0] if len(methods) == 1 else "mixed",
+        "reference_timepoint": plan.reference_timepoint,
+        "timepoints": [int(tp) for tp in plan.timepoints],
+        "blend_by": plan.blend_by,
+        "output": {
+            "origin": [float(v) for v in origin],
+            "voxel_size": [float(v) for v in out_vox],
+            "shape": [int(v) for v in plan.grid_shape],
+            "downsampling": [int(v) for v in plan.ds],
+        },
+        "tiles": entries,
+    }
+
+
+def write_transforms(path: str | Path, document: Dict) -> Path:
+    """Write a :func:`transforms_document` to ``path`` (JSON); returns the path."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, indent=1))
+    return path
+
+
+def load_transforms(transforms) -> Dict:
+    """A transforms document from a JSON file (or the dict itself), checked."""
+    doc = transforms if isinstance(transforms, dict) else json.loads(Path(transforms).read_text())
+    if doc.get("format") != TRANSFORMS_FORMAT:
+        raise ValueError(f"{transforms!r} is not a ZarrSmith transforms file (format {doc.get('format')!r}).")
+    if int(doc.get("version", 0)) > TRANSFORMS_VERSION:
+        raise ValueError(f"Transforms version {doc['version']} is newer than this ZarrSmith "
+                         f"(reads up to {TRANSFORMS_VERSION}).")
+    return doc
+
+
+# ---------------------------------------------------------------------------
 # public entry point
 # ---------------------------------------------------------------------------
 
@@ -1033,7 +1279,7 @@ def fuse_tiles(
     workers: int = 1,
     executor: str = "auto",
     out_dtype=None,
-    midline_axis: str = "x",
+    midline_axis: Optional[str] = None,
     sigmoid_steepness: float = SIGMOID_STEEPNESS,
     timepoints: Optional[Sequence[int]] = None,
     reference_timepoint: Union[int, str, None] = None,
@@ -1042,6 +1288,9 @@ def fuse_tiles(
     temp_dir: str | Path | None = None,
     temp_compression: bool = False,
     progress: bool = True,
+    transforms_path: str | Path | bool | None = True,
+    tile_id: Optional[Callable[[Tile], str]] = None,
+    source: Optional[str] = None,
     **write_options,
 ):
     """Fuse ``tiles`` into an OME-Zarr image and return it as a ``ZarrManager``.
@@ -1072,6 +1321,16 @@ def fuse_tiles(
         * ``"midline"`` -- ``max`` within each tile ``group``; where groups
           overlap, the image switches sharply from one group to the next at the
           middle of their overlap, along ``midline_axis``.
+
+        Tiles of several **cameras** (``Tile.camera``, e.g. the opposing views of a
+        MuVi SPIM) are blended like groups, one view per camera: the tiles of each
+        camera are fused first, then the views are blended along ``midline_axis``
+        (default ``z``, the detection axis), each camera on the side its
+        ``attrs["detection_direction"]`` points to, where it images sharply. Tiles
+        with several cameras and several groups are refused. Projections of several
+        cameras are merged with the maximum (``projection="max"``) or the mean
+        (``"sum"``) of the views. With ``"max"``/``"sum"`` the cameras are merged like
+        any other tiles.
     channels
         Tile channels to fuse, in output order. Default: all, in tile order.
     channel_names, channel_colors
@@ -1101,8 +1360,9 @@ def fuse_tiles(
         Output dtype. Default: input dtype for ``sigmoid``/``max``/``midline``,
         ``float32`` for ``sum``.
     midline_axis
-        ``"x"``, ``"y"`` or ``"z"``: axis along which groups are separated
-        (``midline`` and ``sigmoid``).
+        ``"x"``, ``"y"`` or ``"z"``: axis along which groups (or cameras) are separated
+        (``midline`` and ``sigmoid``). Default: ``"z"`` for the views of several cameras
+        in 3D, ``"x"`` otherwise.
     sigmoid_steepness
         Steepness of the ``sigmoid`` transition (> 0). The share of a tile
         goes from 10% to 90% over the central ``1 - 2 / (1 + 9 ** (1 / s))``
@@ -1142,6 +1402,15 @@ def fuse_tiles(
         decoding it again for the pyramid) is noticeably faster, but the temporary
         store then takes the full uncompressed size of level 0 (``plan_fusion(...).nbytes``),
         so ``temp_dir`` needs room for it. Turn it on when disk space is short.
+    transforms_path
+        Where to write the transforms of the fusion (JSON, see :func:`transforms_document`):
+        the position and flips of every fused tile at every timepoint, before anything
+        is fused. ``True`` (default): next to ``out``, see :func:`default_transforms_path`;
+        ``False``/``None``: not written. Load it back with
+        :meth:`MosaicManager.apply_transforms <zarrsmith.mosaic_manager.MosaicManager.apply_transforms>`.
+    tile_id, source
+        Name of every tile in the transforms (default: ``channel/stack[/camera]``) and
+        the mosaic they come from; :meth:`MosaicManager.fuse` sets both.
     progress
         Show progress bars.
     **write_options
@@ -1204,6 +1473,10 @@ def fuse_tiles(
         raise FileExistsError(refusal)
     if tmp.exists():
         shutil.rmtree(tmp)
+    if transforms_path:  # the transforms first: they are what the fusion applies
+        path = default_transforms_path(out) if transforms_path is True else Path(transforms_path)
+        write_transforms(path, transforms_document(plan, tile_id=tile_id, source=source))
+        logger.info("Transforms written to %s", path)
 
     try:
         # ----- 1. level 0, region by region, into a plain temporary store -----
@@ -1213,12 +1486,13 @@ def fuse_tiles(
                                    chunks=(1,) * (len(plan.axes) - len(plan.scale)) + (() if flat else (cz,)) + (cy, cx),
                                    fill_value=0, overwrite=True,
                                    compressors=_TEMP_COMPRESSORS if temp_compression else None)
-        axis = "zyx".index(midline_axis)
+        axis = "zyx".index(plan.midline_axis)
         region = (depth if flat else cz, cy, cx)
 
         def layout_blocks(layout: Dict[str, List[_Placed]]) -> List[tuple]:
             return [b for ci, n in enumerate(names)
-                    for b in _layout_blocks(ci, n, layout[n], tuple(plan.shape[-2:]), depth, region, blend, axis)]
+                    for b in _layout_blocks(ci, n, layout[n], tuple(plan.shape[-2:]), depth, region, blend, axis,
+                                            plan.blend_by, plan.group_order)]
 
         regions = _RegionSeries((lambda tp: layout_blocks(plan.layouts[tp])) if plan.per_timepoint
                                 else layout_blocks(plan.layout), plan)

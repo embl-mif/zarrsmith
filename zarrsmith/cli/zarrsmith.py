@@ -613,17 +613,20 @@ def mosaic_convert(
     sigmoid_steepness: Optional[float] = None,
     channels: Optional[List[str]] = None,
     groups: Optional[List[str]] = None,
+    cameras: Optional[List[str]] = None,
     fields: Optional[List[str]] = None,
     tiles: Optional[List[str]] = None,
     skip_tiles: Optional[List[str]] = None,
     timepoints: Optional[List[int]] = None,
     reference_timepoint: Union[int, str, None] = None,
-    midline_axis: str = "x",
+    midline_axis: Optional[str] = None,
     out_dtype: Optional[str] = None,
     read_workers: int = 4,
     temp_dir: Optional[str] = None,
     overwrite: bool = False,
     flatfield: bool = True,
+    transforms: Optional[str] = None,
+    transforms_only: bool = False,
 ):
     """Fuse a mosaic into an OME-Zarr image (CLI helper for ``zarrsmith fuse``).
 
@@ -639,11 +642,20 @@ def mosaic_convert(
     :func:`zarrsmith.mosaic_manager.fuse_tiles`: ``read_downsample`` is its ``ds`` and
     ``read_workers`` its ``workers``. ``flatfield`` is passed to readers that correct
     the tiles (Opera); the others ignore it.
+
+    The transforms (where every tile goes) are written to
+    :func:`~zarrsmith.mosaic_manager.default_transforms_path` of ``zarr_path`` before
+    fusing; with ``transforms_only`` nothing else is done. ``transforms`` is such a file
+    to place the tiles with instead of the stage positions (its reference timepoint is
+    used unless ``reference_timepoint`` is given).
     """
-    from zarrsmith.mosaic_manager import fuse_tiles, plan_fusion, reader_options
+    from zarrsmith.mosaic_manager import (default_transforms_path, fuse_tiles, plan_fusion, reader_options,
+                                          transforms_document, write_transforms)
     from zarrsmith.mosaic_manager.fusion import SIGMOID_STEEPNESS
 
-    _refuse_output(zarr_path, overwrite=overwrite, input_path=input_path)
+    transforms_only = bool(parse_bool(transforms_only)) if transforms_only is not None else False
+    if not transforms_only:
+        _refuse_output(zarr_path, overwrite=overwrite, input_path=input_path)
 
     reader, resolved = _resolve_mosaic_manager(input_path, microscope)
     print(f"\n--->Using mosaic manager: {reader.__name__} ({resolved})")
@@ -657,10 +669,17 @@ def mosaic_convert(
           f"fields {mosaic.fields}")
     if len(mosaic.timepoints) > 1:
         print(f"{len(mosaic.timepoints)} timepoints: {mosaic.timepoints}")
+    if len(mosaic.cameras) > 1:
+        print(f"{len(mosaic.cameras)} cameras: {mosaic.cameras}")
     if len(mosaic.fields) > 1:
         for f in mosaic.fields:
-            stacks = sorted({mosaic.tile_id(t).split("/", 1)[1] for t in mosaic.field_tiles(f)})
+            stacks = sorted({mosaic.tile_id(t).split("/")[1] for t in mosaic.field_tiles(f)})
             print(f"\t{f}: {len(stacks)} stack position(s): {' '.join(stacks)}")
+    if _present(transforms):
+        doc = mosaic.apply_transforms(transforms)
+        print(f"Tile positions from {transforms} ({doc.get('method')}, {len(doc['tiles'])} tile(s))")
+        if reference_timepoint is None and doc.get("reference_timepoint") is not None:
+            reference_timepoint = doc["reference_timepoint"]
 
     use = mosaic.fusion_tiles(list(tiles) if tiles else None, list(fields) if fields else None)
     if tiles:
@@ -674,6 +693,11 @@ def mosaic_convert(
         use = [t for t in use if str(t.group) in wanted]
         if not use:
             raise ValueError(f"No tile in groups {sorted(wanted)}; available: {mosaic.groups}.")
+    if cameras:
+        wanted = {str(c) for c in cameras}
+        use = [t for t in use if str(t.camera) in wanted]
+        if not use:
+            raise ValueError(f"No tile of cameras {sorted(wanted)}; available: {mosaic.cameras}.")
 
     skip = mosaic.tiles_by_ids(list(skip_tiles)) if skip_tiles else None
     if skip:
@@ -689,6 +713,11 @@ def mosaic_convert(
     if plan.error:
         print(f"ERROR: {plan.error}")
         return False
+    transforms_path = default_transforms_path(zarr_path)
+    if transforms_only:
+        write_transforms(transforms_path, transforms_document(plan, tile_id=mosaic.tile_id, source=str(input_path)))
+        print(f"Transforms written to {transforms_path} (nothing fused: --transforms_only)")
+        return True
 
     plan_md = {"axes": plan.axes, "size": [plan.shape], "dtype": str(plan.dtype)}
     if chunk_size is not None:
@@ -744,9 +773,12 @@ def mosaic_convert(
         reference_timepoint=reference_timepoint,
         overwrite=bool(overwrite),
         temp_dir=temp_dir,
+        transforms_path=transforms_path,
+        tile_id=mosaic.tile_id,
+        source=str(input_path),
         **write_kwargs,
     )
-    print(f"Saved {zarr_path}")
+    print(f"Saved {zarr_path} (transforms: {transforms_path})")
     return True
 
 
@@ -784,10 +816,12 @@ def convert_mosaic_batch(args):
         for key in ("downsample", "read_downsample"):  # read_downsample: the earlier column name
             if key in columns and _present(v.get(key)):
                 kwargs["read_downsample"] = _int_triplet(str(v[key]))
-        for key in ("projection", "blend", "midline_axis", "out_dtype", "temp_dir"):
+        if "transforms_only" in columns and _present(v.get("transforms_only")):
+            kwargs["transforms_only"] = parse_bool(v["transforms_only"])
+        for key in ("projection", "blend", "midline_axis", "out_dtype", "temp_dir", "transforms"):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = str(v[key]).strip()
-        for key in ("channels", "groups", "fields", "tiles", "skip_tiles"):
+        for key in ("channels", "groups", "cameras", "fields", "tiles", "skip_tiles"):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = str(v[key]).split()
         # float: pandas reads a number in a column with empty cells as 3.0
