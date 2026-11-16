@@ -9,10 +9,11 @@ A mosaic manager is different from a [microscope manager](readers.md): a `Micros
 | `LuxendoMosaicManager` | raw Luxendo acquisitions (`raw/<stack>/Cam_*.lux.h5` + `.json`), including the two cameras of a [MuVi SPIM](#muvi-spim-two-opposing-cameras) | available |
 | `OperaMosaicManager` | Opera Phenix / Operetta Harmony exports (`Images/Index.xml` + one TIFF per plane) | available |
 | `ZeissMosaicManager` | Zeiss tile scans (one `.czi` file) | available |
+| `ZarrMosaicManager` | a folder of [OME-Zarr stores](#ome-zarr-stores-any-microscope) from any microscope, each placed at its NGFF translation | available |
 
-These readers are for the **raw** tiles. Data already fused by the vendor software is read with `LuxendoManager`, `OperaManager` (Harmony's `stitchresult/*.ome.tiff`) and `ZeissManager`.
+The first three readers are for the **raw** tiles. Data already fused by the vendor software is read with `LuxendoManager`, `OperaManager` (Harmony's `stitchresult/*.ome.tiff`) and `ZeissManager`.
 
-Every reader first checks that the folder is not another microscope's: a Harmony export (`Images/Index.xml`) opened with `LuxendoMosaicManager`, or a Luxendo acquisition (`*.lux.h5`) opened with `OperaMosaicManager`, stops at once with a `WrongReaderError` naming the right reader. `detect_microscope(path)` returns `"zeiss"` (a `.czi` file), `"opera"`, `"luxendo"` or `None`; `zarrsmith fuse` uses it when `--microscope` is not given, and the napari widget switches its *Microscope* choice to the detected one.
+Every reader first checks that the folder is not another microscope's: a Harmony export (`Images/Index.xml`) opened with `LuxendoMosaicManager`, or a Luxendo acquisition (`*.lux.h5`) opened with `OperaMosaicManager`, stops at once with a `WrongReaderError` naming the right reader. `detect_microscope(path)` returns `"zeiss"` (a `.czi` file), `"opera"`, `"luxendo"`, `"zarr"` (an OME-Zarr store or a folder of them, checked last) or `None`; `zarrsmith fuse` uses it when `--microscope` is not given, and the napari widget switches its *Microscope* choice to the detected one.
 
 A runnable walk-through with synthetic data is in [examples/10_mosaic_fusion.ipynb](https://github.com/embl-mif/zarrsmith/blob/main/examples/10_mosaic_fusion.ipynb).
 
@@ -99,6 +100,22 @@ mos.ZeissMosaicManager("tile_scan.czi", scene_index=1)   # only this scene
 - **Placement.** `y` and `x` come from the pixel coordinates of the tile in the file, which are the stage position rounded to a pixel, and `z` from the `FocusPosition` of its first plane. Tiles are not registered, so the result can differ from the images stitched by ZEN by a few pixels.
 - **Timelapses.** The file records slightly different positions at every timepoint. By default every timepoint is fused with those of the reference timepoint; `reference_timepoint="all"` uses those of each timepoint, see [Timepoints](#own-positions-per-timepoint). The fused output has 1 second per timepoint, like every fused timelapse, not the interval of the experiment.
 - **Files without tiles**, such as the output of ZEN's *Stitching*, are refused: read them with `ZeissManager`.
+
+### OME-Zarr stores (any microscope)
+
+`ZarrMosaicManager` takes a folder of OME-Zarr stores, from any microscope, converted with ZarrSmith or written by another tool, and places each one at its [position](readers.md#position-translation) (its NGFF `translation`):
+
+```python
+mosaic = mos.ZarrMosaicManager("converted/")   # every *.zarr store directly in the folder
+mosaic.visualize()                             # one layer per store, at its stage position
+mosaic.fields                                  # stores that touch form one field
+mosaic.fuse("slide.ome.zarr", field="field0", ds=(1, 4, 4))
+```
+
+- **Tiles.** Every store gives one tile per timepoint and channel, from its full-resolution level, with its voxel size. Stores with the same channel names are fused channel by channel (`ch0`, `ch1`, ... without names). A 2D store is a tile one plane deep.
+- **Left out**, with a message: label stores (a fusion would blend their ids), and a store fused from the stores of the same folder, i.e. an earlier fusion of this mosaic written into it (the widget's default output). Fused images record the files or folders of their tiles in the root attribute `zarrsmith_sources`. A fused field moved to another folder is an ordinary tile there.
+- **Without a position**, a store is placed at the origin, with a warning: convert it with a reader that finds the position, or set one with `update_metadata({"translations": ...})`.
+- **Fusion** needs one voxel size and unit for all the stores of a field. Stores that do not touch stay in separate fields, so for separately imaged positions (e.g. the files of a slide scanned one region at a time) the mosaic is mostly a way to see them side by side.
 
 ### Fields
 
