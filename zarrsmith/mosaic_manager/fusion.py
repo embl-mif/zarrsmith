@@ -785,6 +785,23 @@ def display_windows(path) -> List[Tuple[float, float]]:
 # planning
 # ---------------------------------------------------------------------------
 
+def fused_position(plan: "FusionPlan") -> Dict[str, float]:
+    """Position of voxel ``[0, 0, 0]`` of the fused image, the NGFF ``translation`` of the output.
+
+    The fused grid starts at ``plan.origin``: the corner of the fused tiles (the field,
+    or the given tiles), moved to the ``crop`` when there is one, in the frame the
+    mosaic reader places its tiles in. An output voxel is the mean of ``ds`` input
+    voxels, so its centre is ``(ds - 1) / 2`` input voxels further. A projection has no
+    ``z`` axis, hence no ``z`` position.
+    """
+    vox = np.array(plan.tiles[0].voxel_size, float)
+    centre = np.array(plan.origin, float) + (np.array(plan.ds) - 1) / 2 * vox
+    position = dict(zip("zyx", (float(v) for v in centre)))
+    if "z" not in plan.axes:
+        position.pop("z")
+    return position
+
+
 @dataclass
 class FusionPlan:
     """Level-0 geometry of a fusion, computed without reading any pixel data."""
@@ -1521,6 +1538,7 @@ def fuse_tiles(
             size=[plan.shape],
             scales=[plan.scale],
             units=(plan.tiles[0].units,) * len(plan.scale),
+            translations=fused_position(plan),
             channels=[ChannelInfo(
                 (channel_names or names)[i],
                 None if channel_colors is None else channel_colors[i],

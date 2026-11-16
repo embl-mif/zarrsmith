@@ -34,3 +34,22 @@ All file-based readers share the same conventions:
   ```
 
 To support a new acquisition system, see [Adding a microscope manager](contributing.md#adding-a-microscope-manager); for acquisitions saved as separate tiles, see [Mosaics](mosaic.md).
+
+## Position (translation)
+
+`metadata["translations"]` holds where a dataset was acquired: one dict per pyramid level, keyed by spatial axis, with the physical position (in the units of `metadata["units"]`, µm for the vendor readers) of the centre of voxel `[0, 0, 0]`, e.g. `[{"z": -1049.0, "y": 198.5, "x": 8988.5}]`. Every level has the same position. It is written as the NGFF `translation` after the `scale` of every level, so that viewers place datasets acquired at different stage positions side by side, and `ZarrManager` reads it back (combined with a `coordinateTransformations` of the multiscale itself, which some writers use). `None` means the position is unknown: no `translation` is written, as before. Subsetting moves the position to the first kept voxel, a dropped singleton axis drops its entry, and resampling and pyramids keep it.
+
+Where each reader finds it:
+
+| Reader | Source | Without it |
+|---|---|---|
+| `LuxendoManager` | BigDataViewer `<ViewRegistrations>` of the XML (translation of the composed affine of the first view; a rotation is not stored) | `None` |
+| `ZeissManager` | Corner of the scene's bounding box in the pixel frame of the CZI × voxel size, and the lowest `FocusPosition` of its first plane: the frame of `ZeissMosaicManager`, so a scene and the fusion of its tiles overlay. Files stitched by ZEN keep only the offsets between their scenes. | `None` |
+| `OperaManager` | The stitched `stitchresult/<well>_F<n>.ome.tiff` has none: the raw `Images/Index.xml` of the export is looked up two folders up, and the corner of the well's fields is placed as `OperaMosaicManager` places them (well on the plate, `y` flipped, relative `PositionZ`). `stitchresult/FieldTables.json`, when present, selects the fields of cluster `F<n>`. Harmony refines the field positions by about 2 µm. | `None` |
+| `ViventisManager` | `<acquisition>/Settings/STAGE_PositionSettings.json`, entry named like the folder (`Position 3` for `Position 3_Settings 1`), used as given: the file does not say whether it is the centre or the corner of the field. | `None` |
+| `EvidentManager` | `RWC frame origin` of the scene (x, y) and the stage Z of its first frame (multi-tile acquisitions only; z is 0 otherwise) | `None` |
+| `ScapeManager` | not read yet | `None` |
+| `ArrayManager` | `translations` in the metadata you pass: a dict, a sequence in spatial axis order, or one per level | `None` |
+| `ZarrManager` | the NGFF `translation` | `None` |
+
+Set or clear it on any manager with `update_metadata({"translations": {"y": 10.0, "x": -5.0}})` (`None` clears it). `visualize()` places the napari layers at the position; the objects explorer works in the voxel frame of the image and ignores it.

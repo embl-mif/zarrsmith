@@ -256,6 +256,7 @@ class MosaicManager(ABC):
             {
                 "axes": "zyx",
                 "scales": [t.voxel_size],
+                "translations": dict(zip("zyx", (float(v) for v in t.origin))),
                 "units": (t.units,) * 3,
                 "name": f"{t.channel} tile {i}",
             },

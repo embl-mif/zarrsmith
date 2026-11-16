@@ -182,6 +182,10 @@ mip.metadata["axes"]       # 'cyx'
 
 The projection is computed at full resolution along z and then downsampled in y/x, so the output is small even for a large acquisition. A `crop` in `z` limits the planes that are projected.
 
+## Position of the fused image
+
+The fused image records where it is: its NGFF `translation` (`zm.metadata["translations"]`) is the corner of the fused tiles (the field, or the given tiles; moved to the `crop` when there is one), in the frame the reader places the tiles in, plus half an output voxel of `ds` (an output voxel averages `ds` input voxels). A projection has no `z` position. Fields fused separately therefore open side by side in a viewer, and an image stitched by the microscope software and read with a microscope manager (`ZeissManager`, `OperaManager`) lands at the same place as the fusion of its raw tiles. Per-timepoint positions (`reference_timepoint="all"`) stay in the placement of the data: NGFF has one translation per image.
+
 ## Fusion options
 
 | Option | Values | Meaning |

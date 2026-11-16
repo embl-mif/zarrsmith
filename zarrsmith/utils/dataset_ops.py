@@ -71,6 +71,16 @@ def _check_scales(key, value, *, data, metadata, label):
     return value, None
 
 
+def _check_translations(key, value, *, data, metadata, label):
+    """A position (dict or numbers, for every level) or one per level; ``None`` clears it."""
+    from .translation import normalize_translations
+
+    try:
+        return normalize_translations(value, _axes_of(metadata), len(data)), None
+    except (TypeError, ValueError) as e:
+        raise type(e)(f"Invalid 'translations' for {label}: {e}") from e
+
+
 def _check_time_increment(key, value, **_):
     if value is not None and (
         not isinstance(value, Real) or isinstance(value, bool) or value <= 0
@@ -103,6 +113,7 @@ _VALIDATORS: dict[str, Callable[..., tuple[Any, Optional[str]]]] = {
     "channel_names": _check_channel_values,
     "channel_colors": _check_channel_values,
     "scales": _check_scales,
+    "translations": _check_translations,
     "time_increment": _check_time_increment,
     "time_increment_unit": _check_time_unit,
     "units": _check_units,

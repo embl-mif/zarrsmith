@@ -9,6 +9,7 @@ import numpy as np
 from .microscope_manager import MicroscopeManager
 from ..utils.ngff import parse_channel_color
 from ..utils.axes import normalize_axes, infer_axes_from_ndim, spatial_axes_in_order, normalize_data_type
+from ..utils.translation import normalize_translations
 
 
 class ArrayManager(MicroscopeManager):
@@ -39,7 +40,9 @@ class ArrayManager(MicroscopeManager):
             dimensionality.
         metadata
             Metadata dictionary.  ``axes`` may be any subset of ``tczyx`` and
-            ``data_type`` may be ``"intensity"`` or ``"label"``.
+            ``data_type`` may be ``"intensity"`` or ``"label"``. ``translations``
+            places the data: the physical position of voxel 0, as a dict such as
+            ``{"z": 0.0, "y": 1200.5, "x": -340.0}`` or one dict per level.
         chunks
             Dask chunk shape for NumPy inputs.  When ``None`` or incompatible with
             the dimensionality, automatic chunking is used.
@@ -110,6 +113,7 @@ class ArrayManager(MicroscopeManager):
                 base_scale = tuple(1.0 for _ in spatial_axes)
             scales = [tuple(float(s) * (2**i) for s in base_scale) for i in range(len(self.data))]
         metadata["scales"] = scales
+        metadata["translations"] = normalize_translations(metadata.get("translations"), axes, len(self.data))
 
         metadata.setdefault("units", tuple("micrometer" for _ in spatial_axes))
         if "c" in axes:

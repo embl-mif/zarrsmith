@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
 from .ngff import parse_channel_color
+from .translation import normalize_translations
 from .units import normalize_unit
 
 
@@ -31,6 +32,7 @@ def build_metadata(
     axes: str = "tczyx",
     time_increment: float = 1.0,
     time_increment_unit: str | None = "s",
+    translations: Any = None,
     **extra: Any,
 ) -> dict[str, Any]:
     """Assemble the metadata dictionary every manager exposes as ``.metadata``.
@@ -55,6 +57,11 @@ def build_metadata(
         Axis order of the data, ``"tczyx"`` for the vendor readers.
     time_increment, time_increment_unit
         Spacing between timepoints and its unit.
+    translations : optional
+        Physical position of voxel ``[0, 0, 0]``, in the units of ``units``: a dict
+        such as ``{"z": 0.0, "y": 1200.5, "x": -340.0}`` (used for every level) or
+        one dict per level (see :mod:`zarrsmith.utils.translation`). ``None`` when
+        the reader found no position: no NGFF ``translation`` is then written.
     **extra
         Additional manager-specific keys stored verbatim (e.g. ``plane_files``).
     """
@@ -69,6 +76,7 @@ def build_metadata(
         "channel_colors": [parse_channel_color(c.color, i) for i, c in enumerate(channels)],
         "dtype": str(dtype),
         "axes": axes,
+        "translations": normalize_translations(translations, axes, len(size)),
         **extra,
     }
 

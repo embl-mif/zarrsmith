@@ -7,6 +7,7 @@ import dask.array as da
 from .axes import normalize_axes, spatial_axis_indices, spatial_axes_in_order
 from .chunks import rechunk_to_shape, shape_tuple
 from .downsampling import downsample_nearest, normalize_spatial_factor_for_axes
+from .translation import level_translations, normalize_translations
 
 SpatialFactor = Union[int, Sequence[int]]
 
@@ -110,6 +111,12 @@ def build_pyramid(
         new_scales.append(multiply_scales(new_scales[0], scale_factor))
 
     metadata["scales"] = new_scales
+    # Every level keeps the position of the level it is built from.
+    metadata["translations"] = level_translations(
+        normalize_translations(metadata.get("translations"), axes),
+        num_levels,
+        source_level=start_level,
+    )
     metadata["size"] = [tuple(level.shape) for level in pyramid]
     metadata["chunksize"] = [tuple(level.chunksize) for level in pyramid]
     return pyramid, metadata

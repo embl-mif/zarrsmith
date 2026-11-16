@@ -7,6 +7,7 @@ import dask.array as da
 
 from .axes import normalize_axes, spatial_axes_in_order
 from .colors import hex_to_rgb, parse_channel_color
+from .translation import has_translation, normalize_translations
 from .units import normalize_unit
 
 if TYPE_CHECKING:
@@ -124,7 +125,7 @@ def visualize(
         except Exception as exc:
             raise RuntimeError(f"Failed to load data into memory: {exc}") from exc
 
-    add_layers(viewer, pyramid, metadata, level=start_level)
+    add_layers(viewer, pyramid, metadata, level=start_level, translate=True)
     return viewer
 
 
@@ -134,10 +135,29 @@ def channel_names(metadata: Dict[str, Any], n: int) -> list[str]:
     return [str(name) for name in names] if len(names) == n else [f"ch_{i}" for i in range(n)]
 
 
-def layer_geometry(metadata: Dict[str, Any], axes, level: int = 0, *, drop_channel: bool) -> Dict[str, Any]:
-    """``scale`` (and ``units``, when known) of a napari layer showing ``level`` of a dataset."""
+def _axis_translate(metadata: Dict[str, Any], axes: tuple[str, ...], level: int, *,
+                    drop_channel: bool) -> tuple[float, ...] | None:
+    """napari ``translate`` of ``level`` (the NGFF translation), or ``None`` without a position."""
+    translations = normalize_translations(metadata.get("translations"), axes)
+    if not has_translation(translations):
+        return None
+    translation = translations[min(level, len(translations) - 1)]
+    return tuple(float(translation.get(ax, 0.0)) for ax in axes if not (drop_channel and ax == "c"))
+
+
+def layer_geometry(metadata: Dict[str, Any], axes, level: int = 0, *, drop_channel: bool,
+                   translate: bool = False) -> Dict[str, Any]:
+    """``scale`` (and ``units``, when known) of a napari layer showing ``level`` of a dataset.
+
+    With ``translate``, also the ``translate`` of a dataset that has a position, so that
+    datasets acquired at different places show side by side. Off by default: tools that
+    place their own layers in the dataset's voxel frame (the explorer) leave it out.
+    """
     axes = normalize_axes(axes)
     geometry = {"scale": _axis_scale(metadata, axes, level, drop_channel=drop_channel)}
+    offset = _axis_translate(metadata, axes, level, drop_channel=drop_channel) if translate else None
+    if offset is not None:
+        geometry["translate"] = offset
     units = _axis_units(metadata, axes, drop_channel=drop_channel)
     if units is not None:
         geometry["units"] = units
@@ -145,24 +165,26 @@ def layer_geometry(metadata: Dict[str, Any], axes, level: int = 0, *, drop_chann
 
 
 def add_layers(viewer, data_levels: List[Any], metadata: Dict[str, Any], *, level: int = 0,
-               name: str | None = None, **kwargs) -> list:
+               name: str | None = None, translate: bool = False, **kwargs) -> list:
     """Add a dataset to ``viewer`` and return its layers: one labels layer for label data, else one
     image layer per channel (named ``"<name>: <channel>"`` when ``name`` is given).
 
     ``data_levels`` are the levels shown (``level``: the first one's index in the dataset).
     The colours are the channel colours of the metadata (gray without them); ``kwargs`` go to napari
     and replace any of these settings (e.g. ``contrast_limits``, ``blending``, ``colormap``).
+    With ``translate``, a dataset with a position (``metadata["translations"]``) is placed there.
     """
     axes = normalize_axes(metadata.get("axes"), ndim=data_levels[0].ndim)
     data = list(data_levels)
     if str(metadata.get("data_type", "intensity")).lower() == "label":
-        settings = dict(layer_geometry(metadata, axes, level, drop_channel=False), metadata=metadata,
+        settings = dict(layer_geometry(metadata, axes, level, drop_channel=False, translate=translate),
+                        metadata=metadata,
                         multiscale=True, name=name or metadata.get("name", "labels"))
         layers = [viewer.add_labels(data, **{**settings, **kwargs})]
         _set_axis_labels(viewer, axes, drop_channel=False)
         return layers
 
-    settings = dict(layer_geometry(metadata, axes, level, drop_channel="c" in axes),
+    settings = dict(layer_geometry(metadata, axes, level, drop_channel="c" in axes, translate=translate),
                     metadata=metadata, multiscale=True)
     if "c" not in axes:
         settings.update(name=name or metadata.get("name", "image"), colormap="gray")

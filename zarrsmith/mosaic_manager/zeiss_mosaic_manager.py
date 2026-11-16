@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from ..utils.czi import FOCUS_POSITION as _FOCUS
 from ..utils.czi import block_key, czi_distance, read_block_index
 from .czi_array import CziTileArray
 from .mosaic import MosaicManager
@@ -14,8 +15,6 @@ from .tile import Tile
 logger = logging.getLogger("zarrsmith")
 
 _PIXEL_TYPES = {"gray8": np.uint8, "gray16": np.uint16, "gray32": np.uint32, "gray32float": np.float32}
-
-_FOCUS = re.compile(r"<FocusPosition>([^<]*)<")
 
 
 def scene_names(czi_metadata) -> Dict[int, str]:

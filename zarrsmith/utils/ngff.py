@@ -25,6 +25,7 @@ from .colors import (  # noqa: F401  (re-exported: historical import location)
     parse_color,
 )
 from .units import normalize_unit
+from .translation import has_translation, normalize_translations, translation_vector
 from .axes import (
     DATA_TYPES,
     SPATIAL_AXIS_SET,
@@ -287,6 +288,7 @@ def _write_ngff_metadata(
         axes=axes,
         scales=metadata["scales"],
         time_increment=metadata.get("time_increment"),
+        translations=metadata.get("translations"),
     )
     extra: dict[str, Any] = {}
     if data_type == "intensity":
@@ -864,6 +866,9 @@ def _validate_metadata(
                 f"({len(spatial_axes)}), got {len(scale)}."
             )
 
+    # Raises on a translation that does not fit the axes or the number of levels.
+    normalize_translations(metadata.get("translations"), axes, len(data_levels))
+
     spatial_units = list(metadata.get("units", ()))
     if spatial_units and len(spatial_units) != len(spatial_axes):
         raise ValueError(
@@ -895,11 +900,19 @@ def _build_coordinate_transformations(
     axes: tuple[str, ...] | str,
     scales: Sequence[Sequence[float]],
     time_increment: float | None,
+    translations: Sequence[dict[str, float]] | None = None,
 ) -> list[list[dict[str, Any]]]:
-    """Generate one NGFF scale transformation entry per pyramid level."""
+    """Generate the NGFF coordinate transformations of every pyramid level.
+
+    Each level gets a ``scale``, followed by a ``translation`` when ``translations``
+    (one dict per level, see :mod:`zarrsmith.utils.translation`) puts any level away
+    from the origin. A dataset without a position keeps the scale-only metadata.
+    """
     axes = normalize_axes(axes)
+    translations = normalize_translations(translations, axes, len(scales))
+    with_translation = has_translation(translations)
     out = []
-    for spatial_scale in scales:
+    for level, spatial_scale in enumerate(scales):
         spatial_iter = iter(spatial_scale)
         full_scale = []
         for ax in axes:
@@ -911,7 +924,10 @@ def _build_coordinate_transformations(
                 full_scale.append(float(next(spatial_iter)))
             else:
                 full_scale.append(1.0)
-        out.append([{"type": "scale", "scale": full_scale}])
+        transforms = [{"type": "scale", "scale": full_scale}]
+        if with_translation:
+            transforms.append({"type": "translation", "translation": translation_vector(translations[level], axes)})
+        out.append(transforms)
     return out
 
 
