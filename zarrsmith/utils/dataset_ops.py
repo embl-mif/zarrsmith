@@ -262,7 +262,12 @@ def subset_levels(
             continue
         size = shape[axes.index(name.lower())]
         indices = index_list_from_selection(sel, size)
-        if indices and (min(indices) < 0 or max(indices) >= size):
+        if not indices:  # e.g. slice(30, 100) of a single timepoint: an empty axis cannot be written
+            raise ValueError(
+                f"{name}={sel!r} selects nothing on axis '{name.lower()}' of {label}, "
+                f"which has {size} element(s) (indices 0 to {size - 1})."
+            )
+        if min(indices) < 0 or max(indices) >= size:
             raise ValueError(
                 f"Index for axis '{name.lower()}' out of range in {label}. Axis size is {size}."
             )

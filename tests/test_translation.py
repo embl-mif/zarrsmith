@@ -136,6 +136,13 @@ def test_subset_moves_the_origin(tmp_path):
     assert mm.ZarrManager(str(path)).metadata["translations"][0] == {"z": 14.0, "y": 1205.5, "x": -338.0}
 
 
+def test_subset_selecting_nothing_is_refused():
+    image = _image()  # 2 timepoints
+    with pytest.raises(ValueError, match=r"selects nothing on axis 't'.*2 element"):
+        image.subset_dataset(T=slice(30, 100, 3))
+    assert image.metadata["size"][0][0] == 2  # unchanged
+
+
 def test_dropped_singleton_axis_drops_its_position(tmp_path):
     path = tmp_path / "flat.ome.zarr"
     _image(shape=(1, 1, 1, 16, 16)).to_zarr(str(path))
