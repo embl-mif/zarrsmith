@@ -791,9 +791,7 @@ def mosaic_widget():
             _release()
             if open_result:
                 _clear_layers()
-                tile_map = _tile_map()
-                if tile_map is not None:  # the result starts at 0, not at the stage position
-                    tile_map.visible = False
+                # the result opens at its stage position (its NGFF translation), on the tile map
                 zm.visualize(viewer=viewer)
                 apply_display_windows(viewer.layers, mos.display_windows(out), zm.metadata["dtype"])
                 show_first_timepoint(viewer, "".join(zm.metadata["axes"]))
