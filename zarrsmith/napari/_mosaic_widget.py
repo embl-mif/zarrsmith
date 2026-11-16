@@ -537,7 +537,8 @@ def mosaic_widget():
         call_button="Load tiles",
         microscope={"choices": list(MOSAIC_READERS)},
         input_path={"widget_type": "FileEdit", "mode": "d", "label": "Acquisition",
-                    "tooltip": "Acquisition folder (Luxendo, Opera) or .czi file (Zeiss)."},
+                    "tooltip": "Acquisition folder (Luxendo, Opera), .czi file (Zeiss), or folder of "
+                               "OME-Zarr stores (zarr), placed at their stage positions."},
         flatfield={"label": "Flat-field correction (Opera)",
                    "tooltip": "Correct the tiles with the flat-field profiles stored by Harmony, "
                               "as in the images stitched by Harmony."},

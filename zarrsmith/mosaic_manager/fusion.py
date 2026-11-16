@@ -83,6 +83,8 @@ ALL_TIMEPOINTS = "all"
 
 #: Root attribute recording the timepoints and the reference of a fused timelapse.
 PROVENANCE_KEY = "zarrsmith_fusion"
+#: Root attribute of a fused image: the files or folders its tiles were read from.
+SOURCES_KEY = "zarrsmith_sources"
 
 #: ``format`` and ``version`` of the transforms files (see :func:`transforms_document`).
 TRANSFORMS_FORMAT = "zarrsmith-fusion-transforms"
@@ -764,12 +766,24 @@ def _write_display_windows(path, windows: Sequence[Tuple[float, float]]) -> None
     root.attrs.update({"ome": attrs["ome"]} if nested else {"omero": omero})
 
 
+def tile_sources(tiles: Sequence[Tile]) -> List[str]:
+    """Files or folders the ``tiles`` are read from (``attrs["path"]``, else ``attrs["folder"]``)."""
+    found = {str(t.attrs.get("path") or t.attrs.get("folder")) for t in tiles
+             if t.attrs.get("path") or t.attrs.get("folder")}
+    return sorted(found)
+
+
 def _write_provenance(path, plan: "FusionPlan") -> None:
     """Record which acquired timepoints the output's ``t`` axis holds and the reference."""
     zarr.open_group(str(path), mode="r+").attrs[PROVENANCE_KEY] = {
         "timepoints": list(plan.timepoints),
         "reference_timepoint": plan.reference_timepoint,
     }
+
+
+def _write_sources(path, plan: "FusionPlan") -> None:
+    """Record the files or folders of the fused tiles (:data:`SOURCES_KEY`)."""
+    zarr.open_group(str(path), mode="r+").attrs[SOURCES_KEY] = tile_sources(plan.tiles)
 
 
 def display_windows(path) -> List[Tuple[float, float]]:
@@ -1443,7 +1457,11 @@ def fuse_tiles(
     areas, so viewers open the result with a usable contrast; see :func:`display_windows`.
 
     When ``tiles`` hold several timepoints, the root attribute ``zarrsmith_fusion``
-    records the acquired timepoints of the output's ``t`` axis and the reference.
+    records the acquired timepoints of the output's ``t`` axis and the reference. The root
+    attribute ``zarrsmith_sources`` lists the files or folders of the fused tiles
+    (:class:`~zarrsmith.mosaic_manager.ZarrMosaicManager` uses it to leave out a fusion of
+    its own stores). The NGFF ``translation`` is the position of the fused field (see
+    :func:`fused_position`).
 
     Use :func:`plan_fusion` with the same arguments to get the output shape and
     size without reading or writing anything.
@@ -1556,6 +1574,7 @@ def fuse_tiles(
         # Sensible display range for viewers (the writer's default is the whole dtype range).
         _write_display_windows(out, windows)
         logger.info("Display window per channel: %s", windows)
+        _write_sources(out, plan)
         if plan.n_available > 1:
             _write_provenance(out, plan)
     finally:

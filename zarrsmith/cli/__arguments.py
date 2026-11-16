@@ -710,10 +710,11 @@ def _add_fuse_microscope(parser):
         '-m', '--microscope',
         required=False,
         default=None,
-        choices=['luxendo', 'opera', 'zeiss'],
+        choices=['luxendo', 'opera', 'zeiss', 'zarr'],
         type=str,
         help='Microscope of the mosaic. Leave empty to auto-detect (raw Luxendo acquisitions, Opera Harmony '
-             'exports with Images/Index.xml, Zeiss .czi files).',
+             'exports with Images/Index.xml, Zeiss .czi files, folders of OME-Zarr stores placed at their '
+             'NGFF translation).',
     )
 
 
