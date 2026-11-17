@@ -860,7 +860,7 @@ class ZarrManager(MicroscopeManager):
         self,
         group: Optional[str] = None,
         num_levels: Optional[int] = None,
-        downscale_factor: int | Sequence[int] = 2,
+        downscale_factor: int | Sequence[int] | None = None,
         method: Optional[str] = None,
         *,
         start_level: int | str = 0,
@@ -876,6 +876,8 @@ class ZarrManager(MicroscopeManager):
 
         ``group`` is ``None`` for the root image or a path such as
         ``"labels/nuclei"``. ``num_levels`` counts every level from level 0.
+        Left as ``None``, ``num_levels`` and ``downscale_factor`` follow the levels
+        the image already has (e.g. as ``allocate`` laid them out from a template).
         ``start_level`` (an index or a dataset path such as ``"1"``; default 0)
         and the levels above it are kept; the levels after it are rebuilt.
         ``method`` is ``"mean"``, ``"nearest"`` or ``"mode"``;

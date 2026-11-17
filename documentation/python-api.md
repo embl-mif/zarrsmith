@@ -114,7 +114,7 @@ With `aligned=True`, `write_image_region` and `write_label_region` raise `ValueE
 
 ## Allocate an image and build its pyramid in place
 
-`allocate_zarr` creates an empty image from a template (what [`zarrsmith allocate`](cli.md) runs), and `populate_pyramid` creates or replaces the levels on disk after `start_level` (default 0, an index or a dataset path), from that level, one task per output shard (chunk on zarr v2). The start level and the levels above it are kept; `num_levels` counts every level from level 0:
+`allocate_zarr` creates an empty image from a template (what [`zarrsmith allocate`](cli.md) runs), with the template's pyramid levels by default. `populate_pyramid` fills or replaces the levels on disk after `start_level` (default 0, an index or a dataset path), from that level, one task per output shard (chunk on zarr v2). The start level and the levels above it are kept; `num_levels` counts every level from level 0. Without `num_levels` or `downscale_factor`, it keeps the levels the image already has:
 
 ```python
 from zarrsmith.utils.allocate import allocate_zarr
@@ -122,9 +122,11 @@ from zarrsmith.utils.allocate import allocate_zarr
 allocate_zarr("seg.ome.zarr", template="raw.ome.zarr", data_type="label", dtype="uint32",
               crop={"t": (0, 10)}, extra_attributes={"t_range": [0, 10]})
 # translation= takes the stored format, {"z": .., "y": .., "x": ..}; axes left out keep the template's origin
+# start_level=1 makes level 1 of the template the output's level 0 (crop is then in level-1 pixels)
 
 z = mm.ZarrManager("seg.ome.zarr", mode="r+")
 z.write_label_region(labels, aligned=True)
+z.populate_pyramid()                              # the levels allocate laid out, from the template
 z.populate_pyramid(num_levels=4, method="mode")  # also group="labels/nuclei"
 z.populate_pyramid(num_levels=6, start_level=2)   # keep levels 0-2, rebuild 3-5 from level 2
 ```

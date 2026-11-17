@@ -696,7 +696,9 @@ ALLOCATE_HELP = """\
       zarrsmith allocate -o new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale 2 0.5 0.5
 
     From a template, the output keeps its axes, level-0 size, dtype, pixel size, units, origin
-    (translation), channels, chunks, shards and zarr format, unless an option below changes them.
+    (translation), channels, chunks, shards, pyramid levels and zarr format, unless an option
+    below changes them. --start_level N starts from level N of the template instead of level 0
+    (e.g. to segment at a coarser resolution); --crop is then in that level's pixels.
     A label output (--data_type label) drops the template's channel axis unless channels are given.
     A crop moves the origin, so the output gets a translation that keeps it where it was.
     Zarr v2 outputs (NGFF 0.4) have no shards: explicit --shards are refused, "auto" is dropped.
@@ -796,10 +798,15 @@ def _add_allocate_arguments(parser):
                           '(zarr v3), "auto" without a template. Not available on zarr v2.')
     out.add_argument('-stm', '--shard_target_mb', type=float, default=1024.0,
                      help='Target shard size in MB for --shards auto.')
-    out.add_argument('-nl', '--num_levels', type=int, default=1,
-                     help='Levels to create. Keep 1 and run `zarrsmith pyramid` once level 0 is filled.')
-    out.add_argument('-df', '--downscale_factor', nargs='+', type=int, default=[2],
-                     help='Factor between levels when --num_levels > 1: one value, or one per spatial axis.')
+    out.add_argument('-sl', '--start_level', default='0',
+                     help="Level of the template (index or path) that becomes the output's level 0; --crop is "
+                          'in its pixels. Default: 0 (full resolution).')
+    out.add_argument('-nl', '--num_levels', type=int, default=None,
+                     help="Levels to create; `zarrsmith pyramid` fills them once level 0 is written. Default: "
+                          "the template's levels from --start_level on, else 1.")
+    out.add_argument('-df', '--downscale_factor', nargs='+', type=int, default=None,
+                     help="Factor between levels: one value, or one per spatial axis. Default: the template's, "
+                          'else 2.')
     out.add_argument('-tr', '--translation', nargs='*', type=float, metavar='ORIGIN',
                      help='Without a value: keep the origin of the template, moved by --crop. With one value '
                           'per spatial axis: the level-0 origin. An all-zero origin is not written (NGFF reads '
@@ -823,10 +830,12 @@ def _add_pyramid_arguments(parser):
                         help='Image(s) to process: a group path such as labels/nuclei, or "all" for the root '
                              'image, every image group and every label. Default: the root image.')
     parser.add_argument('-nl', '--num_levels', type=int, default=None,
-                        help='Total number of levels, level 0 included. Default: halve until no spatial axis '
-                             'is above 2048 pixels.')
-    parser.add_argument('-df', '--downscale_factor', nargs='+', type=int, default=[2],
-                        help='Factor between levels: one value, or one per spatial axis (e.g. 1 2 2 keeps Z).')
+                        help='Total number of levels, level 0 included. Default: the number the image already '
+                             'has (e.g. as allocated from a template); with a single level, downscale until no '
+                             'spatial axis is above 2048 pixels.')
+    parser.add_argument('-df', '--downscale_factor', nargs='+', type=int, default=None,
+                        help='Factor between levels: one value, or one per spatial axis (e.g. 1 2 2 keeps Z). '
+                             'Default: the factor between the existing levels, else 2.')
     parser.add_argument('-me', '--method', choices=['mean', 'nearest', 'mode'], default=None,
                         help='Downsampling method. Default: mean for intensity data, nearest for labels.')
     parser.add_argument('-sl', '--start_level', default='0',

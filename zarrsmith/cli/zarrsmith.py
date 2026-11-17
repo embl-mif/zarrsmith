@@ -1139,6 +1139,7 @@ def allocate_single(args):
         shard_target_mb=args.shard_target_mb,
         num_levels=args.num_levels,
         downscale_factor=_single_or_tuple(args.downscale_factor),
+        start_level=args.start_level,
         translation=translation,
         zarr_format=args.zarr_format,
         extra_attributes=args.attrs,

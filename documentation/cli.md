@@ -76,16 +76,16 @@ The batch CSV has the columns `input`, `output`, `pixel_size`, plus any of `fast
 `allocate` and `pyramid` split writing an image into three steps, for pipelines where several jobs write tiles of the same output (e.g. a pixel classifier writing probabilities):
 
 ```bash
-# 1. an empty image with the geometry of raw.ome.zarr: one level, float32, 3 channels
+# 1. an empty image with the geometry and pyramid levels of raw.ome.zarr, float32, 3 channels
 zarrsmith allocate -t raw.ome.zarr -o prob.ome.zarr --dtype float32 --num_channels 3
 
 # 2. jobs write tiles of level 0, e.g. with ZarrManager(..., mode="r+").write_image_region(tile, ..., aligned=True)
 
-# 3. levels 1..N, from level 0 on disk
+# 3. fill the other levels from level 0 on disk (same levels and factors as raw.ome.zarr)
 zarrsmith pyramid -z prob.ome.zarr
 ```
 
-From a template, the output keeps its axes, level-0 size, dtype, pixel size, units, origin (`translation`), channels, chunks, shards and zarr format, unless an option changes them. Without a template, `--axes`, `--size` and optionally `--scale`, `--units` and `--time_increment` describe it:
+From a template, the output keeps its axes, level-0 size, dtype, pixel size, units, origin (`translation`), channels, chunks, shards, pyramid levels and zarr format, unless an option changes them. `--start_level 1` makes level 1 of the template the output's level 0 (e.g. to segment at a coarser resolution); `--crop` is then in level-1 pixels. Without a template, `--axes`, `--size` and optionally `--scale`, `--units` and `--time_increment` describe it:
 
 ```bash
 zarrsmith allocate -o new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale 2 0.5 0.5
@@ -99,7 +99,8 @@ zarrsmith allocate -o new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale
 | `-cn`, `--channel_names` / `-nc`, `--num_channels` / `-cc`, `--channel_colors` | the channels of the output (adds a `c` axis if needed) | the template's |
 | `-cr`, `--crop` | the part of the template to keep, e.g. `"t=0:10;y=512:1536"`; it moves the origin, so the output gets a translation | the whole template |
 | `-cs`, `--chunk_size` / `-sh`, `--shards` | level-0 chunks and shards, one value per output axis (`--shards auto` or `none` also work) | the template's; `auto` shards without a template |
-| `-nl`, `--num_levels` / `-df`, `--downscale_factor` | levels to create | 1 level |
+| `-sl`, `--start_level` | level of the template (index or path) that becomes the output's level 0; `--crop` is in its pixels | 0 |
+| `-nl`, `--num_levels` / `-df`, `--downscale_factor` | levels to create, and the factor between them | the template's levels from `--start_level` on; 1 level without a template |
 | `-tr`, `--translation` | without a value: keep the template's origin (moved by `--crop`); with one value per spatial axis: the level-0 origin. An all-zero origin is not written, which NGFF reads the same way | written when the template has one or the crop moves the origin |
 | `-zf`, `--zarr_format` | 2 (NGFF 0.4) or 3 (NGFF 0.5) | the template's, else 3 |
 | `-at`, `--attrs` | custom group attributes, as JSON or a `.json` file, e.g. `'{"t_range": [0, 10]}'` | none |
@@ -114,8 +115,8 @@ Zarr v2 has no shards: an explicit `--shards` shape is refused, `--shards auto` 
 |---|---|---|
 | `-z`, `--zarr_path` | the store to update | none, required |
 | `-g`, `--group` | image(s) to process: group paths, or `all` | the root image |
-| `-nl`, `--num_levels` | total number of levels, level 0 included | until no spatial axis is above 2048 pixels |
-| `-df`, `--downscale_factor` | one value, or one per spatial axis (`1 2 2` keeps Z) | 2 |
+| `-nl`, `--num_levels` | total number of levels, level 0 included | the levels the image already has (e.g. allocated from a template); with one level, until no spatial axis is above 2048 pixels |
+| `-df`, `--downscale_factor` | one value, or one per spatial axis (`1 2 2` keeps Z) | the factor between the existing levels, else 2 |
 | `-me`, `--method` | `mean` (average), `nearest` (one pixel per block) or `mode` (most frequent value, smoother label pyramids) | `mean` for intensity data, `nearest` for labels |
 | `-sl`, `--start_level` | level to build from, by index or path; it and the levels above it are kept | 0 |
 | `-nw`, `--num_workers` | number of threads | half the cores, at most 8 |

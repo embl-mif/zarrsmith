@@ -25,27 +25,43 @@ from .ngff import DEFAULT_COMPRESSOR, DEFAULT_COMPRESSOR_LEVEL
 Crop = Mapping[str, tuple[int | None, int | None] | slice]
 
 
-def _template_info(path: str | Path) -> dict[str, Any]:
-    """Level-0 geometry and metadata of the root image of an OME-Zarr store."""
+def _template_info(path: str | Path, start_level: int | str = 0) -> dict[str, Any]:
+    """Geometry and metadata of one level (``start_level``, default 0) of the root
+    image of an OME-Zarr store, plus the pyramid below it: ``num_levels`` (that
+    level and the coarser ones) and ``factors`` (between it and the next level,
+    per spatial axis; ``None`` when it is the last level)."""
     from ..microscope_manager.zarr_manager import ZarrManager
+    from .axes import spatial_axis_indices
+    from .populate_pyramid import _resolve_start_level, level_factors
 
     z = ZarrManager(str(path), mode="r")
     md = z.raw.metadata
-    level0 = z.raw.zarr_data[0]
+    datasets = (z._get_multiscales(z.root) or [{}])[0].get("datasets") or [{"path": "0"}]
+    s = _resolve_start_level(datasets, start_level)
+    level = z.raw.zarr_data[s]
+    sizes = md["size"]
+    translations = md.get("translations")
+    factors = None
+    if s + 1 < len(sizes):
+        factors = level_factors(sizes[s], sizes[s + 1], spatial_axis_indices(md["axes"]))
+        if all(f == 1 for f in factors):
+            factors = None
     return {
         "axes": md["axes"],
-        "size": tuple(int(s) for s in md["size"][0]),
+        "size": tuple(int(v) for v in sizes[s]),
+        "num_levels": len(sizes) - s,
+        "factors": factors,
         "dtype": str(md["dtype"]),
-        "scale": tuple(md["scales"][0]),
-        "translation": None if not md.get("translations") else dict(md["translations"][0]),
+        "scale": tuple(md["scales"][s]),
+        "translation": None if not translations else dict(translations[min(s, len(translations) - 1)]),
         "units": tuple(md.get("units") or ()),
         "time_increment": md.get("time_increment"),
         "time_increment_unit": md.get("time_increment_unit"),
         "channel_names": list(md.get("channel_names") or []),
         "channel_colors": list(md.get("channel_colors") or []),
         "data_type": md.get("data_type"),
-        "chunks": tuple(int(c) for c in level0.chunks),
-        "shards": None if level0.shards is None else tuple(int(s) for s in level0.shards),
+        "chunks": tuple(int(c) for c in level.chunks),
+        "shards": None if level.shards is None else tuple(int(v) for v in level.shards),
         "zarr_format": z.root.metadata.zarr_format,
         "name": (z._get_multiscales(z.root) or [{}])[0].get("name"),
     }
@@ -110,8 +126,9 @@ def build_allocation_metadata(
     crop: Crop | None = None,
     chunk_size: Sequence[int] | None = None,
     shards: Any = None,
-    num_levels: int = 1,
-    downscale_factor: int | Sequence[int] = 2,
+    num_levels: int | None = None,
+    downscale_factor: int | Sequence[int] | None = None,
+    start_level: int | str = 0,
     translation: bool | Mapping[str, float] | Sequence[float] | None = None,
     zarr_format: int | None = None,
     extra_attributes: Mapping[str, Any] | None = None,
@@ -126,14 +143,18 @@ def build_allocation_metadata(
     if template is not None:
         if size is not None or axes is not None:
             raise ValueError("Give either a template or size/axes, not both.")
-        info = _template_info(template)
+        info = _template_info(template, start_level)
     else:
         if size is None or axes is None:
             raise ValueError("Without a template, size and axes are required.")
+        if str(start_level) != "0":
+            raise ValueError("start_level picks a level of the template: it needs a template.")
         axes_t = normalize_axes(axes, ndim=len(size))
         info = {
             "axes": "".join(axes_t),
             "size": tuple(int(s) for s in size),
+            "num_levels": 1,
+            "factors": None,
             "dtype": "uint16",
             "scale": _spatial(1.0 if scale is None else scale, "".join(axes_t), "scale"),
             "translation": None,
@@ -232,7 +253,12 @@ def build_allocation_metadata(
     elif isinstance(shards, (list, tuple)):
         shards = tuple(int(s) for s in _per_axis(shards, axes_out, "shards"))
 
-    # Pyramid geometry: level k is level 0 shrunk k times.
+    # Pyramid geometry: level k is level 0 shrunk k times. By default the template's own
+    # pyramid below the start level, so `zarrsmith pyramid` then fills the same layout.
+    if num_levels is None:
+        num_levels = info["num_levels"]
+    if downscale_factor is None:
+        downscale_factor = info["factors"] or 2
     num_levels = int(num_levels)
     if num_levels < 1:
         raise ValueError("num_levels must be >= 1.")
@@ -309,9 +335,13 @@ def allocate_zarr(
         The new store. An existing non-empty output is refused unless ``overwrite``.
     template
         OME-Zarr image whose root image gives the axes, level-0 size, dtype, pixel
-        size, units, origin (translation), channels, chunks, shards and zarr format.
-        Without it, ``size`` and ``axes`` (and optionally ``scale``, ``units``,
-        ``time_increment``) describe the image.
+        size, units, origin (translation), channels, chunks, shards, pyramid layout
+        and zarr format. Without it, ``size`` and ``axes`` (and optionally ``scale``,
+        ``units``, ``time_increment``) describe the image.
+    start_level
+        Level of the template that becomes the output's level 0: its index or its
+        path (default 0, full resolution). Its size, pixel size, origin, chunks and
+        shards are used, and ``crop`` is given in its pixels.
     size, axes, scale, units, time_increment, time_increment_unit
         Explicit geometry, when there is no template. ``scale`` is one value or one
         per spatial axis; ``units`` defaults to micrometer. With a template,
@@ -329,7 +359,10 @@ def allocate_zarr(
         ``None``). By default the template's; ``"auto"`` shards on zarr v3 without a
         template. Zarr v2 has no shards: an explicit shape raises, ``"auto"`` warns.
     num_levels, downscale_factor
-        Levels created (default 1: fill level 0 then run ``zarrsmith pyramid``).
+        Levels created, and the factor between them. By default the template's own
+        pyramid from ``start_level`` on (its number of levels and the factor between
+        its first two), else 1 level. Fill level 0, then run ``zarrsmith pyramid``,
+        which fills the same levels.
     translation
         ``None`` writes a translation when the template has one or the crop moves
         the origin; ``True`` always writes one; ``False`` writes none. A dict keyed

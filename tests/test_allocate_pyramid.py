@@ -335,6 +335,61 @@ def test_rerunning_pyramid_overwrites_cleanly(tmp_path, zarr_format, ngff):
     assert len(z.data) == 1 and sorted(z.root.array_keys()) == ["0"]
 
 
+def _make_pyramid_template(path: Path, zarr_format: int, ngff: str):
+    """``_make_template`` with 3 levels that keep Z: (8, 64, 64) -> (8, 32, 32) -> (8, 16, 16)."""
+    data = _make_template(path, zarr_format, ngff)
+    z = ZarrManager(str(path), mode="r+")
+    z.populate_pyramid(num_levels=3, downscale_factor=(1, 2, 2), progress=False)
+    return data, z.metadata
+
+
+@pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
+def test_allocate_and_pyramid_follow_the_template_pyramid(tmp_path, zarr_format, ngff):
+    """Like nf-modules' preallocate + populate: the output mirrors the template's levels,
+    and ``pyramid`` with no options fills exactly those (Z is not downsampled)."""
+    template = tmp_path / "raw.ome.zarr"
+    _, tmd = _make_pyramid_template(template, zarr_format, ngff)
+    out = tmp_path / "seg.ome.zarr"
+    allocate_zarr(out, template=template, data_type="label", dtype="uint32")
+    z = ZarrManager(str(out), mode="r+")
+    assert z.metadata["size"] == [(2, 8, 64, 64), (2, 8, 32, 32), (2, 8, 16, 16)]
+    assert z.metadata["scales"] == [tuple(s) for s in tmd["scales"]]
+
+    z.write_label_region(np.ones((2, 8, 64, 64), dtype=np.uint32))
+    z.populate_pyramid(progress=False)
+    assert [tuple(a.shape) for a in z.data] == [(2, 8, 64, 64), (2, 8, 32, 32), (2, 8, 16, 16)]
+    assert int(np.asarray(z.data[2]).min()) == 1
+    # labels use nearest, so every level keeps the template's level-0 origin
+    assert z.metadata["translations"] == [_zyx(10.0, 20.0, 30.0)] * 3
+
+
+@pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
+def test_allocate_from_a_template_level(tmp_path, zarr_format, ngff):
+    """The output's level 0 is level 1 of the template, cropped in level-1 pixels
+    (nf-modules' --start-level, used to segment at a coarser resolution)."""
+    template = tmp_path / "raw.ome.zarr"
+    _, tmd = _make_pyramid_template(template, zarr_format, ngff)
+    out = tmp_path / "seg.ome.zarr"
+    allocate_zarr(out, template=template, start_level=1, crop={"y": (8, 24)},
+                  data_type="label", dtype="uint32")
+    md = ZarrManager(str(out)).metadata
+    assert md["size"] == [(2, 8, 16, 32), (2, 8, 8, 16)]
+    assert md["scales"][0] == pytest.approx((2.0, 1.0, 1.0))
+    t1 = tmd["translations"][1]
+    assert md["translations"][0] == pytest.approx(_zyx(t1["z"], t1["y"] + 8 * 1.0, t1["x"]))
+
+    # by path, and from the CLI
+    allocate_zarr(tmp_path / "b.ome.zarr", template=template, start_level="2", num_levels=1)
+    assert ZarrManager(str(tmp_path / "b.ome.zarr")).metadata["size"] == [(2, 2, 8, 16, 16)]
+    main(["allocate", "-t", str(template), "-o", str(tmp_path / "c.ome.zarr"), "--start_level", "1"])
+    assert ZarrManager(str(tmp_path / "c.ome.zarr")).metadata["size"] == [(2, 2, 8, 32, 32), (2, 2, 8, 16, 16)]
+
+    with pytest.raises(ValueError, match="needs a template"):
+        allocate_zarr(tmp_path / "d.ome.zarr", size=(8, 8), axes="yx", start_level=1)
+    with pytest.raises(ValueError, match="out of range"):
+        allocate_zarr(tmp_path / "e.ome.zarr", template=template, start_level=3)
+
+
 @pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
 def test_pyramid_rebuilds_from_a_start_level(tmp_path, zarr_format, ngff):
     out = tmp_path / "img.ome.zarr"

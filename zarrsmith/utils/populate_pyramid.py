@@ -160,12 +160,31 @@ def _resolve_start_level(datasets: Sequence[dict], start_level: int | str) -> in
     return index
 
 
+def level_factors(shape_a: Sequence[int], shape_b: Sequence[int], spatial_axes: Sequence[int]) -> tuple[int, ...]:
+    """Integer factor per spatial axis between a level of shape ``shape_a`` and the
+    next, coarser one of shape ``shape_b`` (sizes rounded up or down both work)."""
+    return tuple(max(1, round(int(shape_a[i]) / max(1, int(shape_b[i])))) for i in spatial_axes)
+
+
+def _existing_level_factors(group: zarr.Group, datasets, start: int, spatial_axes) -> tuple[int, ...] | None:
+    """Factors between the start level and the existing level after it, if there is one."""
+    if len(datasets) <= start + 1:
+        return None
+    try:
+        a = group[str(datasets[start]["path"])].shape
+        b = group[str(datasets[start + 1]["path"])].shape
+    except KeyError:
+        return None
+    factors = level_factors(a, b, spatial_axes)
+    return factors if any(f > 1 for f in factors) else None
+
+
 def populate_pyramid(
     root: zarr.Group,
     group_name: str | None = None,
     *,
     num_levels: int | None = None,
-    downscale_factor: SpatialFactor = 2,
+    downscale_factor: SpatialFactor | None = None,
     method: str | None = None,
     start_level: int | str = 0,
     num_workers: int | None = None,
@@ -181,8 +200,10 @@ def populate_pyramid(
         Image to process: ``None`` for the root image, else a group path such as
         ``"segmentation"`` or ``"labels/nuclei"``.
     num_levels
-        Total number of levels, level 0 included. ``None`` keeps halving until no
-        spatial axis is above 2048 pixels (see
+        Total number of levels, level 0 included. ``None`` keeps the number of
+        levels the image already has (e.g. as laid out by ``allocate`` from a
+        template); with no level after the start level, it keeps downscaling until
+        no spatial axis is above 2048 pixels (see
         :func:`zarrsmith.utils.chunks.default_num_levels`). ``start_level + 1``
         removes every level after the start level.
     start_level
@@ -192,7 +213,8 @@ def populate_pyramid(
         (default) rebuilds the whole pyramid from full resolution.
     downscale_factor
         Integer factor between consecutive levels: one value, or one per spatial
-        axis (e.g. ``(1, 2, 2)`` to keep Z).
+        axis (e.g. ``(1, 2, 2)`` to keep Z). ``None`` takes it from the shapes of the
+        start level and the existing level after it, else 2.
     method
         ``"mean"``, ``"nearest"`` or ``"mode"``. ``None`` picks ``"nearest"`` for
         label images and ``"mean"`` otherwise; ``"mean"`` is refused for labels.
@@ -230,13 +252,20 @@ def populate_pyramid(
     axes = normalize_axes(axis_names_from_multiscales(multiscales) or None, ndim=level0.ndim)
     spatial_axes = spatial_axis_indices(axes)
     method = resolve_downsampling_method(method, _infer_data_type_from_group(group))
+    # Levels already laid out (e.g. by allocate from a template) set the defaults.
+    existing = _existing_level_factors(group, datasets, start, spatial_axes)
+    if downscale_factor is None:
+        downscale_factor = existing or 2
     factors = tuple(
         int(f) for f in normalize_spatial_factor_for_axes(downscale_factor, axes, allow_float=False)
     )
     if any(f < 1 for f in factors):
         raise ValueError(f"downscale_factor must be >= 1, got {downscale_factor!r}.")
     if num_levels is None:
-        num_levels = default_num_levels({"axes": "".join(axes), "size": [level0.shape]}, factors)
+        if existing is not None:
+            num_levels = len(datasets)
+        else:
+            num_levels = default_num_levels({"axes": "".join(axes), "size": [level0.shape]}, factors)
         num_levels = max(int(num_levels), start + 1)
     num_levels = int(num_levels)
     if num_levels < start + 1:
