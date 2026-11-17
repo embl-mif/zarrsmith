@@ -1,6 +1,6 @@
 # Command line
 
-The `zarrsmith` command has four subcommands:
+The `zarrsmith` command has six subcommands:
 
 | Command | Does |
 |---|---|
@@ -8,8 +8,10 @@ The `zarrsmith` command has four subcommands:
 | `zarrsmith fuse` | fuse the raw tiles of a mosaic into one OME-Zarr image, or every mosaic listed in a CSV file with `--batch` |
 | `zarrsmith chromatic-shift` | measure and correct the Z chromatic shift between the channels of an OME-Zarr image, or of every image listed in a CSV file with `--batch` |
 | `zarrsmith resample` | change the pixel size of an OME-Zarr image, or of every image listed in a CSV file with `--batch` |
+| `zarrsmith allocate` | create an empty OME-Zarr image from a template image, or from an explicit size, to fill tile by tile |
+| `zarrsmith pyramid` | build or rebuild the pyramid levels of an OME-Zarr image in place, from level 0 |
 
-`zarrsmith -h` lists them, and `zarrsmith convert -h`, `zarrsmith fuse -h`, `zarrsmith chromatic-shift -h` and `zarrsmith resample -h` show every option, examples and the batch CSV columns. `zarrsmith --version` prints the installed version.
+`zarrsmith -h` lists them, and `zarrsmith convert -h`, `zarrsmith fuse -h`, `zarrsmith chromatic-shift -h`, `zarrsmith resample -h`, `zarrsmith allocate -h` and `zarrsmith pyramid -h` show every option, examples and the batch CSV columns. `zarrsmith --version` prints the installed version.
 
 Each command runs either one dataset (`-i INPUT -z OUTPUT`) or a CSV file (`--batch FILE.csv`), never both (`chromatic-shift` can also run with `-i` alone, to only measure). In a batch file, one row is one run and the columns take the place of the options.
 
@@ -68,6 +70,56 @@ The output has the compression and number of pyramid levels of the input. Its ch
 Large datasets are written one batch at a time, each as large as the free memory allows, in whole chunks or shards. Memory use therefore depends on the batch size rather than on the number of timepoints or the size of the volume. Only the blocks of one batch run in parallel, so a block as large as the batch (very large shards with little memory) runs on one thread.
 
 The batch CSV has the columns `input`, `output`, `pixel_size`, plus any of `fast`, `include_groups`, `include_labels`, `overwrite`, `num_workers`.
+
+## Create an empty image and build its pyramid
+
+`allocate` and `pyramid` split writing an image into three steps, for pipelines where several jobs write tiles of the same output (e.g. a pixel classifier writing probabilities):
+
+```bash
+# 1. an empty image with the geometry of raw.ome.zarr: one level, float32, 3 channels
+zarrsmith allocate -t raw.ome.zarr -o prob.ome.zarr --dtype float32 --num_channels 3
+
+# 2. jobs write tiles of level 0, e.g. with ZarrManager(..., mode="r+").write_image_region(tile, ..., aligned=True)
+
+# 3. levels 1..N, from level 0 on disk
+zarrsmith pyramid -z prob.ome.zarr
+```
+
+From a template, the output keeps its axes, level-0 size, dtype, pixel size, units, origin (`translation`), channels, chunks, shards and zarr format, unless an option changes them. Without a template, `--axes`, `--size` and optionally `--scale`, `--units` and `--time_increment` describe it:
+
+```bash
+zarrsmith allocate -o new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale 2 0.5 0.5
+```
+
+| Option | Does | Default |
+|---|---|---|
+| `-t`, `--template` | OME-Zarr image whose root image gives the geometry | none |
+| `-o`, `--out` (or `-z`, `--zarr_path`) | the new store | none, required |
+| `-dt`, `--dtype` / `-dty`, `--data_type` | dtype, and `intensity` or `label`; a label output drops the template's channel axis unless channels are given | the template's |
+| `-cn`, `--channel_names` / `-nc`, `--num_channels` / `-cc`, `--channel_colors` | the channels of the output (adds a `c` axis if needed) | the template's |
+| `-cr`, `--crop` | the part of the template to keep, e.g. `"t=0:10;y=512:1536"`; it moves the origin, so the output gets a translation | the whole template |
+| `-cs`, `--chunk_size` / `-sh`, `--shards` | level-0 chunks and shards, one value per output axis (`--shards auto` or `none` also work) | the template's; `auto` shards without a template |
+| `-nl`, `--num_levels` / `-df`, `--downscale_factor` | levels to create | 1 level |
+| `-tr`, `--translation` | without a value: always write a translation; with one value per spatial axis: the level-0 origin | written when the template has one or the crop moves the origin |
+| `-zf`, `--zarr_format` | 2 (NGFF 0.4) or 3 (NGFF 0.5) | the template's, else 3 |
+| `-at`, `--attrs` | custom group attributes, as JSON or a `.json` file, e.g. `'{"t_range": [0, 10]}'` | none |
+| `-cp`, `--compressor` / `-cpl`, `--compressor_level` | codec | blosc, level 1 |
+| `-ow`, `--overwrite` | replace an existing output | off |
+
+Zarr v2 has no shards: an explicit `--shards` shape is refused, `--shards auto` is dropped with a warning, and a v3 template's shards are not carried over. Parallel jobs must write tiles that start and end on the shard grid (the chunk grid on zarr v2 or without shards), so no two jobs write the same file; `aligned=True` raises an error for any other tile.
+
+`pyramid` creates or replaces levels 1..N of the root image (or of `--group labels/nuclei`, or of every image with `--group all`). Each level is computed from the level above it, one task per output shard (chunk on zarr v2), with the zarr format, codecs and chunk layout of level 0, and the `multiscales` metadata is updated. Running it again replaces the levels cleanly.
+
+| Option | Does | Default |
+|---|---|---|
+| `-z`, `--zarr_path` | the store to update | none, required |
+| `-g`, `--group` | image(s) to process: group paths, or `all` | the root image |
+| `-nl`, `--num_levels` | total number of levels, level 0 included | until no spatial axis is above 2048 pixels |
+| `-df`, `--downscale_factor` | one value, or one per spatial axis (`1 2 2` keeps Z) | 2 |
+| `-me`, `--method` | `mean` (average), `nearest` (one pixel per block) or `mode` (most frequent value, smoother label pyramids) | `mean` for intensity data, `nearest` for labels |
+| `-nw`, `--num_workers` | number of threads | half the cores, at most 8 |
+
+With `mean` and `mode` a coarse pixel sits at the centre of the block it summarizes, so each level's `translation` moves by half a block; with `nearest` it keeps the origin of level 0.
 
 ## Fuse a mosaic
 

@@ -110,6 +110,35 @@ z.write_image_region(
 )
 ```
 
+With `aligned=True`, `write_image_region` and `write_label_region` raise `ValueError` unless the region starts and ends on the shard grid (the chunk grid on zarr v2 or without shards) of every level they write. Only such regions are safe to write from several processes at once.
+
+## Allocate an image and build its pyramid in place
+
+`allocate_zarr` creates an empty image from a template (what [`zarrsmith allocate`](cli.md) runs), and `build_pyramid_inplace` creates or replaces levels 1..N on disk from level 0, one task per output shard (chunk on zarr v2):
+
+```python
+from zarrsmith.utils.allocate import allocate_zarr
+
+allocate_zarr("seg.ome.zarr", template="raw.ome.zarr", data_type="label", dtype="uint32",
+              crop={"t": (0, 10)}, extra_attributes={"t_range": [0, 10]})
+
+z = mm.ZarrManager("seg.ome.zarr", mode="r+")
+z.write_label_region(labels, aligned=True)
+z.build_pyramid_inplace(num_levels=4, method="mode")  # also group="labels/nuclei"
+```
+
+`method` is `"mean"`, `"nearest"` or `"mode"`; by default `"nearest"` for labels and `"mean"` otherwise. The lazy `build_pyramid` also takes `method` (default `"nearest"`). The method is recorded in the `multiscales` `type` and `metadata` fields, as the NGFF spec recommends.
+
+A sharded level is built one inner chunk at a time, so each task holds one output shard plus one chunk's source window; the number of threads is limited to what fits in memory, sharded or not.
+
+NGFF 0.6 stores can be read (axes from `coordinateSystems`, `scale`/`translation` from a `sequence`), but zarrsmith writes only 0.4 and 0.5: `build_pyramid_inplace` and `create_empty_group` refuse a 0.6 store rather than mix versions, and `allocate_zarr` from a 0.6 template writes 0.5.
+
+## Origins and custom attributes
+
+`metadata["translations"]` holds one spatial origin per level (in the order of `scales`), written as a `translation` after each level's `scale`, and read back from any store that has one. It is `None` when no level has one, and then none is written. Subsetting moves it to the first kept pixel.
+
+`metadata["extra_attributes"]` holds the group attributes that are not NGFF metadata, such as a pipeline's `t_range`. They are read from a store and written back next to `multiscales` on zarr v2, and next to (not inside) `ome` on zarr v3. Both can be changed with `update_metadata`.
+
 ## Change the pixel size
 
 `resample_dataset` gives a dataset a new pixel size and rescales the data accordingly. Nothing is computed until the dataset is written, and it works with every manager:

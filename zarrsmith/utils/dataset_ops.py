@@ -71,6 +71,28 @@ def _check_scales(key, value, *, data, metadata, label):
     return value, None
 
 
+def _check_translations(key, value, *, data, metadata, label):
+    if value is None:
+        return None, None
+    if not isinstance(value, (list, tuple)) or len(value) != len(data):
+        raise ValueError(
+            f"'translations' must be None or a list with one entry per pyramid level "
+            f"({len(data)}) in {label}."
+        )
+    out = []
+    for translation in value:
+        if not isinstance(translation, (list, tuple)) or len(translation) != _n_spatial(metadata):
+            raise ValueError(f"Each translation entry must match the spatial axes of {label}.")
+        out.append(tuple(float(t) for t in translation))
+    return out, None
+
+
+def _check_extra_attributes(key, value, **_):
+    if value is not None and not isinstance(value, dict):
+        raise TypeError("'extra_attributes' must be a dict or None.")
+    return (dict(value) if value else None), None
+
+
 def _check_time_increment(key, value, **_):
     if value is not None and (
         not isinstance(value, Real) or isinstance(value, bool) or value <= 0
@@ -103,6 +125,8 @@ _VALIDATORS: dict[str, Callable[..., tuple[Any, Optional[str]]]] = {
     "channel_names": _check_channel_values,
     "channel_colors": _check_channel_values,
     "scales": _check_scales,
+    "translations": _check_translations,
+    "extra_attributes": _check_extra_attributes,
     "time_increment": _check_time_increment,
     "time_increment_unit": _check_time_unit,
     "units": _check_units,

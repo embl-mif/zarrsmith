@@ -6,7 +6,11 @@ import dask.array as da
 
 from .axes import normalize_axes, spatial_axis_indices, spatial_axes_in_order
 from .chunks import rechunk_to_shape, shape_tuple
-from .downsampling import downsample_nearest, normalize_spatial_factor_for_axes
+from .downsampling import (
+    downsample,
+    downsampled_translation,
+    normalize_spatial_factor_for_axes,
+)
 
 SpatialFactor = Union[int, Sequence[int]]
 
@@ -44,6 +48,7 @@ def build_pyramid(
     num_levels: int = 3,
     downscale_factor: SpatialFactor = 2,
     start_level: int = 0,
+    method: str = "nearest",
 ) -> Tuple[List[da.Array], Dict[str, Any]]:
     """
     Generate a multiscale pyramid and updated metadata for NGFF-compatible
@@ -55,7 +60,15 @@ def build_pyramid(
 
     - 2, meaning downsample Z, Y and X by 2
     - (1, 2, 2), meaning keep Z unchanged and downsample only YX
+
+    ``method`` is ``"nearest"`` (default), ``"mean"`` or ``"mode"`` (see
+    :func:`zarrsmith.utils.downsampling.downsample_numpy`). When
+    ``metadata['translations']`` is set, the origin of every new level follows
+    the method (see :func:`zarrsmith.utils.downsampling.downsampled_translation`).
     """
+    from .downsampling import resolve_downsampling_method
+
+    method = resolve_downsampling_method(method, metadata.get("data_type"))
     if not data_levels:
         raise ValueError("data_levels cannot be empty.")
     if num_levels is None:
@@ -89,18 +102,27 @@ def build_pyramid(
     factors = normalize_spatial_factor_for_axes(downscale_factor, axes)
     target_chunks = _target_chunks(data_levels[0], metadata)
 
+    translations = metadata.get("translations")
     if start_level < len(data_levels):
         pyramid = [rechunk_to_shape(data_levels[start_level], target_chunks)]
-        new_scales = [tuple(metadata["scales"][start_level])]
+        new_scales = [tuple(metadata["scales"][min(start_level, len(metadata["scales"]) - 1)])]
+        new_translations = (
+            None if translations is None
+            else [tuple(translations[min(start_level, len(translations) - 1)])]
+        )
     else:
         base_downscale = factor_power(factors, start_level)
-        down = downsample_nearest(data_levels[0], base_downscale, spatial_axes)
+        down = downsample(data_levels[0], base_downscale, spatial_axes, method)
         pyramid = [rechunk_to_shape(down, target_chunks)]
         new_scales = [multiply_scales(metadata["scales"][0], base_downscale)]
+        new_translations = (
+            None if translations is None
+            else [downsampled_translation(translations[0], metadata["scales"][0], base_downscale, method)]
+        )
 
     for _ in range(1, num_levels):
         if spatial_axes:
-            down = downsample_nearest(pyramid[-1], factors, spatial_axes)
+            down = downsample(pyramid[-1], factors, spatial_axes, method)
         else:
             down = pyramid[-1]
         pyramid.append(rechunk_to_shape(down, target_chunks))
@@ -108,8 +130,14 @@ def build_pyramid(
     for level in range(1, num_levels):
         scale_factor = factor_power(factors, level)
         new_scales.append(multiply_scales(new_scales[0], scale_factor))
+        if new_translations is not None:
+            new_translations.append(
+                downsampled_translation(new_translations[-1], new_scales[-2], factors, method)
+            )
 
     metadata["scales"] = new_scales
+    if new_translations is not None:
+        metadata["translations"] = new_translations
     metadata["size"] = [tuple(level.shape) for level in pyramid]
     metadata["chunksize"] = [tuple(level.chunksize) for level in pyramid]
     return pyramid, metadata

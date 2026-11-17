@@ -81,7 +81,12 @@ def create_empty_group(
         raise ValueError("Metadata is required to create an empty group.")
 
     root_ngff = _infer_ngff_version(root)
-    root_zarr = 3 if root_ngff == "0.5" else 2
+    root_zarr = root.metadata.zarr_format
+    if (root_ngff, root_zarr) not in {("0.4", 2), ("0.5", 3)}:
+        raise ValueError(
+            f"The root image is NGFF {root_ngff} on zarr v{root_zarr}; zarrsmith adds groups only "
+            "to NGFF 0.4 (zarr v2) or 0.5 (zarr v3) images, so the hierarchy keeps one version."
+        )
 
     if ngff_version is not None and ngff_version != root_ngff:
         raise ValueError(

@@ -10,7 +10,12 @@ import zarr
 
 from .microscope_manager import MicroscopeManager
 from ..utils.axes import normalize_axes, normalize_data_type
-from ..utils.ngff import _infer_data_type_from_group, _register_label_on_labels_group
+from ..utils.downsampling import dataset_transform_vector, multiscales_axes
+from ..utils.ngff import (
+    _extra_group_attributes,
+    _infer_data_type_from_group,
+    _register_label_on_labels_group,
+)
 from collections.abc import Iterator, Sequence
 
 logger = logging.getLogger("zarrsmith")
@@ -181,7 +186,7 @@ class ZarrManager(MicroscopeManager):
         and ``units`` are stored in the same order as the spatial axes appear in
         ``axes``.
         """
-        axes_info = multiscales.get("axes", [])
+        axes_info = multiscales_axes(multiscales)
         axis_names = []
         for axis in axes_info:
             if isinstance(axis, dict):
@@ -208,18 +213,25 @@ class ZarrManager(MicroscopeManager):
         channel_idx = axis_names.index("c") if "c" in axis_names else None
 
         scales = []
+        translations = []
+        transform_vector = dataset_transform_vector  # flattens NGFF 0.6 sequences
         for ds in datasets:
-            ct = ds.get("coordinateTransformations", [{}])
-            scale_vec = None
-            if ct and isinstance(ct, list):
-                for transform in ct:
-                    if isinstance(transform, dict) and transform.get("type", "scale") == "scale":
-                        scale_vec = transform.get("scale", None)
-                        break
+            scale_vec = transform_vector(ds, "scale")
             if scale_vec is None:
                 scales.append(tuple([1.0] * len(spatial_idx)))
             else:
                 scales.append(tuple(float(scale_vec[i]) for i in spatial_idx))
+            translation_vec = transform_vector(ds, "translation")
+            translations.append(
+                None if translation_vec is None
+                else tuple(float(translation_vec[i]) for i in spatial_idx)
+            )
+        # ``None`` when no level has a translation, so stores without one are
+        # written back without one; levels missing it then sit at the origin.
+        if all(t is None for t in translations):
+            translations = None
+        else:
+            translations = [t if t is not None else tuple([0.0] * len(spatial_idx)) for t in translations]
 
         units = tuple(
             axes_info[i].get("unit", None) if isinstance(axes_info[i], dict) else None
@@ -227,13 +239,7 @@ class ZarrManager(MicroscopeManager):
         )
 
         if time_idx is not None:
-            ct0 = datasets[0].get("coordinateTransformations", [{}])
-            scale0 = None
-            if ct0 and isinstance(ct0, list):
-                for transform in ct0:
-                    if isinstance(transform, dict) and transform.get("type", "scale") == "scale":
-                        scale0 = transform.get("scale", None)
-                        break
+            scale0 = transform_vector(datasets[0], "scale")
             time_increment = scale0[time_idx] if scale0 is not None else None
             time_increment_unit = (
                 axes_info[time_idx].get("unit", None)
@@ -264,6 +270,7 @@ class ZarrManager(MicroscopeManager):
             "chunksize": chunksize,
             "shards": shards,
             "scales": scales,
+            "translations": translations,
             "units": units,
             "time_increment": time_increment,
             "time_increment_unit": time_increment_unit,
@@ -275,7 +282,8 @@ class ZarrManager(MicroscopeManager):
             "data_type": data_type,
             "is_label": data_type == "label",
             "ngff_version": self.ngff_version,
-            "zarr_format": 3 if self.ngff_version == "0.5" else 2,
+            # NGFF 0.5 and later are zarr v3; the reader overrides this with the store's format.
+            "zarr_format": 2 if self.ngff_version in ("0.1", "0.2", "0.3", "0.4") else 3,
         }
 
     def _read_multiscale_group(
@@ -317,6 +325,9 @@ class ZarrManager(MicroscopeManager):
             data_type=_infer_data_type_from_group(group),
             zarr_levels=zarr_levels,
         )
+        extra = _extra_group_attributes(group)
+        metadata["extra_attributes"] = extra or None
+        metadata["zarr_format"] = group.metadata.zarr_format
 
         return data_levels, zarr_levels, metadata
 
@@ -594,8 +605,15 @@ class ZarrManager(MicroscopeManager):
         level: int = 0,
         group: Optional[str] = None,
         downscale_factor: int | Sequence[int] | None = None,
+        aligned: bool = False,
     ):
-        """Write an image patch into a root or subgroup pyramid and refresh lower levels."""
+        """Write an image patch into a root or subgroup pyramid and refresh lower levels.
+
+        With ``aligned=True`` a region that does not start and end on the shard grid
+        (the chunk grid on zarr v2 or unsharded arrays) of every level written raises
+        ``ValueError`` before anything is written: only aligned regions are safe to
+        write from several processes at once.
+        """
         from ..utils.write_image_region import write_image_region as _write_image_region
         return _write_image_region(
             root=self.root,
@@ -609,6 +627,7 @@ class ZarrManager(MicroscopeManager):
             level=level,
             group_name=group,
             downscale_factor=downscale_factor,
+            aligned=aligned,
         )
 
     def write_label_region(
@@ -621,8 +640,13 @@ class ZarrManager(MicroscopeManager):
         level: int = 0,
         group: str = None,
         downscale_factor: int | Sequence[int] | None = None,
+        aligned: bool = False,
     ):
-        """Write a label patch into a label pyramid and regenerate coarser levels."""
+        """Write a label patch into a label pyramid and regenerate coarser levels.
+
+        ``aligned=True`` checks the region against the shard/chunk grid as in
+        :meth:`write_image_region`.
+        """
         from ..utils.write_label_region import write_label_region as _write_label_region
         return _write_label_region(
             root=self.root,
@@ -635,8 +659,9 @@ class ZarrManager(MicroscopeManager):
             level=level,
             group_name=group,
             downscale_factor=downscale_factor,
+            aligned=aligned,
         )
-    
+
     def subset_dataset(
         self,
         T=None,
@@ -757,11 +782,18 @@ class ZarrManager(MicroscopeManager):
         start_level: int = 0,
         include_groups: bool = True,
         include_labels: bool = True,
+        method: Optional[str] = "nearest",
     ):
         """
-        Build/rebuild pyramids for raw, groups, and labels.
+        Build/rebuild pyramids for raw, groups, and labels, lazily in memory.
+
+        ``method`` is ``"nearest"`` (default), ``"mean"`` or ``"mode"``; ``None``
+        uses ``"mean"`` for intensity datasets and ``"nearest"`` for labels. To
+        write the levels of an on-disk store directly, see
+        :meth:`build_pyramid_inplace`.
         """
         from ..utils.pyramid import build_pyramid as _build_pyramid
+        from ..utils.downsampling import default_downsampling_method
 
         for name, dataset in self._iter_datasets(
             include_raw=True,
@@ -777,6 +809,7 @@ class ZarrManager(MicroscopeManager):
                 num_levels=num_levels,
                 downscale_factor=downscale_factor,
                 start_level=start_level,
+                method=method or default_downsampling_method(dataset.metadata.get("data_type")),
             )
 
             self._invalidate_zarr_data(dataset)
@@ -784,6 +817,46 @@ class ZarrManager(MicroscopeManager):
         self._sync_raw_aliases()
 
         logger.info("Zarr pyramids rebuilt.")
+
+    def build_pyramid_inplace(
+        self,
+        group: Optional[str] = None,
+        num_levels: Optional[int] = None,
+        downscale_factor: int | Sequence[int] = 2,
+        method: Optional[str] = None,
+        *,
+        num_workers: Optional[int] = None,
+        progress: bool = True,
+    ) -> None:
+        """Create or overwrite pyramid levels 1..N on disk from level 0 on disk.
+
+        Unlike :meth:`build_pyramid`, which works on the lazy in-memory copy, this
+        writes into this store directly, so it needs ``mode='r+'`` (or ``'a'``).
+        Level 0 is read lazily, and every coarser level is built from the level
+        above it, one task per output shard (zarr v3) or chunk (zarr v2).
+
+        ``group`` is ``None`` for the root image or a path such as
+        ``"labels/nuclei"``. ``method`` is ``"mean"``, ``"nearest"`` or ``"mode"``;
+        ``None`` uses ``"nearest"`` for labels and ``"mean"`` otherwise. See
+        :func:`zarrsmith.utils.pyramid_inplace.build_pyramid_inplace` for the rest.
+        The manager is re-read afterwards.
+        """
+        from ..utils.pyramid_inplace import build_pyramid_inplace as _build_inplace
+
+        if self.mode not in ("r+", "a", "w"):
+            raise PermissionError(
+                f"Dataset opened in read-only mode ({self.mode!r}). Reopen with mode='r+' to build the pyramid in place."
+            )
+        _build_inplace(
+            self.root,
+            group,
+            num_levels=num_levels,
+            downscale_factor=downscale_factor,
+            method=method,
+            num_workers=num_workers,
+            progress=progress,
+        )
+        self.read()
 
     def reorder_channels(
         self,

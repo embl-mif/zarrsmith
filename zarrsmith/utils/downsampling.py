@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from numbers import Real
 from typing import Any, TypeAlias
 
@@ -98,9 +98,64 @@ def relative_level_factors_for_axes(
         for level in range(total_levels)
     ]
 
+def iter_dataset_transforms(dataset: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """The transformations of one multiscales dataset, in order.
+
+    NGFF 0.4/0.5 list ``[scale, translation]`` directly; NGFF 0.6 may wrap them
+    in one ``{"type": "sequence", "transformations": [...]}``, which is unpacked.
+    """
+    for transform in dataset.get("coordinateTransformations", []) or []:
+        if not isinstance(transform, dict):
+            continue
+        if transform.get("type") == "sequence":
+            yield from iter_dataset_transforms(
+                {"coordinateTransformations": transform.get("transformations", [])}
+            )
+        else:
+            yield transform
+
+
+def dataset_transform_vector(dataset: dict[str, Any], kind: str) -> list[float] | None:
+    """The ``scale`` or ``translation`` vector of a dataset, or ``None`` if it has none."""
+    for transform in iter_dataset_transforms(dataset):
+        # An untyped entry with a "scale" key is read as a scale, as before.
+        if transform.get("type", kind) == kind and transform.get(kind) is not None:
+            return [float(v) for v in transform[kind]]
+    return None
+
+
+def multiscales_axes(multiscales: dict[str, Any]) -> list[Any]:
+    """The axes entries of a multiscales block, whatever the NGFF version.
+
+    NGFF 0.4/0.5 store them in ``axes``. NGFF 0.6 moves them into
+    ``coordinateSystems``: the one the level transforms output to (the
+    image's intrinsic system) is used, else the first one.
+    """
+    if multiscales.get("axes"):
+        return list(multiscales["axes"])
+    systems = multiscales.get("coordinateSystems") or []
+    if not systems:
+        return []
+    target = None
+    datasets = multiscales.get("datasets") or []
+    if datasets:
+        for transform in datasets[0].get("coordinateTransformations", []) or []:
+            output = transform.get("output") if isinstance(transform, dict) else None
+            if isinstance(output, dict):
+                target = output.get("name")
+            elif isinstance(output, str):
+                target = output
+            if target:
+                break
+    for system in systems:
+        if target is not None and system.get("name") == target:
+            return list(system.get("axes") or [])
+    return list(systems[0].get("axes") or [])
+
+
 def axis_names_from_multiscales(multiscales: dict[str, Any]) -> list[str]:
     names: list[str] = []
-    for axis in multiscales.get("axes", []) or []:
+    for axis in multiscales_axes(multiscales):
         if isinstance(axis, dict):
             name = axis.get("name")
         else:
@@ -111,11 +166,7 @@ def axis_names_from_multiscales(multiscales: dict[str, Any]) -> list[str]:
 
 
 def _dataset_scale_vector(dataset: dict[str, Any]) -> Sequence[int | float] | None:
-    for transform in dataset.get("coordinateTransformations", []) or []:
-        if isinstance(transform, dict) and transform.get("type") == "scale":
-            return transform.get("scale")
-
-    return None
+    return dataset_transform_vector(dataset, "scale")
 
 
 def level_scale_ratios_from_multiscales(
@@ -180,3 +231,152 @@ def downsample_nearest(arr, factors: Sequence[int], spatial_axes: Sequence[int])
     if any(width != (0, 0) for width in pad_width):
         arr = xp.pad(arr, pad_width, mode="edge")
     return arr[tuple(slicing)]
+
+
+#: Downsampling methods of :func:`downsample` (and the pyramid builders).
+DOWNSAMPLING_METHODS: tuple[str, ...] = ("mean", "nearest", "mode")
+
+
+def default_downsampling_method(data_type: str | None) -> str:
+    """``"nearest"`` for label data, ``"mean"`` for intensity (and probability) data."""
+    from .axes import normalize_data_type
+
+    return "nearest" if normalize_data_type(data_type) == "label" else "mean"
+
+
+def resolve_downsampling_method(method: str | None, data_type: str | None) -> str:
+    """Validate ``method`` for data of ``data_type``; ``None`` picks the default.
+
+    ``"mean"`` invents label values that are in neither neighbour, so it is
+    refused for label data.
+    """
+    from .axes import normalize_data_type
+
+    if method is None:
+        return default_downsampling_method(data_type)
+    method = str(method).strip().lower()
+    if method not in DOWNSAMPLING_METHODS:
+        raise ValueError(f"Unknown downsampling method {method!r}; use one of {', '.join(DOWNSAMPLING_METHODS)}.")
+    if method == "mean" and normalize_data_type(data_type) == "label":
+        raise ValueError("method='mean' would mix label values: use 'nearest' or 'mode' for labels.")
+    return method
+
+
+def downsampled_translation(
+    translation: Sequence[float],
+    scale: Sequence[float],
+    factors: Sequence[int | float],
+    method: str,
+) -> tuple[float, ...]:
+    """Translation of the next pyramid level, in the same (spatial) axis order.
+
+    ``translation`` and ``scale`` are those of the finer level. NGFF places a
+    pixel's centre at ``translation + index * scale``. ``"nearest"`` keeps the
+    first pixel of every block, so the origin does not move; ``"mean"`` and
+    ``"mode"`` summarize the whole block, whose centre is ``(factor - 1) / 2``
+    fine pixels further.
+    """
+    if method == "nearest":
+        return tuple(float(t) for t in translation)
+    return tuple(
+        float(t) + (float(f) - 1.0) / 2.0 * float(s)
+        for t, s, f in zip(translation, scale, factors)
+    )
+
+
+def mean_accumulator_dtype(dtype) -> np.dtype:
+    """Float type ``"mean"`` averages in: float32 for 8/16-bit integers, bool and
+    float16/32 (exact enough, half the memory of float64), float64 otherwise."""
+    dtype = np.dtype(dtype)
+    if dtype.itemsize <= 2 or dtype == np.float32:
+        return np.dtype(np.float32)
+    return np.dtype(np.float64)
+
+
+def _block_mode(windows: np.ndarray) -> np.ndarray:
+    """Most frequent value along the last axis (ties: the smallest value)."""
+    ordered = np.sort(windows, axis=-1)
+    counts = np.zeros(ordered.shape, dtype=np.int32)
+    for i in range(ordered.shape[-1]):
+        counts[..., i] = (ordered == ordered[..., i : i + 1]).sum(axis=-1)
+    best = np.argmax(counts, axis=-1)  # first maximum: the smallest of tied values
+    return np.take_along_axis(ordered, best[..., None], axis=-1)[..., 0]
+
+
+def downsample_numpy(
+    arr: np.ndarray,
+    factors: Sequence[int],
+    spatial_axes: Sequence[int],
+    method: str = "nearest",
+) -> np.ndarray:
+    """Downsample a NumPy array along ``spatial_axes`` by integer ``factors``.
+
+    ``"nearest"`` keeps the first pixel of every block, ``"mean"`` averages the
+    block (rounded back to the input dtype for integers) and ``"mode"`` keeps its
+    most frequent value. Axes that do not divide by their factor are edge-padded
+    first, so the output length is always ``ceil(n / factor)``.
+    """
+    if len(factors) != len(spatial_axes):
+        raise ValueError("factors must match spatial_axes length.")
+    if method == "nearest":
+        return np.asarray(downsample_nearest(arr, factors, spatial_axes))
+    if method not in DOWNSAMPLING_METHODS:
+        raise ValueError(f"Unknown downsampling method {method!r}; use one of {', '.join(DOWNSAMPLING_METHODS)}.")
+
+    per_axis = [1] * arr.ndim
+    for axis, factor in zip(spatial_axes, factors):
+        per_axis[axis] = int(factor)
+    if all(f == 1 for f in per_axis):
+        return arr
+    pad = [(0, -n % f) for n, f in zip(arr.shape, per_axis)]
+    if any(p != (0, 0) for p in pad):
+        arr = np.pad(arr, pad, mode="edge")
+
+    # (n0/f0, f0, n1/f1, f1, ...) then move every factor axis to the end.
+    split = []
+    for n, f in zip(arr.shape, per_axis):
+        split.extend((n // f, f))
+    blocks = arr.reshape(split)
+    ndim = arr.ndim
+    blocks = blocks.transpose([2 * i for i in range(ndim)] + [2 * i + 1 for i in range(ndim)])
+    windows = blocks.reshape(blocks.shape[:ndim] + (-1,))
+
+    if method == "mode":
+        return _block_mode(windows)
+    out = windows.mean(axis=-1, dtype=mean_accumulator_dtype(arr.dtype))
+    dtype = arr.dtype
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        return np.clip(np.rint(out), info.min, info.max).astype(dtype)
+    if np.issubdtype(dtype, np.bool_):
+        return out >= 0.5
+    return out.astype(dtype)
+
+
+def downsample(arr, factors: Sequence[int], spatial_axes: Sequence[int], method: str = "nearest"):
+    """Downsample a NumPy or Dask array (see :func:`downsample_numpy` for ``method``)."""
+    if method == "nearest" or not isinstance(arr, da.Array):
+        if method == "nearest":
+            return downsample_nearest(arr, factors, spatial_axes)
+        return downsample_numpy(arr, factors, spatial_axes, method)
+
+    per_axis = [1] * arr.ndim
+    for axis, factor in zip(spatial_axes, factors):
+        per_axis[axis] = int(factor)
+    pad = [(0, -n % f) for n, f in zip(arr.shape, per_axis)]
+    if any(p != (0, 0) for p in pad):
+        arr = da.pad(arr, pad, mode="edge")
+    # Every block must hold whole windows: round the chunks up to multiples of the factors.
+    chunks = tuple(
+        max(f, -(-int(c) // f) * f) for c, f in zip(arr.chunksize, per_axis)
+    )
+    arr = arr.rechunk(chunks)
+    out_chunks = tuple(tuple(c // f for c in axis_chunks) for axis_chunks, f in zip(arr.chunks, per_axis))
+    return arr.map_blocks(
+        downsample_numpy,
+        factors,
+        spatial_axes,
+        method,
+        chunks=out_chunks,
+        dtype=arr.dtype,
+    )

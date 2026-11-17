@@ -662,6 +662,152 @@ def _add_resample_arguments(parser):
                           'capped at 8, and fewer if memory requires it.')
 
 
+ALLOCATE_HELP = """\
+    Create an empty OME-Zarr image, to be filled tile by tile (e.g. by parallel jobs) and then
+    given its pyramid with `zarrsmith pyramid`. Its geometry comes from a template OME-Zarr image,
+    or from --size/--axes/--scale.
+
+    Examples:
+      zarrsmith allocate -t raw.ome.zarr -o probabilities.ome.zarr --dtype float32 --num_channels 3
+      zarrsmith allocate -t raw.ome.zarr -o seg.ome.zarr --data_type label --dtype uint32 \\
+          --crop "t=0:10;y=512:1536" --attrs '{"t_range": [0, 10]}'
+      zarrsmith allocate -o new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale 2 0.5 0.5
+
+    From a template, the output keeps its axes, level-0 size, dtype, pixel size, units, origin
+    (translation), channels, chunks, shards and zarr format, unless an option below changes them.
+    A label output (--data_type label) drops the template's channel axis unless channels are given.
+    A crop moves the origin, so the output gets a translation that keeps it where it was.
+    Zarr v2 outputs (NGFF 0.4) have no shards: explicit --shards are refused, "auto" is dropped.
+
+    Write tiles that start and end on the shard grid (the chunk grid without shards), e.g. with
+    ZarrManager(..., mode="r+").write_image_region(tile, ..., aligned=True), so parallel writers
+    never share a file.
+"""
+
+PYRAMID_HELP = """\
+    Build the pyramid of an OME-Zarr image in place: levels 1..N are created (or replaced) from
+    level 0, each level from the one above it, one task per output shard (chunk on zarr v2).
+    The format, codecs and chunks come from level 0; the multiscales metadata is updated.
+
+    Examples:
+      zarrsmith pyramid -z probabilities.ome.zarr
+      zarrsmith pyramid -z seg.ome.zarr --num_levels 4 --downscale_factor 1 2 2
+      zarrsmith pyramid -z image.ome.zarr --group labels/nuclei --method mode
+      zarrsmith pyramid -z image.ome.zarr --group all
+
+    Methods: "mean" averages each block (default for intensity data), "nearest" keeps one pixel
+    of it (default for labels) and "mode" keeps its most frequent value (smoother label pyramids).
+"""
+
+
+def parse_crop_spec(value):
+    """Parse --crop "t=0:10;y=512:1536" (or several "axis=start:stop" values) into a dict."""
+    if value is None:
+        return None
+    tokens = value if isinstance(value, (list, tuple)) else [value]
+    crop = {}
+    for token in tokens:
+        for part in re.split(r'[;,\s]+', str(token).strip()):
+            if not part:
+                continue
+            match = re.fullmatch(r'([tczyxTCZYX])=(-?\d*):(-?\d*)', part)
+            if match is None:
+                raise argparse.ArgumentTypeError(
+                    f"Invalid crop '{part}'. Use axis=start:stop, e.g. \"t=0:10;y=512:1536\"."
+                )
+            axis, start, stop = match.groups()
+            crop[axis.lower()] = (int(start) if start else None, int(stop) if stop else None)
+    return crop or None
+
+
+def parse_attrs_spec(value):
+    """Parse --attrs: a JSON object, or the path of a JSON file holding one."""
+    import json
+
+    if value is None:
+        return None
+    text = str(value)
+    if os.path.isfile(text):
+        with open(text, encoding="utf-8") as f:
+            text = f.read()
+    try:
+        attrs = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"--attrs is not valid JSON: {exc}") from None
+    if not isinstance(attrs, dict):
+        raise argparse.ArgumentTypeError("--attrs must be a JSON object, e.g. '{\"t_range\": [0, 10]}'.")
+    return attrs
+
+
+def _add_allocate_arguments(parser):
+    src = parser.add_argument_group('Template (or --size/--axes)')
+    src.add_argument('-t', '--template', type=valid_input_path,
+                     help='OME-Zarr image whose root image gives the geometry and metadata.')
+    src.add_argument('-sz', '--size', nargs='+', type=int, metavar='N',
+                     help='Without a template: level-0 size, one value per axis of --axes.')
+    src.add_argument('-ax', '--axes', type=str.lower, help='Without a template: axes, e.g. tczyx or zyx.')
+    src.add_argument('-sc', '--scale', nargs='+', type=float, metavar='SIZE',
+                     help='Pixel size: one value, or one per spatial axis (e.g. Z Y X). Default: the '
+                          "template's, else 1.")
+    src.add_argument('-u', '--units', nargs='+', metavar='UNIT',
+                     help="Spatial unit(s). Default: the template's, else micrometer.")
+    src.add_argument('-ti', '--time_increment', type=float, help="Time step. Default: the template's, else 1.")
+
+    out = parser.add_argument_group('Output')
+    out.add_argument('-o', '--out', '-z', '--zarr_path', dest='out', type=os.path.abspath, required=True,
+                     help='Path of the new .ome.zarr.')
+    out.add_argument('-dt', '--dtype', help="Data type, e.g. uint16, uint32, float32. Default: the template's.")
+    out.add_argument('-dty', '--data_type', choices=['intensity', 'label'],
+                     help="intensity (images, probabilities) or label. Default: the template's.")
+    out.add_argument('-cn', '--channel_names', nargs='+', help='Channel names (sets the number of channels).')
+    out.add_argument('-cc', '--channel_colors', nargs='+', type=parse_color, help='Channel colors.')
+    out.add_argument('-nc', '--num_channels', type=int, help='Number of channels; adds a c axis if needed.')
+    out.add_argument('-cr', '--crop', nargs='+', type=str,
+                     help='Part of the template to keep, as axis=start:stop, e.g. "t=0:10;y=512:1536".')
+    out.add_argument('-cs', '--chunk_size', nargs='+', type=int,
+                     help="Level-0 chunks, one per output axis. Default: the template's.")
+    out.add_argument('-sh', '--shards', nargs='+',
+                     help='"auto", a shard shape (one per output axis), or "none". Default: the template\'s '
+                          '(zarr v3), "auto" without a template. Not available on zarr v2.')
+    out.add_argument('-stm', '--shard_target_mb', type=float, default=1024.0,
+                     help='Target shard size in MB for --shards auto.')
+    out.add_argument('-nl', '--num_levels', type=int, default=1,
+                     help='Levels to create. Keep 1 and run `zarrsmith pyramid` once level 0 is filled.')
+    out.add_argument('-df', '--downscale_factor', nargs='+', type=int, default=[2],
+                     help='Factor between levels when --num_levels > 1: one value, or one per spatial axis.')
+    out.add_argument('-tr', '--translation', nargs='*', type=float, metavar='ORIGIN',
+                     help='Without a value: always write a translation (the origin of the template, moved by '
+                          '--crop). With one value per spatial axis: the level-0 origin. Default: write one '
+                          'when the template has one or the crop moves the origin.')
+    out.add_argument('-zf', '--zarr_format', type=int, choices=[2, 3],
+                     help="2 (NGFF 0.4) or 3 (NGFF 0.5). Default: the template's, else 3.")
+    out.add_argument('-cp', '--compressor', type=str.lower, choices=['blosc', 'gzip', 'none'], default='blosc',
+                     help='Codec; "gzip" needs --zarr_format 2.')
+    out.add_argument('-cpl', '--compressor_level', type=int, default=1, help='Compression level, 0 to 9.')
+    out.add_argument('-at', '--attrs', type=parse_attrs_spec,
+                     help='Custom group attributes as a JSON object (or a .json file), e.g. '
+                          '\'{"t_range": [0, 10]}\'. Stored next to the NGFF metadata.')
+    out.add_argument('-n', '--name', help="Name of the image in the metadata. Default: the template's.")
+    out.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
+
+
+def _add_pyramid_arguments(parser):
+    parser.add_argument('-z', '--zarr_path', type=valid_input_path, required=True,
+                        help='OME-Zarr store to update in place.')
+    parser.add_argument('-g', '--group', nargs='+', default=None,
+                        help='Image(s) to process: a group path such as labels/nuclei, or "all" for the root '
+                             'image, every image group and every label. Default: the root image.')
+    parser.add_argument('-nl', '--num_levels', type=int, default=None,
+                        help='Total number of levels, level 0 included. Default: halve until no spatial axis '
+                             'is above 2048 pixels.')
+    parser.add_argument('-df', '--downscale_factor', nargs='+', type=int, default=[2],
+                        help='Factor between levels: one value, or one per spatial axis (e.g. 1 2 2 keeps Z).')
+    parser.add_argument('-me', '--method', choices=['mean', 'nearest', 'mode'], default=None,
+                        help='Downsampling method. Default: mean for intensity data, nearest for labels.')
+    parser.add_argument('-nw', '--num_workers', type=int, default=None,
+                        help='Number of threads. Default: half of the available cores, capped at 8.')
+
+
 #: Old command names, kept working: old name -> (mode, new spelling)
 RENAMED = {
     '2zarr': ('convert', 'zarrsmith convert'),
@@ -726,7 +872,7 @@ def _parse_arguments(argv=None):
         title='Commands',
         description="Run `zarrsmith <command> -h` for the options of a command.",
         dest='command',
-        metavar='{convert,fuse,chromatic-shift,resample}',
+        metavar='{convert,fuse,chromatic-shift,resample,allocate,pyramid}',
         required=True,
     )
 
@@ -784,6 +930,28 @@ def _parse_arguments(argv=None):
     )
     resample.set_defaults(mode='resample', renamed_to=None)
     _add_resample_arguments(resample)
+
+    #####################################################################################
+    # allocate: an empty OME-Zarr image, from a template or an explicit geometry
+    allocate = subparsers.add_parser(
+        'allocate',
+        help='Create an empty OME-Zarr image from a template image or an explicit size.',
+        description=textwrap.dedent(ALLOCATE_HELP),
+        formatter_class=MultilineDefaultsHelpFormatter,
+    )
+    allocate.set_defaults(mode='allocate', renamed_to=None)
+    _add_allocate_arguments(allocate)
+
+    #####################################################################################
+    # pyramid: build the pyramid of an OME-Zarr image in place
+    pyramid = subparsers.add_parser(
+        'pyramid',
+        help='Build (or rebuild) the pyramid levels of an OME-Zarr image in place, from level 0.',
+        description=textwrap.dedent(PYRAMID_HELP),
+        formatter_class=MultilineDefaultsHelpFormatter,
+    )
+    pyramid.set_defaults(mode='pyramid', renamed_to=None)
+    _add_pyramid_arguments(pyramid)
 
     #####################################################################################
     # Old names (not listed in the help), with their original arguments
@@ -851,4 +1019,18 @@ def _parse_arguments(argv=None):
                           '-ps/--pixel_size (or --batch CSV)')
         elif len(args.pixel_size) not in (1, 3):
             command.error('-ps/--pixel_size takes one value, or three values in Z Y X order.')
+
+    # allocate: a template, or --size and --axes
+    if args.mode == 'allocate':
+        command = subparsers.choices['allocate']
+        if args.template is not None and (args.size is not None or args.axes is not None):
+            command.error('give either -t/--template or --size/--axes, not both.')
+        if args.template is None and (args.size is None or args.axes is None):
+            command.error('the following arguments are required: -t/--template, or --size and --axes')
+        if args.template is None and len(args.size) != len(args.axes):
+            command.error(f'--size has {len(args.size)} values for the {len(args.axes)} axes {args.axes!r}.')
+        try:
+            args.crop = parse_crop_spec(args.crop)
+        except argparse.ArgumentTypeError as error:
+            command.error(str(error))
     return args

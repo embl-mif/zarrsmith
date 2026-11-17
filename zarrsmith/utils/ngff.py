@@ -41,6 +41,15 @@ _NGFF_FORMATS: dict[str, type[Format]] = {"0.4": FormatV04, "0.5": FormatV05}
 # zarrsmith-specific key of older versions, dropped so it does not go stale.
 _IMAGE_METADATA_KEYS: tuple[str, ...] = ("multiscales", "omero", "image-label", "data_type")
 
+# Group attributes that belong to NGFF (or to zarr itself) rather than to the user.
+# On zarr v3 every NGFF key is inside ``ome``; on v2 they sit next to the user's keys.
+_NGFF_ATTRIBUTE_KEYS: frozenset[str] = frozenset(
+    {
+        "ome", "multiscales", "omero", "image-label", "labels", "plate", "well",
+        "bioformats2raw.layout", "data_type", "_ARRAY_DIMENSIONS",
+    }
+)
+
 # Axes that `shards="auto"` never merges chunks along by default. Timepoints
 # and channels are typically read/processed independently, so keeping each
 # one in its own shard (or unsharded chunk) preserves that access pattern;
@@ -226,6 +235,38 @@ def _register_label_on_labels_group(root: zarr.Group, label_name: str, ngff_vers
     _drop_ngff_keys(root, fmt, ("labels",))
 
 
+def _extra_group_attributes(group: zarr.Group) -> dict[str, Any]:
+    """Group attributes that are not NGFF metadata (e.g. a pipeline's ``t_range``).
+
+    These are the top-level attributes other than ``ome`` on zarr v3, and the
+    attributes next to ``multiscales`` other than the NGFF keys on zarr v2.
+    """
+    return {k: v for k, v in group.attrs.asdict().items() if k not in _NGFF_ATTRIBUTE_KEYS}
+
+
+def _write_extra_attributes(group: zarr.Group, extra: dict[str, Any] | None) -> None:
+    """Store ``extra`` on ``group`` next to the NGFF metadata (outside ``ome`` on v3)."""
+    if not extra:
+        return
+    clash = sorted(set(extra) & _NGFF_ATTRIBUTE_KEYS)
+    if clash:
+        raise ValueError(f"Extra attributes cannot use NGFF metadata keys: {', '.join(clash)}.")
+    group.attrs.update(dict(extra))
+
+
+def _set_multiscales(group: zarr.Group, multiscales: list[dict[str, Any]], ngff_version: str) -> None:
+    """Replace the ``multiscales`` block of ``group``, leaving every other key as it is.
+
+    Written with ome-zarr-py's ``add_metadata``, so the NGFF version decides the
+    layout (flat attributes on 0.4, inside ``ome`` on 0.5).
+    """
+    fmt = _ngff_format(ngff_version)
+    entry: dict[str, Any] = {"multiscales": multiscales}
+    if fmt.zarr_format == 3:
+        entry["version"] = fmt.version
+    add_metadata(group, entry, fmt=fmt)
+
+
 def _get_group_ome_attrs(group: zarr.Group) -> dict[str, Any]:
     """Return the effective OME-NGFF metadata mapping for a group."""
     attrs = group.attrs.asdict()
@@ -277,6 +318,10 @@ def _write_ngff_metadata(
     ``level0`` is the first pyramid level (anything with ``shape``, ``ndim`` and
     ``dtype``), used for the channel count and the default display window. NGFF keys
     from an earlier write are replaced; any other key on the group is kept.
+
+    ``metadata['translations']`` (one spatial origin per level, optional) adds a
+    ``translation`` after each level's ``scale``; ``metadata['extra_attributes']``
+    (a dict, optional) is stored next to the NGFF metadata.
     """
     fmt = _ngff_format(ngff_version)
     axes = normalize_axes(axes)
@@ -287,6 +332,7 @@ def _write_ngff_metadata(
         axes=axes,
         scales=metadata["scales"],
         time_increment=metadata.get("time_increment"),
+        translations=metadata.get("translations"),
     )
     extra: dict[str, Any] = {}
     if data_type == "intensity":
@@ -306,6 +352,7 @@ def _write_ngff_metadata(
             {"image-label": {"version": fmt.version, **(label_source or {})}},
             fmt=fmt,
         )
+    _write_extra_attributes(group, metadata.get("extra_attributes"))
 
 
 def _resolve_format(cfg: ZarrWriteConfig) -> tuple[str, int]:
@@ -383,9 +430,9 @@ def _resolve_num_workers(cfg: ZarrWriteConfig, block_bytes: int = 0) -> int:
         if fit < workers:
             if cfg.num_workers is not None or fit == 1:
                 warnings.warn(
-                    f"Shard-sized blocks of {block_bytes / 1024**2:.0f} MB limit write "
-                    f"parallelism to {fit} worker(s) (requested {workers}). Use smaller "
-                    "shards (shard_target_mb / shards) to write in parallel.",
+                    f"Blocks of {block_bytes / 1024**2:.0f} MB (a shard, or a chunk without "
+                    f"shards) limit write parallelism to {fit} worker(s) (requested {workers}). "
+                    "Use smaller shards (shard_target_mb / shards) or chunks to write in parallel.",
                     stacklevel=3,
                 )
             workers = fit
@@ -769,10 +816,26 @@ def _resolve_creation_shards(
     when not given explicitly. Shards inherited from metadata whose rank does
     not match the new arrays (for example image metadata reused for a label
     group without channel axis) are ignored with a warning instead of failing.
+
+    Zarr v2 has no sharding: an explicit shard shape raises, while ``"auto"`` and
+    shards inherited from metadata (e.g. of a v3 template) are dropped with a warning.
     """
     inherited = shards is None and metadata.get("shards") is not None
     if shards is None:
         shards = metadata.get("shards")
+    if zarr_format == 2 and shards is not None:
+        if not inherited and not isinstance(shards, str):
+            raise ValueError(
+                f"shards={shards!r}: sharding needs zarr_format=3 (NGFF 0.5); zarr v2 has no shards."
+            )
+        if not inherited or any(s is not None for s in _as_level_list(shards)):
+            warnings.warn(
+                f"Sharding ({'inherited ' if inherited else ''}shards={shards!r}) is not supported "
+                "by zarr_format=2: the arrays are written without shards.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return [None] * len(sizes)
     if inherited and not isinstance(shards, str):
         ndim = len(chunks[0])
         per_level = shards if isinstance(shards[0], (list, tuple)) else [shards]
@@ -796,6 +859,16 @@ def _resolve_creation_shards(
         axes=axes,
         exclude_axes=shard_exclude_axes,
     )
+
+
+def _as_level_list(shards: Any) -> list[Any]:
+    """A shards spec as one entry per level (a single shape counts as one level)."""
+    if shards is None or isinstance(shards, str):
+        return [shards]
+    shards = list(shards)
+    if shards and all(isinstance(s, (int, np.integer)) for s in shards):
+        return [tuple(shards)]
+    return shards
 
 
 def _create_level_arrays(
@@ -864,6 +937,21 @@ def _validate_metadata(
                 f"({len(spatial_axes)}), got {len(scale)}."
             )
 
+    translations = metadata.get("translations")
+    if translations is not None:
+        if len(translations) != len(data_levels):
+            raise ValueError("metadata['translations'] must contain one entry per pyramid level.")
+        for translation in translations:
+            if len(translation) != len(spatial_axes):
+                raise ValueError(
+                    "Each translation entry must match the number of spatial axes "
+                    f"({len(spatial_axes)}), got {len(translation)}."
+                )
+
+    extra = metadata.get("extra_attributes")
+    if extra is not None and not isinstance(extra, dict):
+        raise TypeError("metadata['extra_attributes'] must be a dict.")
+
     spatial_units = list(metadata.get("units", ()))
     if spatial_units and len(spatial_units) != len(spatial_axes):
         raise ValueError(
@@ -895,23 +983,37 @@ def _build_coordinate_transformations(
     axes: tuple[str, ...] | str,
     scales: Sequence[Sequence[float]],
     time_increment: float | None,
+    translations: Sequence[Sequence[float]] | None = None,
 ) -> list[list[dict[str, Any]]]:
-    """Generate one NGFF scale transformation entry per pyramid level."""
+    """Generate the NGFF transformations of every pyramid level.
+
+    Each level gets a ``scale``, followed by a ``translation`` when
+    ``translations`` (spatial origins, one per level) is given; NGFF 0.4 and 0.5
+    both require the scale first. Non-spatial axes are not translated.
+    """
     axes = normalize_axes(axes)
-    out = []
-    for spatial_scale in scales:
-        spatial_iter = iter(spatial_scale)
-        full_scale = []
+
+    def full_vector(spatial_values, t_value, other_value):
+        spatial_iter = iter(spatial_values)
+        out = []
         for ax in axes:
             if ax == "t":
-                full_scale.append(float(time_increment if time_increment is not None else 1.0))
-            elif ax == "c":
-                full_scale.append(1.0)
+                out.append(float(t_value))
             elif ax in SPATIAL_AXIS_SET:
-                full_scale.append(float(next(spatial_iter)))
+                out.append(float(next(spatial_iter)))
             else:
-                full_scale.append(1.0)
-        out.append([{"type": "scale", "scale": full_scale}])
+                out.append(float(other_value))
+        return out
+
+    out = []
+    for level, spatial_scale in enumerate(scales):
+        t_scale = time_increment if time_increment is not None else 1.0
+        level_transforms = [{"type": "scale", "scale": full_vector(spatial_scale, t_scale, 1.0)}]
+        if translations is not None:
+            level_transforms.append(
+                {"type": "translation", "translation": full_vector(translations[level], 0.0, 0.0)}
+            )
+        out.append(level_transforms)
     return out
 
 

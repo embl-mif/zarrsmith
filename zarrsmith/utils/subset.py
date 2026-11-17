@@ -95,6 +95,19 @@ def subset_metadata(
             new_scales[scale_index] *= spacing_by_axis.get(ax, 1)
     new_metadata["scales"] = [tuple(new_scales)]
 
+    # The first selected pixel becomes the new origin.
+    translations = metadata.get("translations")
+    if translations is not None:
+        new_translation = list(translations[0])
+        for scale_index, ax in enumerate(spatial_axes):
+            selection = axis_map[ax]
+            if selection is None:
+                continue
+            indices = index_list_from_selection(selection, shape[axes.index(ax)])
+            if indices:
+                new_translation[scale_index] += indices[0] * old_scales[scale_index]
+        new_metadata["translations"] = [tuple(new_translation)]
+
     if C is not None and "c" in axes:
         c_axis = axes.index("c")
         if "channel_names" in metadata:

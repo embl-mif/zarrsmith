@@ -21,6 +21,7 @@ def write_label_region(
     level: int = 0,
     group_name: str = "labels/nuclei",
     downscale_factor: SpatialFactor | None = None,
+    aligned: bool = False,
 ):
     """
     Internal function that writes label data (pyramid or single array) to a zarr group.
@@ -43,6 +44,9 @@ def write_label_region(
         Pyramid level of the provided `data` if `data` is a single array.
     group_name : str, optional
         Name of the label group inside the root (e.g. "labels/nuclei").
+    aligned : bool
+        Refuse regions off the shard/chunk grid; see
+        :func:`zarrsmith.utils.write_image_region.check_region_aligned`.
     """
     return _write_region(
         root=root,
@@ -53,6 +57,7 @@ def write_label_region(
         group_name=group_name,
         downscale_factor=downscale_factor,
         expected_data_type="label",
+        aligned=aligned,
     )
 
 def _scale_index(index_tuple, shape, scale_factor: SpatialFactor, axes="tzyx"):

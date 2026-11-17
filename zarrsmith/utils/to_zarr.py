@@ -82,6 +82,8 @@ def _drop_singleton_axes(
     if len(keep_spatial) != len(spatial):
         if out.get("scales") is not None:
             out["scales"] = [tuple(s[i] for i in keep_spatial) for s in out["scales"]]
+        if out.get("translations") is not None:
+            out["translations"] = [tuple(t[i] for i in keep_spatial) for t in out["translations"]]
         if out.get("units"):
             out["units"] = tuple(out["units"][i] for i in keep_spatial)
     if "t" in dropped_axes:
