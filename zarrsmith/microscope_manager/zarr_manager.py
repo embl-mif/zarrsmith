@@ -10,7 +10,7 @@ import zarr
 
 from .microscope_manager import MicroscopeManager
 from ..utils.axes import normalize_axes, normalize_data_type
-from ..utils.downsampling import iter_dataset_transforms, multiscales_axes
+from ..utils.downsampling import iter_dataset_transforms, multiscales_axes, recorded_downsampling_method
 from ..utils.ngff import (
     _extra_group_attributes,
     _infer_data_type_from_group,
@@ -366,6 +366,8 @@ class ZarrManager(MicroscopeManager):
         extra = _extra_group_attributes(group)
         metadata["extra_attributes"] = extra or None
         metadata["zarr_format"] = group.metadata.zarr_format
+        # How the stored levels were made (None if not recorded), kept on a re-write.
+        metadata["downsampling_method"] = recorded_downsampling_method(multiscales)
 
         return data_levels, zarr_levels, metadata
 
@@ -820,18 +822,17 @@ class ZarrManager(MicroscopeManager):
         start_level: int = 0,
         include_groups: bool = True,
         include_labels: bool = True,
-        method: Optional[str] = "nearest",
+        method: Optional[str] = None,
     ):
         """
         Build/rebuild pyramids for raw, groups, and labels, lazily in memory.
 
-        ``method`` is ``"nearest"`` (default), ``"mean"`` or ``"mode"``; ``None``
+        ``method`` is ``"mean"``, ``"nearest"`` or ``"mode"``; ``None`` (default)
         uses ``"mean"`` for intensity datasets and ``"nearest"`` for labels. To
         write the levels of an on-disk store directly, see
         :meth:`build_pyramid_inplace`.
         """
         from ..utils.pyramid import build_pyramid as _build_pyramid
-        from ..utils.downsampling import default_downsampling_method
 
         for name, dataset in self._iter_datasets(
             include_raw=True,
@@ -847,7 +848,7 @@ class ZarrManager(MicroscopeManager):
                 num_levels=num_levels,
                 downscale_factor=downscale_factor,
                 start_level=start_level,
-                method=method or default_downsampling_method(dataset.metadata.get("data_type")),
+                method=method,
             )
 
             self._invalidate_zarr_data(dataset)

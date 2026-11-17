@@ -99,18 +99,6 @@ def translation_vector(translation: Mapping[str, float], axes: str | Sequence[st
     return [float(translation.get(ax, 0.0)) if ax in SPATIAL_AXIS_SET else 0.0 for ax in normalize_axes(axes)]
 
 
-def level_translations(
-    translations: Optional[Sequence[Mapping[str, float]]],
-    n_levels: int,
-    source_level: int = 0,
-) -> Optional[List[Translation]]:
-    """``n_levels`` copies of the translation of ``source_level`` (the last one if missing)."""
-    if not translations:
-        return None
-    base = translations[min(source_level, len(translations) - 1)]
-    return [dict(base) for _ in range(n_levels)]
-
-
 def pyramid_translations(
     translation: Optional[Mapping[str, float]],
     source_scale: Sequence[float],

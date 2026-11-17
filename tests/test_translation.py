@@ -78,7 +78,7 @@ def test_array_manager_normalizes_and_update_metadata():
 @pytest.mark.parametrize("ngff_version,zarr_format", FORMATS)
 def test_translation_round_trip(tmp_path, ngff_version, zarr_format):
     image = _image()
-    image.build_pyramid(num_levels=3)
+    image.build_pyramid(num_levels=3, method="nearest")  # mean levels move: see test_allocate_pyramid
     assert image.metadata["translations"] == [POSITION] * 3
     path = tmp_path / "image.ome.zarr"
     image.to_zarr(str(path), ngff_version=ngff_version, zarr_format=zarr_format)

@@ -25,6 +25,7 @@ from .downsampling import (
     DOWNSAMPLING_METHODS,
     dataset_transform_vector,
     downsample_numpy,
+    downsampling_record,
     normalize_spatial_factor_for_axes,
     resolve_downsampling_method,
 )
@@ -272,21 +273,14 @@ def build_pyramid_inplace(
 
     multiscales["datasets"] = new_datasets
     if num_levels > 1:
-        # NGFF 0.4-0.6: "type" SHOULD name the downscaling method, "metadata" SHOULD describe it.
-        from .. import __version__
-
         from .axes import DATA_TYPES
 
-        # Older stores used "type" to mark labels, and readers still honour it: keep such a marker.
+        record = downsampling_record(method, factors)
+        # Older stores used "type" to mark labels, and readers still honour it: keep such a marker
+        # (the method is then read from "metadata").
         if multiscales.get("type") not in set(DATA_TYPES) | {"image", "labels"}:
-            multiscales["type"] = method
-        multiscales["metadata"] = {
-            "description": f"Each level is the {method} of {'x'.join(map(str, factors))} blocks "
-                           "of the level above it.",
-            "method": "zarrsmith.utils.downsampling.downsample_numpy",
-            "version": __version__,
-            "kwargs": {"method": method, "factors": list(factors)},
-        }
+            multiscales["type"] = record["type"]
+        multiscales["metadata"] = record["metadata"]
     else:
         if multiscales.get("type") in DOWNSAMPLING_METHODS:
             multiscales.pop("type")

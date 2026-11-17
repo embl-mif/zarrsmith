@@ -12,9 +12,11 @@ from .axes import normalize_axes, spatial_axis_indices, spatial_values_for_axes
 from .downsampling import (
     SpatialFactor,
     axis_names_from_multiscales,
-    downsample_nearest,
+    downsample,
     level_scale_ratios_from_multiscales,
+    recorded_downsampling_method,
     relative_level_factors_for_axes,
+    resolve_downsampling_method,
 )
 from .ngff import _get_group_multiscales, _infer_data_type_from_group
 from .zoom import _zoom_dask, _zoom_numpy
@@ -119,6 +121,7 @@ def _write_region(
             ref_level=level,
             axes=axes,
             level_scale_ratios=level_scale_ratios,
+            method=_store_downsampling_method(multiscales, _infer_data_type_from_group(group)),
         )
     elif isinstance(data, list):
         data_list = data
@@ -247,6 +250,21 @@ def _is_reciprocal_integer_shrink(scale: Sequence[float]) -> tuple[bool, tuple[i
     return True, tuple(factors)
 
 
+def _store_downsampling_method(multiscales: dict, data_type: str | None) -> str:
+    """The method the coarser levels of a store are refreshed with.
+
+    The one the store records (``multiscales`` ``type``, written by
+    ``build_pyramid``, ``zarrsmith pyramid`` and ``allocate``), so a region
+    write keeps the levels, and their NGFF translations, consistent. A store that
+    records none (written before this was recorded, or by another tool) keeps
+    ``"nearest"``, as region writes always did.
+    """
+    method = recorded_downsampling_method(multiscales)
+    if method is None:
+        return "nearest"
+    return resolve_downsampling_method(method, data_type)
+
+
 def _generate_pyramid(
     ref_data,
     total_levels: int,
@@ -255,8 +273,13 @@ def _generate_pyramid(
     axes: str | Sequence[str] = "tczyx",
     downscale_factor: SpatialFactor = 2,
     level_scale_ratios: list[tuple[float, ...]] | None = None,
+    method: str = "nearest",
 ):
-    """Generate a full pyramid from a reference level using axis-aware zoom."""
+    """Generate a full pyramid from a reference level using axis-aware zoom.
+
+    Coarser levels that shrink by whole factors are downsampled with ``method``
+    (``"nearest"``, ``"mean"`` or ``"mode"``); finer levels and other ratios are zoomed.
+    """
     axes = normalize_axes(axes, ndim=ref_data.ndim)
     if level_scale_ratios is None:
         level_scale_ratios = relative_level_factors_for_axes(total_levels, ref_level, axes, downscale_factor)
@@ -288,7 +311,7 @@ def _generate_pyramid(
         )
         is_integer_shrink, integer_factors = _is_reciprocal_integer_shrink(scale)
         if is_integer_shrink:
-            pyramid[i] = downsample_nearest(pyramid[i - 1], integer_factors, spatial_axes)
+            pyramid[i] = downsample(pyramid[i - 1], integer_factors, spatial_axes, method)
         else:
             pyramid[i] = zoom_fn(pyramid[i - 1], scale=scale, spatial_axes=spatial_axes)
 

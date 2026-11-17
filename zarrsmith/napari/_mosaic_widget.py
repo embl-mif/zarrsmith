@@ -1,5 +1,6 @@
 """napari widget to inspect raw mosaic tiles and fuse them into an OME-Zarr image."""
 
+import shlex
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -390,19 +391,20 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
         "downsample": f"{values['ds_z']} {values['ds_y']} {values['ds_x']}",
         "projection": _PROJECTIONS[values["projection"]] or "none",
         "blend": values["blend"],
-        "channels": " ".join(values["channels"]),
+        # shlex.join quotes names with spaces ('Alexa 488'); fuse --batch reads them with shlex.split
+        "channels": shlex.join(values["channels"]),
         # every group selected = the default (all); "(none)" is how the CLI sees a missing group
-        "groups": "" if set(groups) == set(all_groups) else " ".join("None" if g == NO_GROUP else g for g in groups),
-        "fields": "" if not fields or (len(all_fields) == 1 and set(fields) >= set(all_fields)) else " ".join(fields),
-        "tiles": "" if picked is None or set(picked) >= set(all_stacks) else " ".join(picked),
-        "skip_tiles": " ".join(skip_ids),
+        "groups": "" if set(groups) == set(all_groups) else shlex.join("None" if g == NO_GROUP else g for g in groups),
+        "fields": "" if not fields or (len(all_fields) == 1 and set(fields) >= set(all_fields)) else shlex.join(fields),
+        "tiles": "" if picked is None or set(picked) >= set(all_stacks) else shlex.join(picked),
+        "skip_tiles": shlex.join(skip_ids),
         "timepoints": "" if not timepoints or set(timepoints) >= set(all_timepoints) else " ".join(str(t) for t in timepoints),
         "reference_timepoint": "" if reference is None else str(reference),
         "num_levels": str(values["levels"]),
         "read_workers": str(values["workers"]),
         "overwrite": str(bool(values["overwrite"])).lower(),
         "flatfield": "" if flatfield is None else str(bool(flatfield)).lower(),
-        "cameras": "" if not cameras or set(cameras) >= set(all_cameras) else " ".join(cameras),
+        "cameras": "" if not cameras or set(cameras) >= set(all_cameras) else shlex.join(cameras),
         "transforms": "" if transforms is None else str(transforms),
         "transforms_only": "true" if values.get("transforms_only") else "",
     }

@@ -253,6 +253,25 @@ def test_batch_row_groups_and_skips():
     assert row["channels"] == "A B" and row["overwrite"] == "true" and row["downsample"] == "4 8 8"
 
 
+def test_batch_row_channel_with_space_round_trips(tmp_path, monkeypatch):
+    """A channel name with a space ('Alexa 488', Opera) is quoted in the CSV and read back whole."""
+    import pandas as pd
+
+    import zarrsmith.cli.zarrsmith as cli
+
+    values ={"channels": ["Alexa 488", "Brightfield"], "groups": ["L"], "projection": "max", "blend": "max",
+              "ds_z": 1, "ds_y": 1, "ds_x": 1, "levels": 1, "workers": 1, "overwrite": False}
+    row = mw.batch_row(input_path="acq", microscope="opera", output="o.zarr", values=values, all_groups=["L"],
+                       skip_ids=[])
+    assert row["channels"] == "'Alexa 488' Brightfield"
+    csv = tmp_path / "batch.csv"
+    pd.DataFrame([row]).to_csv(csv, index=False)
+    seen = {}
+    monkeypatch.setattr(cli, "mosaic_convert", lambda **kw: seen.update(kw) or True)
+    cli.convert_mosaic_batch(str(csv))
+    assert seen["channels"] == ["Alexa 488", "Brightfield"]
+
+
 def test_widget_leaves_hidden_tiles_blank(app, monkeypatch):
     from napari.components import ViewerModel
 

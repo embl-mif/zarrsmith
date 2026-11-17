@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -823,7 +824,8 @@ def convert_mosaic_batch(args):
                 kwargs[key] = str(v[key]).strip()
         for key in ("channels", "groups", "cameras", "fields", "tiles", "skip_tiles"):
             if key in columns and _present(v.get(key)):
-                kwargs[key] = str(v[key]).split()
+                # shell-style: quote a name with spaces, e.g. 'Alexa 488' Brightfield
+                kwargs[key] = shlex.split(str(v[key]))
         # float: pandas reads a number in a column with empty cells as 3.0
         if "timepoints" in columns and _present(v.get("timepoints")):
             kwargs["timepoints"] = [int(float(t)) for t in str(v["timepoints"]).split()]

@@ -530,7 +530,8 @@ FUSE_HELP = """\
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_3D.zarr  | 4 8 8      | none       | sigmoid | 3
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_MIP.zarr | 1 8 8      | max        | midline |
     Leave a cell empty for the default. Lists (channels, groups, fields, tiles, skip_tiles, timepoints, channel_names...) are space
-    separated.
+    separated; quote a name that contains spaces in channels, groups, cameras, fields, tiles and skip_tiles,
+    e.g. 'Alexa 488' Brightfield.
     The napari "Mosaic Fusion" widget writes such files with "Append to batch CSV".
 """
 
@@ -800,7 +801,9 @@ def _add_allocate_arguments(parser):
     out.add_argument('-tr', '--translation', nargs='*', type=float, metavar='ORIGIN',
                      help='Without a value: keep the origin of the template, moved by --crop. With one value '
                           'per spatial axis: the level-0 origin. An all-zero origin is not written (NGFF reads '
-                          'it the same way). Default: write one when the template has one or the crop moves it.')
+                          'it the same way). Default: write one when the template has one, the crop moves it, or '
+                          'the coarser levels are averaged (intensity data with --num_levels > 1: they sit '
+                          'half a block further than level 0, from an origin of 0 without a template one).')
     out.add_argument('-zf', '--zarr_format', type=int, choices=[2, 3],
                      help="2 (NGFF 0.4) or 3 (NGFF 0.5). Default: the template's, else 3.")
     out.add_argument('-cp', '--compressor', type=str.lower, choices=['blosc', 'gzip', 'none'], default='blosc',

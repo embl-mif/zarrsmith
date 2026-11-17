@@ -254,9 +254,12 @@ def build_allocation_metadata(
         level_scales.append(tuple(s * k for s, k in zip(level_scales[-1], f)))
 
     # Coarser levels by the NGFF 0.6 convention, for the method zarrsmith pyramid will use.
-    level_translations = pyramid_translations(translation0, scale0, level_scales, axes_out, method)
+    translations = pyramid_translations(translation0, scale0, level_scales, axes_out, method)
     if translation is None:
-        write_translation = info["translation"] is not None or moved
+        # Averaged levels sit half a block further than level 0 even when the origin is
+        # unknown (taken as 0, as NGFF does): without their offsets they would be misplaced.
+        offsets_needed = method != "nearest" and num_levels > 1
+        write_translation = info["translation"] is not None or moved or offsets_needed
     else:
         write_translation = translation is not False
     time_inc = time_increment if time_increment is not None else info["time_increment"]
@@ -269,7 +272,9 @@ def build_allocation_metadata(
         "chunksize": level_chunks,
         "dtype": dtype_out,
         "scales": level_scales,
-        "translations": level_translations if write_translation else None,
+        "translations": translations if write_translation else None,
+        # Recorded in the store, so region writes refresh the levels the same way.
+        "downsampling_method": method,
         "units": tuple(units_by_axis.get(ax) for ax in spatial) if units_by_axis else (),
         "time_increment": time_inc,
         "time_increment_unit": time_increment_unit or info["time_increment_unit"],
@@ -322,9 +327,12 @@ def allocate_zarr(
     num_levels, downscale_factor
         Levels created (default 1: fill level 0 then run ``zarrsmith pyramid``).
     translation
-        ``None`` writes a translation when the template has one or the crop moves
-        the origin; ``True`` always writes one; a sequence (one value per spatial
-        axis) sets the level-0 origin explicitly; ``False`` writes none.
+        ``None`` writes a translation when the template has one, the crop moves
+        the origin, or the coarser levels are averaged (intensity data with
+        ``num_levels > 1``: they sit half a block further than level 0, from an
+        origin of 0 when the template has none); ``True`` always writes one; a
+        sequence (one value per spatial axis) sets the level-0 origin explicitly;
+        ``False`` writes none.
     zarr_format
         2 (NGFF 0.4) or 3 (NGFF 0.5); defaults to the template's format, else 3.
     compressor, compressor_level
