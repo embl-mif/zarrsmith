@@ -632,6 +632,103 @@ class ZarrManager(MicroscopeManager):
 
         return dataset
 
+    def _dataset_by_name(self, group: Optional[str]) -> "ZarrDataset":
+        """The root image (``None``), a subgroup (``"seg"``) or a label (``"labels/nuclei"``)."""
+        if group in (None, "", "/", "raw"):
+            return self.raw
+        name = str(group).strip("/")
+        if name.startswith("labels/"):
+            label = name[len("labels/"):]
+            if label in self.labels:
+                return self.labels[label]
+        elif name in self.groups:
+            return self.groups[name]
+        available = ["/"] + list(self.groups) + [f"labels/{n}" for n in self.labels]
+        raise KeyError(f"Image {group!r} not found; available: {available}.")
+
+    def read_region(
+        self,
+        level: int = 0,
+        group: Optional[str] = None,
+        *,
+        halo: int | float | Dict[str, float] = 0,
+        physical: bool = False,
+        clip: bool = False,
+        **selection,
+    ):
+        """Read a region of one level, plus a halo around it on the spatial axes.
+
+        Axes are selected by name with an index, a slice or a ``(start, stop)``
+        pair, e.g. ``read_region(1, t=0, z=(10, 20), y=(512, 1024), halo=16)``;
+        axes left out are read whole. The halo is clipped at the image edge.
+        With ``physical=True`` the spatial bounds and the halo are in physical
+        units (e.g. micrometer) and converted with the level's scale and
+        translation; every pixel overlapping the bounds is included (see
+        :func:`zarrsmith.utils.region.physical_to_pixel_bounds`). ``clip`` clips
+        bounds that reach outside the image instead of raising.
+
+        Returns a :class:`zarrsmith.utils.region.Region`: ``.data`` is the block
+        read (with halo), ``.core`` the region alone, ``.crop`` its index in
+        ``.data``, ``.bounds``/``.window`` the pixel bounds of both, and
+        ``.core_translation()`` the translation of an image holding the core.
+        """
+        from ..utils.region import read_region as _read_region
+
+        dataset, axes, scale, translation = self._level_geometry(group, level)
+        arrays = dataset.zarr_data or dataset.data
+        return _read_region(
+            arrays[level], axes, level=level, scale=scale, translation=translation,
+            selection=selection, halo=halo, physical=physical, clip=clip,
+        )
+
+    def _level_geometry(self, group: Optional[str], level: int):
+        """``(dataset, axes, scale, translation)`` of one level of an image; scale and
+        translation by spatial axis (``None`` when the image has none)."""
+        from ..utils.axes import spatial_axes_in_order
+
+        dataset = self._dataset_by_name(group)
+        n = len(dataset.data)
+        if not 0 <= level < n:
+            raise ValueError(f"level must be in [0, {n}), got {level}.")
+        md = dataset.metadata
+        axes = "".join(md["axes"])
+        spatial = spatial_axes_in_order(axes)
+        scales = md.get("scales") or []
+        scale = dict(zip(spatial, scales[min(level, len(scales) - 1)])) if scales else None
+        translations = md.get("translations")
+        translation = dict(translations[min(level, len(translations) - 1)]) if translations else None
+        return dataset, axes, scale, translation
+
+    def plan_tiles(
+        self,
+        level: int = 0,
+        group: Optional[str] = None,
+        *,
+        tile_size=None,
+        overlap=0,
+        halo=0,
+        roi=None,
+        physical: bool = False,
+    ):
+        """Cut one level of an image into overlapping tiles for parallel processing.
+
+        An axis without a ``tile_size`` is not split. With ``physical=True``,
+        ``roi``, ``tile_size``, ``overlap`` and ``halo`` are in physical units and
+        converted with the level's scale and translation. Returns a
+        :class:`zarrsmith.utils.tiling.TilePlan`: its ``tiles``, each tile's
+        ``core`` and ``write_region`` in the output, and ``allocate_kwargs`` for
+        an output whose write blocks match the tiles. See
+        :func:`zarrsmith.utils.tiling.plan_tiles`.
+        """
+        from ..utils.tiling import plan_tiles as _plan_tiles
+
+        dataset, axes, scale, translation = self._level_geometry(group, level)
+        shape = dict(zip(axes, (int(n) for n in dataset.data[level].shape)))
+        return _plan_tiles(
+            shape, tile_size=tile_size, overlap=overlap, halo=halo, roi=roi,
+            scale=scale, translation=translation, physical=physical, level=level,
+        )
+
     def write_image_region(
         self,
         data,
