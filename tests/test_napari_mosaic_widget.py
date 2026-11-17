@@ -263,13 +263,18 @@ def test_batch_row_channel_with_space_round_trips(tmp_path, monkeypatch):
               "ds_z": 1, "ds_y": 1, "ds_x": 1, "levels": 1, "workers": 1, "overwrite": False}
     row = mw.batch_row(input_path="acq", microscope="opera", output="o.zarr", values=values, all_groups=["L"],
                        skip_ids=[])
-    assert row["channels"] == "'Alexa 488' Brightfield"
+    assert row["channels"] == '"Alexa 488" Brightfield'  # double quotes: Excel drops a leading '
     csv = tmp_path / "batch.csv"
     pd.DataFrame([row]).to_csv(csv, index=False)
     seen = {}
     monkeypatch.setattr(cli, "mosaic_convert", lambda **kw: seen.update(kw) or True)
     cli.convert_mosaic_batch(str(csv))
     assert seen["channels"] == ["Alexa 488", "Brightfield"]
+
+    # what Excel leaves of 'Alexa 488' Brightfield: a clear error naming the cell
+    pd.DataFrame([dict(row, channels="Alexa 488' Brightfield")]).to_csv(csv, index=False)
+    with pytest.raises(ValueError, match="Unbalanced quote in the 'channels' cell"):
+        cli.convert_mosaic_batch(str(csv))
 
 
 def test_widget_leaves_hidden_tiles_blank(app, monkeypatch):
