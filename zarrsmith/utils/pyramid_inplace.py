@@ -25,10 +25,10 @@ from .downsampling import (
     DOWNSAMPLING_METHODS,
     dataset_transform_vector,
     downsample_numpy,
-    downsampled_translation,
     normalize_spatial_factor_for_axes,
     resolve_downsampling_method,
 )
+from .translation import pyramid_translations
 from .ngff import (
     ZarrWriteConfig,
     _get_group_multiscales,
@@ -181,7 +181,7 @@ def build_pyramid_inplace(
     The zarr format, NGFF version, codecs and chunk key encoding come from level 0,
     so a zarr v2 store gets v2 levels (and no shards). Each level's ``scale`` is
     level 0's times the factor; a ``translation`` follows the method (see
-    :func:`zarrsmith.utils.downsampling.downsampled_translation`). Every other key
+    :func:`zarrsmith.utils.translation.pyramid_translations`, the NGFF 0.6 convention). Every other key
     of the ``multiscales`` block, and every other group attribute, is kept.
     """
     group = resolve_group(root, group_name)
@@ -236,11 +236,15 @@ def build_pyramid_inplace(
 
     scale0 = dataset_transform_vector(datasets[0], "scale") or [1.0] * len(axes)
     translation0 = dataset_transform_vector(datasets[0], "translation")
-    # Without a translation, "nearest" levels need none; "mean"/"mode" levels move
-    # by half a block, so they get one (level 0 stays at the origin).
-    track_translation = translation0 is not None or method != "nearest"
-    translation = translation0 or [0.0] * len(axes)
-    scale = list(scale0)
+    # NGFF 0.6 convention (zarrsmith.utils.translation.pyramid_translations): "mean" and
+    # "mode" levels move by half their pixel growth; "nearest" keeps level 0's origin.
+    # Without a translation, "nearest" levels need none and the others get one.
+    spatial_names = [axes[i] for i in spatial_axes]
+    level_scales = [[scale0[i] * f ** k for i, f in zip(spatial_axes, factors)] for k in range(num_levels)]
+    spatial_translations = pyramid_translations(
+        None if translation0 is None else {ax: translation0[i] for ax, i in zip(spatial_names, spatial_axes)},
+        level_scales[0], level_scales, "".join(axes), method,
+    )
 
     cfg = ZarrWriteConfig(num_workers=num_workers, progress=progress)
     src = level0
@@ -254,16 +258,15 @@ def build_pyramid_inplace(
         _write_level(src, dst, factors, spatial_axes, method, cfg=cfg,
                      desc=f"{label.strip('/') or 'image'} level {k}")
 
-        spatial_translation = downsampled_translation(
-            [translation[i] for i in spatial_axes], [scale[i] for i in spatial_axes], factors, method
-        )
-        for i, value in zip(spatial_axes, spatial_translation):
-            translation[i] = value
-        for i, f in zip(spatial_axes, factors):
-            scale[i] *= f
-        transforms: list[dict[str, Any]] = [{"type": "scale", "scale": list(scale)}]
-        if track_translation:
-            transforms.append({"type": "translation", "translation": list(translation)})
+        scale = list(scale0)
+        for i, value in zip(spatial_axes, level_scales[k]):
+            scale[i] = value
+        transforms: list[dict[str, Any]] = [{"type": "scale", "scale": scale}]
+        if spatial_translations is not None:
+            translation = list(translation0 or [0.0] * len(axes))
+            for ax, i in zip(spatial_names, spatial_axes):
+                translation[i] = spatial_translations[k][ax]
+            transforms.append({"type": "translation", "translation": translation})
         new_datasets.append({"path": names[k], "coordinateTransformations": transforms})
         src = dst
 

@@ -798,9 +798,9 @@ def _add_allocate_arguments(parser):
     out.add_argument('-df', '--downscale_factor', nargs='+', type=int, default=[2],
                      help='Factor between levels when --num_levels > 1: one value, or one per spatial axis.')
     out.add_argument('-tr', '--translation', nargs='*', type=float, metavar='ORIGIN',
-                     help='Without a value: always write a translation (the origin of the template, moved by '
-                          '--crop). With one value per spatial axis: the level-0 origin. Default: write one '
-                          'when the template has one or the crop moves the origin.')
+                     help='Without a value: keep the origin of the template, moved by --crop. With one value '
+                          'per spatial axis: the level-0 origin. An all-zero origin is not written (NGFF reads '
+                          'it the same way). Default: write one when the template has one or the crop moves it.')
     out.add_argument('-zf', '--zarr_format', type=int, choices=[2, 3],
                      help="2 (NGFF 0.4) or 3 (NGFF 0.5). Default: the template's, else 3.")
     out.add_argument('-cp', '--compressor', type=str.lower, choices=['blosc', 'gzip', 'none'], default='blosc',

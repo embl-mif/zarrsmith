@@ -100,7 +100,7 @@ zarrsmith allocate -o new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale
 | `-cr`, `--crop` | the part of the template to keep, e.g. `"t=0:10;y=512:1536"`; it moves the origin, so the output gets a translation | the whole template |
 | `-cs`, `--chunk_size` / `-sh`, `--shards` | level-0 chunks and shards, one value per output axis (`--shards auto` or `none` also work) | the template's; `auto` shards without a template |
 | `-nl`, `--num_levels` / `-df`, `--downscale_factor` | levels to create | 1 level |
-| `-tr`, `--translation` | without a value: always write a translation; with one value per spatial axis: the level-0 origin | written when the template has one or the crop moves the origin |
+| `-tr`, `--translation` | without a value: keep the template's origin (moved by `--crop`); with one value per spatial axis: the level-0 origin. An all-zero origin is not written, which NGFF reads the same way | written when the template has one or the crop moves the origin |
 | `-zf`, `--zarr_format` | 2 (NGFF 0.4) or 3 (NGFF 0.5) | the template's, else 3 |
 | `-at`, `--attrs` | custom group attributes, as JSON or a `.json` file, e.g. `'{"t_range": [0, 10]}'` | none |
 | `-cp`, `--compressor` / `-cpl`, `--compressor_level` | codec | blosc, level 1 |
@@ -119,7 +119,7 @@ Zarr v2 has no shards: an explicit `--shards` shape is refused, `--shards auto` 
 | `-me`, `--method` | `mean` (average), `nearest` (one pixel per block) or `mode` (most frequent value, smoother label pyramids) | `mean` for intensity data, `nearest` for labels |
 | `-nw`, `--num_workers` | number of threads | half the cores, at most 8 |
 
-With `mean` and `mode` a coarse pixel sits at the centre of the block it summarizes, so each level's `translation` moves by half a block; with `nearest` it keeps the origin of level 0.
+Translations follow the NGFF 0.6 convention, where a pixel's position is its centre: with `mean` and `mode` a coarse pixel sits at the centre of the block it summarizes, so level `k` is at `t0 + (s_k - s0) / 2` (`s_k` its pixel size); with `nearest` it keeps the origin of level 0.
 
 ## Fuse a mosaic
 

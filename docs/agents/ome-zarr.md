@@ -30,5 +30,5 @@ None beyond the target version. RFC-2 (zarr v3, adopted in 0.5) and RFC-5 (coord
 - Never mix pairs: zarr v2 goes with NGFF 0.4 and zarr v3 with NGFF 0.5. A store is one or the other throughout.
 - On v2: `dimension_separator="/"`, numcodecs compressor (Blosc by default, gzip allowed), no shards; NGFF metadata flat on the group attributes, `image-label` carries `"version": "0.4"`. On v3: everything NGFF under `ome`.
 - NGFF metadata is written through `zarrsmith.utils.ngff._write_ngff_metadata` (ome-zarr-py), so the format decides the layout. Custom group attributes (`metadata["extra_attributes"]`) sit next to `multiscales` on v2 and outside `ome` on v3.
-- Per-level origins are `metadata["translations"]`, written as a `translation` after each `scale`.
+- Per-level origins are `metadata["translations"]`: one dict per level keyed by spatial axis (`zarrsmith.utils.translation`), written as a `translation` after each `scale`. Coarser levels follow the NGFF 0.6 pixel-centre convention: `mean`/`mode`/binned levels at `t0 + (s_k - s0) / 2`, `nearest` levels at `t0`.
 - Validation in tests uses `ome-zarr-models`; napari reading goes through `ome_zarr.reader` / `napari-ome-zarr`.

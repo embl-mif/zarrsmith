@@ -18,7 +18,8 @@ import zarr
 from .axes import normalize_axes, normalize_data_type, spatial_axes_in_order
 from .chunks import default_chunk_size
 from .colors import default_channel_color
-from .downsampling import default_downsampling_method, downsampled_translation, normalize_spatial_factor_for_axes
+from .downsampling import default_downsampling_method, normalize_spatial_factor_for_axes
+from .translation import pyramid_translations
 from .ngff import DEFAULT_COMPRESSOR, DEFAULT_COMPRESSOR_LEVEL
 
 Crop = Mapping[str, tuple[int | None, int | None] | slice]
@@ -36,7 +37,7 @@ def _template_info(path: str | Path) -> dict[str, Any]:
         "size": tuple(int(s) for s in md["size"][0]),
         "dtype": str(md["dtype"]),
         "scale": tuple(md["scales"][0]),
-        "translation": None if md.get("translations") is None else tuple(md["translations"][0]),
+        "translation": None if not md.get("translations") else dict(md["translations"][0]),
         "units": tuple(md.get("units") or ()),
         "time_increment": md.get("time_increment"),
         "time_increment_unit": md.get("time_increment_unit"),
@@ -156,7 +157,7 @@ def build_allocation_metadata(
     scale_by_axis = dict(zip(spatial, info["scale"]))
     if template is not None and scale is not None:
         scale_by_axis = dict(zip(spatial, _spatial(scale, axes_out, "scale")))
-    origin = dict(zip(spatial, info["translation"] or (0.0,) * len(spatial)))
+    origin = {ax: float((info["translation"] or {}).get(ax, 0.0)) for ax in spatial}
     unit_values = info["units"]
     if units is not None:
         unit_values = (units,) * len(spatial) if isinstance(units, str) else tuple(units)
@@ -237,23 +238,23 @@ def build_allocation_metadata(
         raise ValueError("num_levels must be >= 1.")
     factors = dict(zip(spatial, normalize_spatial_factor_for_axes(downscale_factor, axes_out, allow_float=False)))
     method = default_downsampling_method(out_type)
-    level_sizes, level_chunks, level_scales, level_translations = [size0], [chunk0], [], []
+    level_sizes, level_chunks = [size0], [chunk0]
     scale0 = tuple(scale_by_axis[ax] for ax in spatial)
     if translation is None or isinstance(translation, bool):
-        translation0 = tuple(origin[ax] for ax in spatial)
+        translation0 = dict(origin)
     else:
-        translation0 = _spatial(translation, axes_out, "translation")
-    level_scales.append(scale0)
-    level_translations.append(translation0)
+        translation0 = dict(zip(spatial, _spatial(translation, axes_out, "translation")))
+    level_scales = [scale0]
     f = tuple(int(factors[ax]) for ax in spatial)
     for _ in range(1, num_levels):
         prev = level_sizes[-1]
         shape = tuple(math.ceil(n / factors[ax]) if ax in factors else n for n, ax in zip(prev, axes_out))
         level_sizes.append(shape)
         level_chunks.append(tuple(min(c, s) for c, s in zip(chunk0, shape)))
-        level_translations.append(downsampled_translation(level_translations[-1], level_scales[-1], f, method))
         level_scales.append(tuple(s * k for s, k in zip(level_scales[-1], f)))
 
+    # Coarser levels by the NGFF 0.6 convention, for the method zarrsmith pyramid will use.
+    level_translations = pyramid_translations(translation0, scale0, level_scales, axes_out, method)
     if translation is None:
         write_translation = info["translation"] is not None or moved
     else:

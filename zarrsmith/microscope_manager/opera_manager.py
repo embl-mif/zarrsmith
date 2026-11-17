@@ -8,7 +8,7 @@ from .microscope_manager import MicroscopeManager
 from ..utils.axes import to_tczyx
 from ..utils.metadata import build_metadata, scale_for_level
 from ..utils.ome import parse_ome_xml
-from ..utils.translation import level_translations
+from ..utils.translation import pyramid_translations
 from ..utils.units import normalize_unit
 
 
@@ -111,5 +111,10 @@ class OperaManager(MicroscopeManager):
 
         self.metadata["scales"] = scales
         self.metadata["size"] = sizes
-        self.metadata["translations"] = level_translations(self.metadata.get("translations"), len(scales))
+        # Harmony's pyramid levels are binned, so they follow the NGFF 0.6 convention
+        # for block-summarizing levels: each moves by half its pixel growth.
+        translations = self.metadata.get("translations")
+        self.metadata["translations"] = pyramid_translations(
+            translations[0] if translations else None, scales[0], scales, self.metadata["axes"], "mean"
+        ) if translations else None
         return data_levels

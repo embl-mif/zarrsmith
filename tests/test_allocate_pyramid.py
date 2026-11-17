@@ -15,12 +15,18 @@ from ome_zarr.reader import Label, Multiscales, Reader
 from zarrsmith.cli.zarrsmith import main
 from zarrsmith.microscope_manager import ZarrManager
 from zarrsmith.utils.allocate import allocate_zarr
-from zarrsmith.utils.downsampling import downsample, downsample_numpy, downsampled_translation
+from zarrsmith.utils.downsampling import downsample, downsample_numpy
+from zarrsmith.utils.translation import pyramid_translations
 from zarrsmith.utils.ngff import ZarrWriteConfig
 from zarrsmith.utils.to_zarr import to_zarr
 
 FORMATS = [(2, "0.4"), (3, "0.5")]
 FORMAT_IDS = ["v2-0.4", "v3-0.5"]
+
+
+def _zyx(z, y, x):
+    """A translation as zarrsmith stores it: one dict per level, keyed by spatial axis."""
+    return {"z": z, "y": y, "x": x}
 
 
 def _make_template(path: Path, zarr_format: int, ngff: str, *, translation=(10.0, 20.0, 30.0), shards=None):
@@ -88,9 +94,15 @@ def test_dask_and_numpy_downsampling_agree(method):
     np.testing.assert_array_equal(got, expected)
 
 
-def test_downsampled_translation_follows_the_method():
-    assert downsampled_translation((10.0,), (0.5,), (2,), "nearest") == (10.0,)
-    assert downsampled_translation((10.0,), (0.5,), (2,), "mean") == (10.25,)
+def test_pyramid_translations_follow_the_ngff_06_convention():
+    scales = [(0.5, 0.5), (1.0, 1.0), (2.0, 2.0)]
+    # The 0.6 multiscales example: 0.5 base pixel, levels at 0.25 and 0.75.
+    assert pyramid_translations({"y": 0.0, "x": 0.0}, scales[0], scales, "yx", "mean") == [
+        {"y": 0.0, "x": 0.0}, {"y": 0.25, "x": 0.25}, {"y": 0.75, "x": 0.75}]
+    assert pyramid_translations({"y": 10.0}, scales[0], scales, "yx", "nearest") == [
+        {"y": 10.0, "x": 0.0}] * 3
+    assert pyramid_translations(None, scales[0], scales, "yx", "nearest") is None
+    assert pyramid_translations(None, scales[0], scales, "yx", "mode")[2] == {"y": 0.75, "x": 0.75}
 
 
 # ---------------------------------------------------------------------------
@@ -110,10 +122,10 @@ def test_translation_is_written_after_scale_and_survives_a_copy(tmp_path, zarr_f
     assert transforms[1]["translation"] == [0.0, 0.0, 10.0, 20.0, 30.0]
 
     z = ZarrManager(str(src))
-    assert z.metadata["translations"] == [(10.0, 20.0, 30.0)]
+    assert z.metadata["translations"] == [_zyx(10.0, 20.0, 30.0)]
     z.to_zarr(tmp_path / "copy.ome.zarr", ngff_version=ngff, zarr_format=zarr_format,
               drop_singleton=False, progress=False)
-    assert ZarrManager(str(tmp_path / "copy.ome.zarr")).metadata["translations"] == [(10.0, 20.0, 30.0)]
+    assert ZarrManager(str(tmp_path / "copy.ome.zarr")).metadata["translations"] == [_zyx(10.0, 20.0, 30.0)]
 
 
 @pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
@@ -131,7 +143,7 @@ def test_crop_moves_the_translation(tmp_path):
     _make_template(src, 3, "0.5")
     z = ZarrManager(str(src))
     z.subset_dataset(Z=slice(2, 6), Y=slice(16, 48))
-    assert z.metadata["translations"][0] == pytest.approx((10.0 + 2 * 2.0, 20.0 + 16 * 0.5, 30.0))
+    assert z.metadata["translations"][0] == pytest.approx(_zyx(10.0 + 2 * 2.0, 20.0 + 16 * 0.5, 30.0))
 
 
 @pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
@@ -144,7 +156,7 @@ def test_lazy_pyramid_with_mean_writes_translations(tmp_path, zarr_format, ngff)
     z.to_zarr(out, ngff_version=ngff, zarr_format=zarr_format, drop_singleton=False,
               shards=None, progress=False)
     back = ZarrManager(str(out))
-    assert back.metadata["translations"] == [(10.0, 20.0, 30.0), pytest.approx((11.0, 20.25, 30.25))]
+    assert back.metadata["translations"] == [_zyx(10.0, 20.0, 30.0), pytest.approx(_zyx(11.0, 20.25, 30.25))]
     np.testing.assert_array_equal(
         np.asarray(back.data[1]), downsample_numpy(data, (2, 2, 2), (2, 3, 4), "mean")
     )
@@ -272,7 +284,7 @@ def test_v3_template_converts_to_v2_output(tmp_path):
     attrs = root.attrs.asdict()
     assert "ome" not in attrs and attrs["multiscales"][0]["version"] == "0.4"
     z = ZarrManager(str(out))
-    assert z.metadata["translations"] == [(10.0, 20.0, 30.0)]
+    assert z.metadata["translations"] == [_zyx(10.0, 20.0, 30.0)]
     assert z.metadata["channel_names"] == ["A", "B"]
 
 
@@ -339,7 +351,7 @@ def test_cli_allocate_and_pyramid(tmp_path, zarr_format, ngff, capsys):
     z = ZarrManager(str(out))
     assert z.root.metadata.zarr_format == zarr_format
     assert z.metadata["size"] == [(1, 8, 32, 64)]
-    assert z.metadata["translations"] == [(10.0, 20.0 + 32 * 0.5, 30.0)]
+    assert z.metadata["translations"] == [_zyx(10.0, 20.0 + 32 * 0.5, 30.0)]
     assert z.metadata["extra_attributes"] == {"t_range": [1, 2]}
 
     main(["pyramid", "-z", str(out), "--num_levels", "3", "--method", "mode", "--num_workers", "2"])
@@ -357,7 +369,7 @@ def test_cli_allocate_explicit_geometry(tmp_path):
     assert z.root.metadata.zarr_format == 2
     assert z.metadata["size"] == [(2, 10, 100, 120), (2, 5, 50, 60)]
     assert z.metadata["scales"] == [(2.0, 0.5, 0.5), (4.0, 1.0, 1.0)]
-    assert z.metadata["translations"][0] == (1.0, 2.0, 3.0)
+    assert z.metadata["translations"][0] == _zyx(1.0, 2.0, 3.0)
     assert z.metadata["units"] == ("micrometer",) * 3
 
 
@@ -411,7 +423,7 @@ def test_ngff_06_store_is_read_with_its_axes_scale_and_translation(tmp_path):
     assert z.metadata["ngff_version"] == "0.6"
     assert z.metadata["zarr_format"] == 3
     assert z.metadata["scales"] == [(2.0, 0.5, 0.5)]
-    assert z.metadata["translations"] == [(1.0, 2.0, 3.0)]
+    assert z.metadata["translations"] == [_zyx(1.0, 2.0, 3.0)]
     assert z.metadata["units"] == ("micrometer",) * 3
 
 
@@ -431,7 +443,7 @@ def test_ngff_06_template_allocates_a_05_output(tmp_path):
     _make_v06_store(src)
     root = allocate_zarr(tmp_path / "out.ome.zarr", template=src)
     assert root.attrs["ome"]["version"] == "0.5"
-    assert ZarrManager(str(tmp_path / "out.ome.zarr")).metadata["translations"] == [(1.0, 2.0, 3.0)]
+    assert ZarrManager(str(tmp_path / "out.ome.zarr")).metadata["translations"] == [_zyx(1.0, 2.0, 3.0)]
 
 
 def test_sharded_levels_are_built_chunk_by_chunk(tmp_path):

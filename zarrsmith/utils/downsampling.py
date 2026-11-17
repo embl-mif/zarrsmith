@@ -262,26 +262,6 @@ def resolve_downsampling_method(method: str | None, data_type: str | None) -> st
     return method
 
 
-def downsampled_translation(
-    translation: Sequence[float],
-    scale: Sequence[float],
-    factors: Sequence[int | float],
-    method: str,
-) -> tuple[float, ...]:
-    """Translation of the next pyramid level, in the same (spatial) axis order.
-
-    ``translation`` and ``scale`` are those of the finer level. NGFF places a
-    pixel's centre at ``translation + index * scale``. ``"nearest"`` keeps the
-    first pixel of every block, so the origin does not move; ``"mean"`` and
-    ``"mode"`` summarize the whole block, whose centre is ``(factor - 1) / 2``
-    fine pixels further.
-    """
-    if method == "nearest":
-        return tuple(float(t) for t in translation)
-    return tuple(
-        float(t) + (float(f) - 1.0) / 2.0 * float(s)
-        for t, s, f in zip(translation, scale, factors)
-    )
 
 
 def mean_accumulator_dtype(dtype) -> np.dtype:
