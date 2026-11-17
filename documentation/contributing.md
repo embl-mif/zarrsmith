@@ -46,6 +46,7 @@ class MyManager(MicroscopeManager):
             dtype="uint16",
             time_increment=60.0,
             time_increment_unit="s",
+            translations={"z": z0, "y": y0, "x": x0},  # stage position of voxel 0, or None if unknown
         )
 
     def _build_dask_array(self) -> list:
@@ -62,6 +63,7 @@ The metadata must follow the ZarrSmith schema used across the repository:
   "size": [... per pyramid level ...],
   "chunksize": [... per pyramid level ...],
   "scales": [... per pyramid level ...],
+  "translations": [... per pyramid level, e.g. {"z": 0.0, "y": 1200.5, "x": -340.0} ...] or None,
   "units": (...),
   "axes": "tczyx",
   "channel_names": [...],

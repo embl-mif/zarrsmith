@@ -10,7 +10,7 @@ import zarr
 
 from .microscope_manager import MicroscopeManager
 from ..utils.axes import normalize_axes, normalize_data_type
-from ..utils.downsampling import dataset_transform_vector, multiscales_axes
+from ..utils.downsampling import iter_dataset_transforms, multiscales_axes
 from ..utils.ngff import (
     _extra_group_attributes,
     _infer_data_type_from_group,
@@ -24,6 +24,57 @@ if TYPE_CHECKING:
     import napari
 
 from dataclasses import dataclass
+
+
+def _transform_vectors(transforms: Any, ndim: int) -> tuple[Optional[list[float]], Optional[list[float]]]:
+    """``(scale, translation)`` of an NGFF ``coordinateTransformations`` list (``None`` if absent).
+
+    Only ``scale`` and ``translation`` exist in NGFF 0.4/0.5; an entry without a
+    ``type`` is read as a scale, as older writers left it out. An NGFF 0.6
+    ``sequence`` (scale then translation) is unpacked.
+    """
+    scale = translation = None
+    flat = iter_dataset_transforms({"coordinateTransformations": transforms if isinstance(transforms, list) else []})
+    for transform in flat:
+        if not isinstance(transform, dict):
+            continue
+        kind = transform.get("type", "scale")
+        if kind == "scale" and scale is None and transform.get("scale") is not None:
+            scale = [float(v) for v in transform["scale"]]
+        elif kind == "translation" and translation is None and transform.get("translation") is not None:
+            translation = [float(v) for v in transform["translation"]]
+    if scale is not None and len(scale) != ndim:
+        scale = None
+    if translation is not None and len(translation) != ndim:
+        translation = None
+    return scale, translation
+
+
+def _level_transforms(
+    datasets: list[dict[str, Any]],
+    multiscales: dict[str, Any],
+    ndim: int,
+) -> list[tuple[list[float], Optional[list[float]]]]:
+    """Full-axes ``(scale, translation)`` of every level, in physical coordinates.
+
+    A ``coordinateTransformations`` on the multiscale itself applies after the one
+    of each dataset: ``scale = s_ms * s_ds`` and ``translation = s_ms * t_ds + t_ms``.
+    The translation is ``None`` when neither of them has one.
+    """
+    ms_scale, ms_translation = _transform_vectors(multiscales.get("coordinateTransformations"), ndim)
+    out = []
+    for ds in datasets:
+        scale, translation = _transform_vectors(ds.get("coordinateTransformations"), ndim)
+        scale = scale or [1.0] * ndim
+        if ms_scale is not None:
+            if translation is not None:
+                translation = [s * t for s, t in zip(ms_scale, translation)]
+            scale = [s * m for s, m in zip(scale, ms_scale)]
+        if ms_translation is not None:
+            translation = [a + b for a, b in zip(translation or [0.0] * ndim, ms_translation)]
+        out.append((scale, translation))
+    return out
+
 
 @dataclass
 class ZarrDataset(Sequence):
@@ -212,26 +263,14 @@ class ZarrManager(MicroscopeManager):
         time_idx = axis_names.index("t") if "t" in axis_names else None
         channel_idx = axis_names.index("c") if "c" in axis_names else None
 
-        scales = []
-        translations = []
-        transform_vector = dataset_transform_vector  # flattens NGFF 0.6 sequences
-        for ds in datasets:
-            scale_vec = transform_vector(ds, "scale")
-            if scale_vec is None:
-                scales.append(tuple([1.0] * len(spatial_idx)))
-            else:
-                scales.append(tuple(float(scale_vec[i]) for i in spatial_idx))
-            translation_vec = transform_vector(ds, "translation")
-            translations.append(
-                None if translation_vec is None
-                else tuple(float(translation_vec[i]) for i in spatial_idx)
-            )
-        # ``None`` when no level has a translation, so stores without one are
-        # written back without one; levels missing it then sit at the origin.
-        if all(t is None for t in translations):
-            translations = None
-        else:
-            translations = [t if t is not None else tuple([0.0] * len(spatial_idx)) for t in translations]
+        level_transforms = _level_transforms(datasets, multiscales, len(axis_names))
+        scales = [tuple(scale_vec[i] for i in spatial_idx) for scale_vec, _ in level_transforms]
+        translations = None
+        if any(t is not None for _, t in level_transforms):
+            translations = [
+                {axis_names[i]: (t[i] if t is not None else 0.0) for i in spatial_idx}
+                for _, t in level_transforms
+            ]
 
         units = tuple(
             axes_info[i].get("unit", None) if isinstance(axes_info[i], dict) else None
@@ -239,8 +278,7 @@ class ZarrManager(MicroscopeManager):
         )
 
         if time_idx is not None:
-            scale0 = transform_vector(datasets[0], "scale")
-            time_increment = scale0[time_idx] if scale0 is not None else None
+            time_increment = level_transforms[0][0][time_idx]
             time_increment_unit = (
                 axes_info[time_idx].get("unit", None)
                 if isinstance(axes_info[time_idx], dict)

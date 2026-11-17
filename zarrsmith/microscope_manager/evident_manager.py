@@ -336,6 +336,44 @@ class EvidentManager(MicroscopeManager):
         warnings.warn("VSI metadata has no z step; assuming 1 micrometer.", stacklevel=3)
         return 1.0
 
+    def _scene_stack(self, volume: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """``Multidimensional stack properties`` node of the selected scene in ``volume``."""
+        if volume is None:
+            return None
+        stacks = list(self._nodes(volume, "Multidimensional stack properties"))
+        named = [s for s in stacks if self._child_value(s, "Stack name") == self.scene_name]
+        return (named or stacks or [None])[0]
+
+    @staticmethod
+    def _um_per_unit(unit: Any) -> Optional[float]:
+        """Micrometres per unit of a VSI unit string such as ``10^-6m^1`` (``None`` if not a length)."""
+        match = re.fullmatch(r"\s*10\^(-?\d+)m\^1\s*", str(unit or ""))
+        return 10.0 ** (int(match.group(1)) + 6) if match else None
+
+    def _stage_position(self, volume: Optional[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+        """Stage position of voxel ``[0, 0, 0]`` of the scene in µm, or ``None``.
+
+        x and y are the ``RWC frame origin`` (real-world coordinates of the frame, ``x, y``
+        in ``RWC frame unit``) of the scene's stack: Evident records it for every image.
+        z is the stage Z of the first frame (tag ``2014``), recorded by multi-tile
+        acquisitions only; without it z is left out (at 0).
+        """
+        stack = self._scene_stack(volume)
+        if stack is None:
+            return None
+        origin = self._child_value(stack, "RWC frame origin")
+        factor = self._um_per_unit(self._child_value(stack, "RWC frame unit"))
+        values = re.findall(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", str(origin or ""))
+        if len(values) != 2 or factor is None:
+            return None
+        position = {"y": float(values[1]) * factor, "x": float(values[0]) * factor}
+        for frame in self._nodes(volume, "Frame properties"):
+            z = next((self._number(node) for node in self._nodes(frame, tag=_FRAME_Z_TAG)), None)
+            if z is not None:
+                position["z"] = z
+                break
+        return position
+
     def _parse_metadata(self) -> Dict[str, Any]:
         """
         Parse metadata of the currently selected scene.
@@ -366,6 +404,7 @@ class EvidentManager(MicroscopeManager):
             size=[level.shape for level in self.data],
             scales=[scale_for_level(scales, base_shape, level.shape[2:]) for level in self.data],
             units=("micrometer",) * 3,
+            translations=self._stage_position(volume),
             channels=channels,
             dtype=self.data[0].dtype,
             time_increment=interval if interval > 0 else 1.0,

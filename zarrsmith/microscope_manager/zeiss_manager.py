@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from bioio import BioImage
 
 from .microscope_manager import MicroscopeManager
-from ..utils.czi import czi_distance
+from ..utils.czi import czi_distance, scene_position
 from ..utils.metadata import ChannelInfo, build_metadata
 
 logger = logging.getLogger("zarrsmith")
@@ -115,6 +115,7 @@ class ZeissManager(MicroscopeManager):
             size=[self.data[0].shape],
             scales=[scales],
             units=("micrometer",) * 3,
+            translations=scene_position(self.path, self.scene_index, scales),
             channels=channels,
             dtype=self.data[0].dtype,
             time_increment=interval if interval > 0 else 1.0,

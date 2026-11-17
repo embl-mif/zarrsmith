@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
 from tqdm.auto import tqdm
 
 from .h5_array import H5Array
@@ -36,11 +37,27 @@ class LuxendoMosaicManager(MosaicManager):
 
     Tile positions come from ``affine_to_sample`` in the JSON (the tile is centred
     on the stage translation in x/y; z is the plane position along the stacking
-    direction). If a stack was re-acquired (``*_R_<n>.lux.h5``) only the latest
+    direction). A negative x or y scale in that affine (the mirror image of an
+    opposing camera) sets ``Tile.flip`` on that axis, so the tile is mirrored back
+    when it is fused. A last, rotation entry of the affine (the stage rotation) is
+    not applied: tiles are placed in the stage frame, which is the same for all the
+    tiles of one stack. If a stack was re-acquired (``*_R_<n>.lux.h5``) only the latest
     retake is used. Tiles are :class:`~zarrsmith.mosaic_manager.H5Array` objects, so no
     file stays open. Scanning reads only the JSON files (in parallel) and opens a
     single ``.h5`` file, which keeps loading fast on network drives.
+
+    **MuVi SPIM** acquisitions (two opposing cameras, ``Cam_left``/``Cam_right``) also give:
+
+    * ``camera``: the JSON ``camera``. The cameras are fused as two views blended
+      along z, each one on the side it images sharply (``attrs["detection_direction"]``);
+    * ``field``: one field per stack, from the stack name (``0-x00-y00`` and
+      ``0-x01-y00`` are tiles of stack ``0``, i.e. ``field0``): MuVi experiments often
+      hold several samples, each imaged as its own stack, possibly at another stage
+      rotation, so fields are not guessed from which tiles touch.
     """
+
+    #: Stack name -> stack of a MuVi tile: ``0-x01-y00`` -> ``0``.
+    _GRID_SUFFIX = re.compile(r"-x\d+-y\d+$")
 
     @staticmethod
     def _retake(h5: Path) -> int:
@@ -75,7 +92,12 @@ class LuxendoMosaicManager(MosaicManager):
         expected = self._shape(infos[0])
         if first.shape != expected:
             raise ValueError(f"{files[0]}: data shape {first.shape} does not match the JSON image size {expected}.")
-        return [self._tile_from(h5, info, first.dtype, default_timepoint=rank[h5]) for h5, info in zip(files, infos)]
+        tiles = [self._tile_from(h5, info, first.dtype, default_timepoint=rank[h5]) for h5, info in zip(files, infos)]
+        if any(t.attrs.get("microscope") == "MuVi-SPIM" for t in tiles):
+            for t in tiles:  # one field per stack (sample), see the class docstring
+                stack = str(t.attrs.get("stack") or "")
+                t.field = f"field{self._GRID_SUFFIX.sub('', stack) or stack}"
+        return tiles
 
     def __init__(self, path, scan_workers: int = 16, progress: bool = True):
         """
@@ -130,13 +152,33 @@ class LuxendoMosaicManager(MosaicManager):
         """
         info = cls._read_info(h5) if info is None else info
         size, vox = info["image_size_vx"], info["voxel_size_um"]
-        aff = info["affine_to_sample"][1]
+        affines = info["affine_to_sample"]
+        aff = affines[1]
+        matrix = np.array(aff["matrix"], float)
+        if not np.allclose(matrix, np.diag(np.diag(matrix))):
+            raise ValueError(f"{h5}: the voxel-to-stage affine {aff['matrix']} is not diagonal (sheared or rotated "
+                             "tiles are not supported).")
         tx, ty, tz = aff["translation"]
-        sz = aff["matrix"][2][2]  # um per plane, signed (stage z direction)
+        sz = matrix[2][2]  # um per plane, signed (stage z direction)
         desc = info.get("channel_description") or info["channel"]
         side = re.search(r"[-_]([LR])$", desc)
 
         data = H5Array(h5, shape=cls._shape(info), dtype=dtype)
+
+        attrs = {}
+        sources = " ".join(str(s) for s in info.get("sources") or ())
+        acquisition = (info.get("acquisition") or [{}])[0]
+        if "MuVi" in sources or acquisition.get("microscope_type") == "MuVi-SPIM":
+            attrs["microscope"] = "MuVi-SPIM"
+        directions = info.get("detection_directions")
+        if directions:
+            d = np.array(directions[0], float)  # (x, y, z) in the sample frame
+            if len(affines) > 2:  # back to the stage frame (before the stage rotation)
+                d = np.array(affines[2]["matrix"], float).T @ d
+            attrs["detection_direction"] = (float(np.sign(sz) * d[2]), float(d[1]), float(d[0]))
+        rotation = [s for s in acquisition.get("stage_positions") or () if s.get("type") == "rotation"]
+        if rotation:
+            attrs["rotation_deg"] = float(rotation[0].get("start_deg", 0.0))
 
         grid = re.search(r"x(\d+)-y(\d+)", info["stack"])
         return Tile(
@@ -156,5 +198,10 @@ class LuxendoMosaicManager(MosaicManager):
                 "grid": (int(grid.group(1)), int(grid.group(2))) if grid else None,
                 "channel_description": desc,
                 "path": str(h5),
+                **attrs,
             },
+            camera=info.get("camera"),
+            # mirrored along x/y (negative scale): flip the data back (the origin formula holds
+            # either way, the tile being centred on the translation); z keeps the stacking direction
+            flip=(False, bool(matrix[1][1] < 0), bool(matrix[0][0] < 0)),
         )

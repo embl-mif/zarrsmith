@@ -1,6 +1,7 @@
 """Helpers for Zeiss CZI files, shared by the Zeiss readers: metadata, and direct access to planes."""
 from __future__ import annotations
 
+import re
 import struct
 import warnings
 from typing import Dict, Mapping, NamedTuple, Optional, Sequence, Tuple
@@ -21,6 +22,49 @@ def czi_distance(czi_metadata, axis: str, default: Optional[float] = None) -> fl
         return default
     (um,), _ = to_micrometers((float(node.text),), ("meter",))
     return um
+
+
+#: Focus (stage z) position of a subblock, in its metadata.
+FOCUS_POSITION = re.compile(r"<FocusPosition>([^<]*)<")
+
+
+def scene_position(path, scene_index: int, voxel_zyx: Sequence[float]) -> Optional[Dict[str, float]]:
+    """Position (µm) of voxel ``[0, 0, 0]`` of scene ``scene_index`` of a CZI file, or ``None``.
+
+    ``y`` and ``x`` are the corner of the scene's bounding box in the pixel frame of the
+    file (the stage position, rounded to a pixel) times the voxel size; ``z`` is the
+    smallest ``FocusPosition`` of the first plane of the scene at its first timepoint.
+    This is the frame :class:`~zarrsmith.mosaic_manager.ZeissMosaicManager` places its
+    tiles in, so a scene read as one image and the fusion of its tiles land at the same
+    position. ``scene_index`` counts the scenes in file order, as bioio does. A file
+    whose stitching moved the image to the origin (ZEN *Stitching*) keeps only the
+    offsets between its scenes.
+    """
+    try:
+        from aicspylibczi import CziFile
+
+        with open(path, "rb") as f:
+            czi = CziFile(f)
+            boxes = czi.get_all_scene_bounding_boxes()
+            scenes = sorted(boxes)
+            if not 0 <= scene_index < len(scenes):
+                return None
+            scene = scenes[scene_index]
+            box = boxes[scene]
+            position = {"y": box.y * float(voxel_zyx[1]), "x": box.x * float(voxel_zyx[2])}
+            ranges = next((r for r in czi.get_dims_shape() if r.get("S", (0, 1))[0] <= scene < r.get("S", (0, 1))[1]),
+                          {})
+            selection = {axis: ranges[axis][0] for axis in ("Z", "C", "T") if axis in ranges}
+            if "S" in ranges:
+                selection["S"] = scene
+            focus = [float(found.group(1)) for d, xml in czi.read_subblock_metadata(**selection)
+                     for found in [FOCUS_POSITION.search(xml)] if found and dict(d).get("H", 0) == 0]
+    except Exception as e:  # a missing or unreadable position must not stop the conversion
+        warnings.warn(f"Could not read the position of scene {scene_index} of {path}: {e}", stacklevel=2)
+        return None
+    if focus:
+        position["z"] = min(focus)
+    return position
 
 
 # Direct access to planes. aicspylibczi goes through the whole subblock directory of the

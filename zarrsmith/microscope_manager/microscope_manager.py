@@ -216,6 +216,8 @@ class MicroscopeManager(ABC):
                     - channel_names (list[str])
                     - channel_colors (list[str]): valid matplotlib colors or hex code
                     - scales (list[tuple])
+                    - translations (dict such as ``{"y": 10.0, "x": -5.0}``, or one
+                      per level; physical position of voxel 0, ``None`` to clear)
                     - time_increment (float)
                     - time_increment_unit (str)
                     - units (tuple[str])

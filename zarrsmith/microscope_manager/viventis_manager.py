@@ -1,4 +1,8 @@
+import json
+import logging
+import re
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import dask.array as da
@@ -8,6 +12,12 @@ from tifffile import imread
 from .microscope_manager import MicroscopeManager
 from ..utils.metadata import build_metadata
 from ..utils.ome import parse_ome_xml, xml_attr
+from ..utils.units import normalize_unit
+
+logger = logging.getLogger("zarrsmith")
+
+#: Stage positions of a Viventis acquisition, in its ``Settings`` folder.
+STAGE_POSITIONS_FILE = "STAGE_PositionSettings.json"
 
 
 class ViventisManager(MicroscopeManager):
@@ -70,8 +80,53 @@ class ViventisManager(MicroscopeManager):
             dtype=px.dtype,
             time_increment=px.time_increment,
             time_increment_unit=px.time_increment_unit,
+            translations=self._stage_position(px.units_zyx),
             plane_files=self._plane_files(px.tiffdata),
         )
+
+    def _settings_file(self) -> Optional[Path]:
+        """``STAGE_PositionSettings.json`` of the acquisition: in ``<acquisition>/Settings``,
+        next to the ``Position N_Settings M`` folders (or inside the dataset folder)."""
+        for folder in (self.path.parent, self.path):
+            candidate = folder / "Settings" / STAGE_POSITIONS_FILE
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _stage_position(self, units: Tuple[str, ...]) -> Optional[Dict[str, float]]:
+        """Stage position of this position folder, ``{"z", "y", "x"}`` in µm, or ``None``.
+
+        Viventis records the stage position of every position only in the acquisition's
+        ``Settings/STAGE_PositionSettings.json`` (the OME-XML has none), as entries with
+        ``Name`` (``"Position 3"``), ``PositionX``, ``PositionY`` and ``PositionZ`` in
+        micrometres. The entry is matched to the folder name before ``_Settings``
+        (``"Position 3_Settings 1"``). The values are used as given: whether they are the
+        centre or the corner of the field, and the stage axis directions, are not stated
+        by the file. Without the file or a matching entry the position is unknown.
+        """
+        settings = self._settings_file()
+        if settings is None:
+            return None
+        if any(normalize_unit(u) != "micrometer" for u in units):
+            logger.warning("Viventis voxel size is not in micrometers (%s): stage position not used.", units)
+            return None
+        name = re.split(r"_Settings", self.path.name, maxsplit=1)[0].strip()
+        try:
+            entries = json.loads(settings.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            logger.warning("Cannot read %s (%s): stage position not used.", settings, e)
+            return None
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict) and str(entry.get("Name", "")).strip() == name:
+                try:
+                    position = {ax: float(entry[f"Position{ax.upper()}"]) for ax in "zyx"}
+                except (KeyError, TypeError, ValueError):
+                    logger.warning("Entry %r of %s has no PositionX/Y/Z: stage position not used.", name, settings)
+                    return None
+                logger.info("Stage position of %r from %s: %s", name, settings.name, position)
+                return position
+        logger.info("No entry %r in %s: stage position not used.", name, settings)
+        return None
 
     def _build_dask_array(self) -> List[da.Array]:
         """

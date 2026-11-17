@@ -390,6 +390,19 @@ def convert_widget():
             make_convert_widget.y_range.enabled = bool(dataset and _axis_index(dataset, "y") is not None)
             make_convert_widget.x_range.enabled = bool(dataset and _axis_index(dataset, "x") is not None)
 
+    def image_offset(n):
+        """``translate`` of the last ``n`` (spatial) axes of the image layers in the viewer.
+
+        The ROI, Zrange and CropBox layers hold voxel indices of the dataset; they take
+        the offset of the image layers so they sit on the image wherever it is placed
+        (at its stage position by ``visualize()``, at 0 by napari-ome-zarr)."""
+        from napari.layers import Image
+
+        for layer in viewer.layers:
+            if isinstance(layer, Image) and len(layer.translate) >= n:
+                return tuple(float(v) for v in layer.translate[-n:])
+        return (0.0,) * n
+
     def ensure_crop_layers(dataset):
         axes = _dataset_axes(dataset)
         if "ROI" not in viewer.layers and {"y", "x"}.issubset(axes):
@@ -410,6 +423,7 @@ def convert_widget():
                 edge_width=10,
                 ndim=2,
                 scale=_scale_for_axes(dataset, "yx"),
+                translate=image_offset(2),
                 **_units_kwargs(dataset, "yx"),
             )
             layer.mode = "add_rectangle"
@@ -427,6 +441,7 @@ def convert_widget():
                 ndim=3,
                 **points_projection_kwargs(),
                 scale=_scale_for_axes(dataset, "zyx"),
+                translate=image_offset(3),
                 **_units_kwargs(dataset, "zyx"),
             )
             layer.mode = "add"
@@ -440,6 +455,7 @@ def convert_widget():
                 face_color="transparent",
                 ndim=3,
                 scale=_scale_for_axes(dataset, "zyx"),
+                translate=image_offset(3),
                 **_units_kwargs(dataset, "zyx"),
             )
             layer.editable = False          # prevents adding/moving/editing shapes

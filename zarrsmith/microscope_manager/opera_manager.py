@@ -8,6 +8,8 @@ from .microscope_manager import MicroscopeManager
 from ..utils.axes import to_tczyx
 from ..utils.metadata import build_metadata, scale_for_level
 from ..utils.ome import parse_ome_xml
+from ..utils.translation import level_translations
+from ..utils.units import normalize_unit
 
 
 class OperaManager(MicroscopeManager):
@@ -53,11 +55,25 @@ class OperaManager(MicroscopeManager):
             size=[(px.size_t, px.size_c, px.size_z, px.size_y, px.size_x)],
             scales=[px.scale_zyx],
             units=px.units_zyx,
+            translations=self._stage_position(px.units_zyx),
             channels=px.channels,
             dtype=px.dtype,
             time_increment=px.time_increment,
             time_increment_unit=px.time_increment_unit,
         )
+
+    def _stage_position(self, units) -> Optional[Dict[str, float]]:
+        """Position of the stitched image in µm, from the export's raw ``Images/Index.xml``.
+
+        The stitched OME-TIFF records no stage position. See
+        :func:`~zarrsmith.mosaic_manager.opera_mosaic_manager.stitched_position`;
+        ``None`` (no position) when the index is not where Harmony puts it.
+        """
+        from ..mosaic_manager.opera_mosaic_manager import stitched_position
+
+        if any(normalize_unit(u) != "micrometer" for u in units):
+            return None
+        return stitched_position(self.path)
 
     def _build_dask_array(self) -> List[da.Array]:
         """
@@ -95,4 +111,5 @@ class OperaManager(MicroscopeManager):
 
         self.metadata["scales"] = scales
         self.metadata["size"] = sizes
+        self.metadata["translations"] = level_translations(self.metadata.get("translations"), len(scales))
         return data_levels

@@ -25,6 +25,7 @@ from .colors import (  # noqa: F401  (re-exported: historical import location)
     parse_color,
 )
 from .units import normalize_unit
+from .translation import has_translation, normalize_translations, translation_vector
 from .axes import (
     DATA_TYPES,
     SPATIAL_AXIS_SET,
@@ -937,16 +938,8 @@ def _validate_metadata(
                 f"({len(spatial_axes)}), got {len(scale)}."
             )
 
-    translations = metadata.get("translations")
-    if translations is not None:
-        if len(translations) != len(data_levels):
-            raise ValueError("metadata['translations'] must contain one entry per pyramid level.")
-        for translation in translations:
-            if len(translation) != len(spatial_axes):
-                raise ValueError(
-                    "Each translation entry must match the number of spatial axes "
-                    f"({len(spatial_axes)}), got {len(translation)}."
-                )
+    # Raises on a translation that does not fit the axes or the number of levels.
+    normalize_translations(metadata.get("translations"), axes, len(data_levels))
 
     extra = metadata.get("extra_attributes")
     if extra is not None and not isinstance(extra, dict):
@@ -983,37 +976,32 @@ def _build_coordinate_transformations(
     axes: tuple[str, ...] | str,
     scales: Sequence[Sequence[float]],
     time_increment: float | None,
-    translations: Sequence[Sequence[float]] | None = None,
+    translations: Sequence[dict[str, float]] | None = None,
 ) -> list[list[dict[str, Any]]]:
-    """Generate the NGFF transformations of every pyramid level.
+    """Generate the NGFF coordinate transformations of every pyramid level.
 
-    Each level gets a ``scale``, followed by a ``translation`` when
-    ``translations`` (spatial origins, one per level) is given; NGFF 0.4 and 0.5
-    both require the scale first. Non-spatial axes are not translated.
+    Each level gets a ``scale``, followed by a ``translation`` when ``translations``
+    (one dict per level, see :mod:`zarrsmith.utils.translation`) puts any level away
+    from the origin. A dataset without a position keeps the scale-only metadata.
     """
     axes = normalize_axes(axes)
-
-    def full_vector(spatial_values, t_value, other_value):
-        spatial_iter = iter(spatial_values)
-        out = []
-        for ax in axes:
-            if ax == "t":
-                out.append(float(t_value))
-            elif ax in SPATIAL_AXIS_SET:
-                out.append(float(next(spatial_iter)))
-            else:
-                out.append(float(other_value))
-        return out
-
+    translations = normalize_translations(translations, axes, len(scales))
+    with_translation = has_translation(translations)
     out = []
     for level, spatial_scale in enumerate(scales):
-        t_scale = time_increment if time_increment is not None else 1.0
-        level_transforms = [{"type": "scale", "scale": full_vector(spatial_scale, t_scale, 1.0)}]
-        if translations is not None:
-            level_transforms.append(
-                {"type": "translation", "translation": full_vector(translations[level], 0.0, 0.0)}
-            )
-        out.append(level_transforms)
+        spatial_iter = iter(spatial_scale)
+        full_scale = []
+        for ax in axes:
+            if ax == "t":
+                full_scale.append(float(time_increment if time_increment is not None else 1.0))
+            elif ax in SPATIAL_AXIS_SET:
+                full_scale.append(float(next(spatial_iter)))
+            else:
+                full_scale.append(1.0)
+        transforms = [{"type": "scale", "scale": full_scale}]
+        if with_translation:
+            transforms.append({"type": "translation", "translation": translation_vector(translations[level], axes)})
+        out.append(transforms)
     return out
 
 

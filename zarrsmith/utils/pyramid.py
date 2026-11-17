@@ -6,11 +6,8 @@ import dask.array as da
 
 from .axes import normalize_axes, spatial_axis_indices, spatial_axes_in_order
 from .chunks import rechunk_to_shape, shape_tuple
-from .downsampling import (
-    downsample,
-    downsampled_translation,
-    normalize_spatial_factor_for_axes,
-)
+from .downsampling import downsample, normalize_spatial_factor_for_axes
+from .translation import normalize_translations, pyramid_translations
 
 SpatialFactor = Union[int, Sequence[int]]
 
@@ -64,7 +61,8 @@ def build_pyramid(
     ``method`` is ``"nearest"`` (default), ``"mean"`` or ``"mode"`` (see
     :func:`zarrsmith.utils.downsampling.downsample_numpy`). When
     ``metadata['translations']`` is set, the origin of every new level follows
-    the method (see :func:`zarrsmith.utils.downsampling.downsampled_translation`).
+    the method, by the NGFF 0.6 convention (see
+    :func:`zarrsmith.utils.translation.pyramid_translations`).
     """
     from .downsampling import resolve_downsampling_method
 
@@ -102,23 +100,20 @@ def build_pyramid(
     factors = normalize_spatial_factor_for_axes(downscale_factor, axes)
     target_chunks = _target_chunks(data_levels[0], metadata)
 
-    translations = metadata.get("translations")
+    # The level the new pyramid starts from, whose position is known.
+    source = min(start_level, len(data_levels) - 1) if start_level < len(data_levels) else 0
+    source_scale = tuple(metadata["scales"][min(source, len(metadata["scales"]) - 1)])
+    translations = normalize_translations(metadata.get("translations"), axes)
+    source_translation = None if translations is None else translations[min(source, len(translations) - 1)]
+
     if start_level < len(data_levels):
         pyramid = [rechunk_to_shape(data_levels[start_level], target_chunks)]
-        new_scales = [tuple(metadata["scales"][min(start_level, len(metadata["scales"]) - 1)])]
-        new_translations = (
-            None if translations is None
-            else [tuple(translations[min(start_level, len(translations) - 1)])]
-        )
+        new_scales = [source_scale]
     else:
         base_downscale = factor_power(factors, start_level)
         down = downsample(data_levels[0], base_downscale, spatial_axes, method)
         pyramid = [rechunk_to_shape(down, target_chunks)]
         new_scales = [multiply_scales(metadata["scales"][0], base_downscale)]
-        new_translations = (
-            None if translations is None
-            else [downsampled_translation(translations[0], metadata["scales"][0], base_downscale, method)]
-        )
 
     for _ in range(1, num_levels):
         if spatial_axes:
@@ -130,14 +125,12 @@ def build_pyramid(
     for level in range(1, num_levels):
         scale_factor = factor_power(factors, level)
         new_scales.append(multiply_scales(new_scales[0], scale_factor))
-        if new_translations is not None:
-            new_translations.append(
-                downsampled_translation(new_translations[-1], new_scales[-2], factors, method)
-            )
 
     metadata["scales"] = new_scales
-    if new_translations is not None:
-        metadata["translations"] = new_translations
+    # NGFF 0.6 convention: see zarrsmith.utils.translation.pyramid_translations.
+    metadata["translations"] = pyramid_translations(
+        source_translation, source_scale, new_scales, axes, method
+    )
     metadata["size"] = [tuple(level.shape) for level in pyramid]
     metadata["chunksize"] = [tuple(level.chunksize) for level in pyramid]
     return pyramid, metadata
