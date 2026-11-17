@@ -114,24 +114,26 @@ With `aligned=True`, `write_image_region` and `write_label_region` raise `ValueE
 
 ## Allocate an image and build its pyramid in place
 
-`allocate_zarr` creates an empty image from a template (what [`zarrsmith allocate`](cli.md) runs), and `build_pyramid_inplace` creates or replaces levels 1..N on disk from level 0, one task per output shard (chunk on zarr v2):
+`allocate_zarr` creates an empty image from a template (what [`zarrsmith allocate`](cli.md) runs), and `populate_pyramid` creates or replaces the levels on disk after `start_level` (default 0, an index or a dataset path), from that level, one task per output shard (chunk on zarr v2). The start level and the levels above it are kept; `num_levels` counts every level from level 0:
 
 ```python
 from zarrsmith.utils.allocate import allocate_zarr
 
 allocate_zarr("seg.ome.zarr", template="raw.ome.zarr", data_type="label", dtype="uint32",
               crop={"t": (0, 10)}, extra_attributes={"t_range": [0, 10]})
+# translation= takes the stored format, {"z": .., "y": .., "x": ..}; axes left out keep the template's origin
 
 z = mm.ZarrManager("seg.ome.zarr", mode="r+")
 z.write_label_region(labels, aligned=True)
-z.build_pyramid_inplace(num_levels=4, method="mode")  # also group="labels/nuclei"
+z.populate_pyramid(num_levels=4, method="mode")  # also group="labels/nuclei"
+z.populate_pyramid(num_levels=6, start_level=2)   # keep levels 0-2, rebuild 3-5 from level 2
 ```
 
 `method` is `"mean"`, `"nearest"` or `"mode"`; by default `"nearest"` for labels and `"mean"` otherwise. The lazy `build_pyramid` also takes `method` (default `"nearest"`). The method is recorded in the `multiscales` `type` and `metadata` fields, as the NGFF spec recommends.
 
 A sharded level is built one inner chunk at a time, so each task holds one output shard plus one chunk's source window; the number of threads is limited to what fits in memory, sharded or not.
 
-NGFF 0.6 stores can be read (axes from `coordinateSystems`, `scale`/`translation` from a `sequence`), but zarrsmith writes only 0.4 and 0.5: `build_pyramid_inplace` and `create_empty_group` refuse a 0.6 store rather than mix versions, and `allocate_zarr` from a 0.6 template writes 0.5.
+NGFF 0.6 stores can be read (axes from `coordinateSystems`, `scale`/`translation` from a `sequence`), but zarrsmith writes only 0.4 and 0.5: `populate_pyramid` and `create_empty_group` refuse a 0.6 store rather than mix versions, and `allocate_zarr` from a 0.6 template writes 0.5.
 
 ## Origins and custom attributes
 

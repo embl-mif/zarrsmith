@@ -112,7 +112,7 @@ def build_allocation_metadata(
     shards: Any = None,
     num_levels: int = 1,
     downscale_factor: int | Sequence[int] = 2,
-    translation: bool | Sequence[float] | None = None,
+    translation: bool | Mapping[str, float] | Sequence[float] | None = None,
     zarr_format: int | None = None,
     extra_attributes: Mapping[str, Any] | None = None,
     name: str | None = None,
@@ -242,6 +242,15 @@ def build_allocation_metadata(
     scale0 = tuple(scale_by_axis[ax] for ax in spatial)
     if translation is None or isinstance(translation, bool):
         translation0 = dict(origin)
+    elif isinstance(translation, Mapping):
+        # zarrsmith's translation format: keyed by spatial axis; axes left out keep the origin.
+        given = {str(ax).lower(): v for ax, v in translation.items()}
+        unknown = sorted(set(given) - set(spatial))
+        if unknown:
+            raise ValueError(
+                f"translation has axes {unknown} that are not spatial axes of the output ({''.join(spatial)})."
+            )
+        translation0 = {ax: float(given.get(ax, origin[ax])) for ax in spatial}
     else:
         translation0 = dict(zip(spatial, _spatial(translation, axes_out, "translation")))
     level_scales = [scale0]
@@ -323,8 +332,11 @@ def allocate_zarr(
         Levels created (default 1: fill level 0 then run ``zarrsmith pyramid``).
     translation
         ``None`` writes a translation when the template has one or the crop moves
-        the origin; ``True`` always writes one; a sequence (one value per spatial
-        axis) sets the level-0 origin explicitly; ``False`` writes none.
+        the origin; ``True`` always writes one; ``False`` writes none. A dict keyed
+        by spatial axis, as zarrsmith stores translations (e.g.
+        ``{"z": 0.0, "y": 10.0, "x": 20.0}``), sets the level-0 origin; axes it
+        leaves out keep the template's origin (moved by ``crop``). A sequence with
+        one value per spatial axis, in axis order, is also accepted.
     zarr_format
         2 (NGFF 0.4) or 3 (NGFF 0.5); defaults to the template's format, else 3.
     compressor, compressor_level

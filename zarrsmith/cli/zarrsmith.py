@@ -1165,11 +1165,12 @@ def pyramid_single(args):
     z = mm.ZarrManager(path=str(args.zarr_path), mode="r+")
     for group in _pyramid_groups(z, args.group):
         print(f"\n--->Building the pyramid of {args.zarr_path}{'' if group is None else '/' + group}")
-        z.build_pyramid_inplace(
+        z.populate_pyramid(
             group=group,
             num_levels=args.num_levels,
             downscale_factor=_single_or_tuple(args.downscale_factor),
             method=args.method,
+            start_level=args.start_level,
             num_workers=args.num_workers,
         )
     print(f"Saved {args.zarr_path}")

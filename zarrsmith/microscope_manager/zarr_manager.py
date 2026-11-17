@@ -828,7 +828,7 @@ class ZarrManager(MicroscopeManager):
         ``method`` is ``"nearest"`` (default), ``"mean"`` or ``"mode"``; ``None``
         uses ``"mean"`` for intensity datasets and ``"nearest"`` for labels. To
         write the levels of an on-disk store directly, see
-        :meth:`build_pyramid_inplace`.
+        :meth:`populate_pyramid`.
         """
         from ..utils.pyramid import build_pyramid as _build_pyramid
         from ..utils.downsampling import default_downsampling_method
@@ -856,41 +856,46 @@ class ZarrManager(MicroscopeManager):
 
         logger.info("Zarr pyramids rebuilt.")
 
-    def build_pyramid_inplace(
+    def populate_pyramid(
         self,
         group: Optional[str] = None,
         num_levels: Optional[int] = None,
         downscale_factor: int | Sequence[int] = 2,
         method: Optional[str] = None,
         *,
+        start_level: int | str = 0,
         num_workers: Optional[int] = None,
         progress: bool = True,
     ) -> None:
-        """Create or overwrite pyramid levels 1..N on disk from level 0 on disk.
+        """Create or overwrite the pyramid levels on disk after ``start_level``, from that level on disk.
 
         Unlike :meth:`build_pyramid`, which works on the lazy in-memory copy, this
         writes into this store directly, so it needs ``mode='r+'`` (or ``'a'``).
-        Level 0 is read lazily, and every coarser level is built from the level
-        above it, one task per output shard (zarr v3) or chunk (zarr v2).
+        The start level is read lazily, and every coarser level is built from the
+        level above it, one task per output shard (zarr v3) or chunk (zarr v2).
 
         ``group`` is ``None`` for the root image or a path such as
-        ``"labels/nuclei"``. ``method`` is ``"mean"``, ``"nearest"`` or ``"mode"``;
+        ``"labels/nuclei"``. ``num_levels`` counts every level from level 0.
+        ``start_level`` (an index or a dataset path such as ``"1"``; default 0)
+        and the levels above it are kept; the levels after it are rebuilt.
+        ``method`` is ``"mean"``, ``"nearest"`` or ``"mode"``;
         ``None`` uses ``"nearest"`` for labels and ``"mean"`` otherwise. See
-        :func:`zarrsmith.utils.pyramid_inplace.build_pyramid_inplace` for the rest.
+        :func:`zarrsmith.utils.populate_pyramid.populate_pyramid` for the rest.
         The manager is re-read afterwards.
         """
-        from ..utils.pyramid_inplace import build_pyramid_inplace as _build_inplace
+        from ..utils.populate_pyramid import populate_pyramid as _populate_pyramid
 
         if self.mode not in ("r+", "a", "w"):
             raise PermissionError(
                 f"Dataset opened in read-only mode ({self.mode!r}). Reopen with mode='r+' to build the pyramid in place."
             )
-        _build_inplace(
+        _populate_pyramid(
             self.root,
             group,
             num_levels=num_levels,
             downscale_factor=downscale_factor,
             method=method,
+            start_level=start_level,
             num_workers=num_workers,
             progress=progress,
         )

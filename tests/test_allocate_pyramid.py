@@ -146,6 +146,24 @@ def test_crop_moves_the_translation(tmp_path):
     assert z.metadata["translations"][0] == pytest.approx(_zyx(10.0 + 2 * 2.0, 20.0 + 16 * 0.5, 30.0))
 
 
+def test_allocate_takes_the_translation_as_a_dict(tmp_path):
+    src = tmp_path / "src.ome.zarr"
+    _make_template(src, 3, "0.5")
+    allocate_zarr(tmp_path / "a.ome.zarr", template=src, translation=_zyx(1.0, 2.0, 3.0))
+    assert ZarrManager(str(tmp_path / "a.ome.zarr")).metadata["translations"] == [_zyx(1.0, 2.0, 3.0)]
+
+    # axes left out keep the template's origin, moved by the crop
+    allocate_zarr(tmp_path / "b.ome.zarr", template=src, crop={"y": (16, 48)}, translation={"X": 5.0})
+    assert ZarrManager(str(tmp_path / "b.ome.zarr")).metadata["translations"] == [_zyx(10.0, 20.0 + 16 * 0.5, 5.0)]
+
+    # the sequence form still works, in spatial axis order
+    allocate_zarr(tmp_path / "c.ome.zarr", template=src, translation=(1.0, 2.0, 3.0))
+    assert ZarrManager(str(tmp_path / "c.ome.zarr")).metadata["translations"] == [_zyx(1.0, 2.0, 3.0)]
+
+    with pytest.raises(ValueError, match="not spatial axes"):
+        allocate_zarr(tmp_path / "d.ome.zarr", template=src, translation={"c": 1.0})
+
+
 @pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
 def test_lazy_pyramid_with_mean_writes_translations(tmp_path, zarr_format, ngff):
     src = tmp_path / "src.ome.zarr"
@@ -213,7 +231,7 @@ def test_allocate_write_pyramid_read_back(tmp_path, zarr_format, ngff):
                 z.write_image_region(tile, t=slice(t, t + 1), y=slice(y0, y0 + block[3]),
                                      x=slice(x0, x0 + block[4]), aligned=True)
 
-    z.build_pyramid_inplace(num_levels=3, progress=False)
+    z.populate_pyramid(num_levels=3, progress=False)
     assert len(z.data) == 3
     np.testing.assert_allclose(np.asarray(z.data[0]), values)
     expected1 = downsample_numpy(values, (2, 2, 2), (2, 3, 4), "mean")
@@ -245,7 +263,7 @@ def test_label_allocation_loads_as_labels(tmp_path, zarr_format, ngff):
     labels = np.zeros((2, 8, 64, 64), dtype=np.uint32)
     labels[:, 2:6, 10:40, 10:40] = 5
     z.write_label_region(labels, aligned=True)
-    z.build_pyramid_inplace(num_levels=2, method="mode", progress=False)
+    z.populate_pyramid(num_levels=2, method="mode", progress=False)
     assert set(np.unique(np.asarray(z.data[1]))) == {0, 5}
 
     node = _napari_nodes(out)[0]
@@ -254,7 +272,7 @@ def test_label_allocation_loads_as_labels(tmp_path, zarr_format, ngff):
     assert _transforms(node, 1)["translation"] == pytest.approx([0.0, 11.0, 20.25, 30.25])
 
     with pytest.raises(ValueError, match="label"):
-        z.build_pyramid_inplace(num_levels=2, method="mean", progress=False)
+        z.populate_pyramid(num_levels=2, method="mean", progress=False)
 
 
 @pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
@@ -265,7 +283,7 @@ def test_nested_label_group_pyramid(tmp_path, zarr_format, ngff):
     md = dict(z.metadata, axes="tzyx", size=[(2, 8, 64, 64)], chunksize=[(1, 4, 32, 32)], dtype="uint16")
     z.create_empty_group("nuclei", md, data_type="label")
     z.write_label_region(np.ones((2, 8, 64, 64), dtype=np.uint16), group="labels/nuclei")
-    z.build_pyramid_inplace(group="labels/nuclei", num_levels=3, progress=False)
+    z.populate_pyramid(group="labels/nuclei", num_levels=3, progress=False)
     assert [arr.shape for arr in z.labels["nuclei"].data] == [(2, 8, 64, 64), (2, 4, 32, 32), (2, 2, 16, 16)]
     labels_node = [n for n in _napari_nodes(template) if n.load(Label) is not None]
     assert labels_node
@@ -303,9 +321,9 @@ def test_rerunning_pyramid_overwrites_cleanly(tmp_path, zarr_format, ngff):
                   chunk_size=(1, 8, 32, 32), extra_attributes={"t_range": [3, 4]})
     z = ZarrManager(str(out), mode="r+")
     z.write_image_region(np.full((1, 16, 128, 128), 7, dtype=np.uint16))
-    z.build_pyramid_inplace(num_levels=4, progress=False)
+    z.populate_pyramid(num_levels=4, progress=False)
     assert len(z.data) == 4
-    z.build_pyramid_inplace(num_levels=2, downscale_factor=(1, 2, 2), progress=False)
+    z.populate_pyramid(num_levels=2, downscale_factor=(1, 2, 2), progress=False)
     assert len(z.data) == 2
     assert z.data[1].shape == (1, 16, 64, 64)
     assert not (out / "2").exists() and not (out / "3").exists()
@@ -313,8 +331,43 @@ def test_rerunning_pyramid_overwrites_cleanly(tmp_path, zarr_format, ngff):
     assert z.metadata["extra_attributes"] == {"t_range": [3, 4]}
     assert int(np.asarray(z.data[1]).min()) == 7
     # one level only: every coarser level goes away
-    z.build_pyramid_inplace(num_levels=1, progress=False)
+    z.populate_pyramid(num_levels=1, progress=False)
     assert len(z.data) == 1 and sorted(z.root.array_keys()) == ["0"]
+
+
+@pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
+def test_pyramid_rebuilds_from_a_start_level(tmp_path, zarr_format, ngff):
+    out = tmp_path / "img.ome.zarr"
+    allocate_zarr(out, size=(16, 128, 128), axes="zyx", scale=(2.0, 0.5, 0.5), zarr_format=zarr_format,
+                  chunk_size=(8, 32, 32), translation=_zyx(10.0, 20.0, 30.0))
+    z = ZarrManager(str(out), mode="r+")
+    z.write_image_region(np.full((16, 128, 128), 7, dtype=np.uint16))
+    z.populate_pyramid(num_levels=3, downscale_factor=(1, 2, 2), progress=False)
+    before = [dict(t) for t in z.metadata["translations"][:2]]
+    z.root["1"][:] = 3  # the new levels must come from level 1, not level 0
+
+    z.populate_pyramid(num_levels=4, downscale_factor=(1, 2, 2), start_level=1, progress=False)
+    assert [tuple(a.shape) for a in z.data] == [(16, 128, 128), (16, 64, 64), (16, 32, 32), (16, 16, 16)]
+    assert int(np.asarray(z.data[0]).min()) == 7
+    assert {int(np.asarray(z.data[k]).max()) for k in (1, 2, 3)} == {3}
+    assert z.metadata["translations"][:2] == before
+    assert z.metadata["scales"][3] == pytest.approx((2.0, 4.0, 4.0))
+    # mean levels: t0 + (s_k - s0) / 2, the same whether built from level 0 or level 1
+    assert z.metadata["translations"][3] == pytest.approx(_zyx(10.0, 20.0 + 1.75, 30.0 + 1.75))
+    ms = z.root.attrs.asdict().get("ome", z.root.attrs.asdict())["multiscales"][0]
+    assert ms["metadata"]["kwargs"]["start_level"] == "1"
+
+    # a dataset path works too; num_levels == start_level + 1 drops what is below it
+    z.populate_pyramid(num_levels=2, start_level="1", progress=False)
+    assert len(z.data) == 2 and sorted(z.root.array_keys()) == ["0", "1"]
+    with pytest.raises(ValueError, match="at least"):
+        z.populate_pyramid(num_levels=1, start_level=1, progress=False)
+    with pytest.raises(ValueError, match="out of range"):
+        z.populate_pyramid(num_levels=4, start_level=5, progress=False)
+
+    main(["pyramid", "-z", str(out), "--start_level", "1", "--num_levels", "3", "-df", "1", "2", "2"])
+    z = ZarrManager(str(out))
+    assert len(z.data) == 3 and int(np.asarray(z.data[2]).max()) == 3
 
 
 @pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
@@ -432,7 +485,7 @@ def test_ngff_06_store_is_not_modified_in_place(tmp_path):
     _make_v06_store(src)
     z = ZarrManager(str(src), mode="r+")
     with pytest.raises(ValueError, match="NGFF 0.6"):
-        z.build_pyramid_inplace(num_levels=2, progress=False)
+        z.populate_pyramid(num_levels=2, progress=False)
     with pytest.raises(ValueError, match="NGFF 0.6"):
         z.create_empty_group("seg", dict(z.metadata), data_type="label")
     assert sorted(z.root.array_keys()) == ["0"]
@@ -453,7 +506,7 @@ def test_sharded_levels_are_built_chunk_by_chunk(tmp_path):
     data = np.random.default_rng(3).integers(0, 65535, size=(16, 128, 128), dtype=np.uint16)
     z = ZarrManager(str(out), mode="r+")
     z.write_image_region(data)
-    z.build_pyramid_inplace(num_levels=3, progress=False)
+    z.populate_pyramid(num_levels=3, progress=False)
     assert z.zarr_data[1].shards is not None and z.zarr_data[1].shards != z.zarr_data[1].chunks
 
     # Independent float64 reference: 2x2x2 block means, rounded.
@@ -472,8 +525,8 @@ def test_pyramid_records_its_method_and_stays_valid(tmp_path, zarr_format, ngff)
     z = ZarrManager(str(template), mode="r+")
     md = dict(z.metadata, axes="tzyx", size=[(2, 8, 64, 64)], chunksize=[(1, 4, 32, 32)], dtype="uint16")
     z.create_empty_group("nuclei", md, data_type="label")
-    z.build_pyramid_inplace(num_levels=3, progress=False)
-    z.build_pyramid_inplace(group="labels/nuclei", num_levels=3, method="mode", progress=False)
+    z.populate_pyramid(num_levels=3, progress=False)
+    z.populate_pyramid(group="labels/nuclei", num_levels=3, method="mode", progress=False)
 
     ms = z._get_multiscales(z.root)[0]
     assert ms["type"] == "mean"
@@ -482,7 +535,7 @@ def test_pyramid_records_its_method_and_stays_valid(tmp_path, zarr_format, ngff)
     assert z.labels["nuclei"].metadata["data_type"] == "label"
     assert_valid_ome_zarr(template, ngff)
 
-    z.build_pyramid_inplace(num_levels=1, progress=False)
+    z.populate_pyramid(num_levels=1, progress=False)
     ms = z._get_multiscales(z.root)[0]
     assert "type" not in ms and "metadata" not in ms
 
@@ -496,7 +549,7 @@ def test_legacy_label_type_marker_is_kept(tmp_path):
     ome["multiscales"][0]["type"] = "label"  # how older stores marked labels
     root.attrs["ome"] = ome
     z = ZarrManager(str(out), mode="r+")
-    z.build_pyramid_inplace(num_levels=2, progress=False)
+    z.populate_pyramid(num_levels=2, progress=False)
     assert z._get_multiscales(z.root)[0]["type"] == "label"
     assert z.metadata["data_type"] == "label"
 

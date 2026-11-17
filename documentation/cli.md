@@ -108,7 +108,7 @@ zarrsmith allocate -o new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale
 
 Zarr v2 has no shards: an explicit `--shards` shape is refused, `--shards auto` is dropped with a warning, and a v3 template's shards are not carried over. Parallel jobs must write tiles that start and end on the shard grid (the chunk grid on zarr v2 or without shards), so no two jobs write the same file; `aligned=True` raises an error for any other tile.
 
-`pyramid` creates or replaces levels 1..N of the root image (or of `--group labels/nuclei`, or of every image with `--group all`). Each level is computed from the level above it, one task per output shard (chunk on zarr v2), with the zarr format, codecs and chunk layout of level 0, and the `multiscales` metadata is updated. Running it again replaces the levels cleanly.
+`pyramid` creates or replaces the levels after `--start_level` (default 0) of the root image (or of `--group labels/nuclei`, or of every image with `--group all`). The start level and the levels above it are kept as they are. Each new level is computed from the level above it, one task per output shard (chunk on zarr v2), with the zarr format, codecs and chunk layout of level 0, and the `multiscales` metadata is updated. Running it again replaces the levels cleanly. `zarrsmith pyramid -z img.ome.zarr --start_level 2 --num_levels 6` keeps levels 0-2 and rebuilds 3-5 from level 2.
 
 | Option | Does | Default |
 |---|---|---|
@@ -117,9 +117,10 @@ Zarr v2 has no shards: an explicit `--shards` shape is refused, `--shards auto` 
 | `-nl`, `--num_levels` | total number of levels, level 0 included | until no spatial axis is above 2048 pixels |
 | `-df`, `--downscale_factor` | one value, or one per spatial axis (`1 2 2` keeps Z) | 2 |
 | `-me`, `--method` | `mean` (average), `nearest` (one pixel per block) or `mode` (most frequent value, smoother label pyramids) | `mean` for intensity data, `nearest` for labels |
+| `-sl`, `--start_level` | level to build from, by index or path; it and the levels above it are kept | 0 |
 | `-nw`, `--num_workers` | number of threads | half the cores, at most 8 |
 
-Translations follow the NGFF 0.6 convention, where a pixel's position is its centre: with `mean` and `mode` a coarse pixel sits at the centre of the block it summarizes, so level `k` is at `t0 + (s_k - s0) / 2` (`s_k` its pixel size); with `nearest` it keeps the origin of level 0.
+Translations follow the NGFF 0.6 convention, where a pixel's position is its centre: with `mean` and `mode` a coarse pixel sits at the centre of the block it summarizes, so level `k` is at `t_s + (s_k - s_s) / 2` (`s_k` its pixel size, `s` the start level); with `nearest` it keeps the origin of the start level.
 
 ## Fuse a mosaic
 

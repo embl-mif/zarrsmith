@@ -707,13 +707,16 @@ ALLOCATE_HELP = """\
 """
 
 PYRAMID_HELP = """\
-    Build the pyramid of an OME-Zarr image in place: levels 1..N are created (or replaced) from
-    level 0, each level from the one above it, one task per output shard (chunk on zarr v2).
+    Build the pyramid of an OME-Zarr image in place: the levels after --start_level (default 0)
+    are created (or replaced) from it, each level from the one above it, one task per output
+    shard (chunk on zarr v2). The start level and the levels above it are kept as they are.
     The format, codecs and chunks come from level 0; the multiscales metadata is updated.
+    --num_levels counts every level from level 0.
 
     Examples:
       zarrsmith pyramid -z probabilities.ome.zarr
       zarrsmith pyramid -z seg.ome.zarr --num_levels 4 --downscale_factor 1 2 2
+      zarrsmith pyramid -z image.ome.zarr --start_level 2 --num_levels 6   # keep 0-2, rebuild 3-5
       zarrsmith pyramid -z image.ome.zarr --group labels/nuclei --method mode
       zarrsmith pyramid -z image.ome.zarr --group all
 
@@ -826,6 +829,9 @@ def _add_pyramid_arguments(parser):
                         help='Factor between levels: one value, or one per spatial axis (e.g. 1 2 2 keeps Z).')
     parser.add_argument('-me', '--method', choices=['mean', 'nearest', 'mode'], default=None,
                         help='Downsampling method. Default: mean for intensity data, nearest for labels.')
+    parser.add_argument('-sl', '--start_level', default='0',
+                        help='Level to build from: its index, or its path in the store (e.g. 1). It and the '
+                             'levels above it are kept; the levels after it are rebuilt. Default: 0.')
     parser.add_argument('-nw', '--num_workers', type=int, default=None,
                         help='Number of threads. Default: half of the available cores, capped at 8.')
 

@@ -1,6 +1,6 @@
 """Build the pyramid of an OME-Zarr image in place, from level 0 on disk.
 
-Used by :meth:`zarrsmith.microscope_manager.ZarrManager.build_pyramid_inplace`
+Used by :meth:`zarrsmith.microscope_manager.ZarrManager.populate_pyramid`
 and ``zarrsmith pyramid``. Level 0 is never rewritten: each coarser level is
 read back from the level above it, one output block (a shard on zarr v3, a
 chunk otherwise) per task, so no two tasks write the same file and memory
@@ -145,17 +145,33 @@ def resolve_group(root: zarr.Group, group_name: str | None) -> zarr.Group:
     return group
 
 
-def build_pyramid_inplace(
+def _resolve_start_level(datasets: Sequence[dict], start_level: int | str) -> int:
+    """Index in ``datasets`` of ``start_level``: an index, or a dataset path such as ``"1"``."""
+    paths = [str(d["path"]) for d in datasets]
+    if isinstance(start_level, str) and not start_level.lstrip("-").isdigit():
+        if start_level not in paths:
+            raise ValueError(f"start_level {start_level!r} is not a level of this image (levels: {paths}).")
+        return paths.index(start_level)
+    index = int(start_level)
+    if isinstance(start_level, str) and start_level in paths:
+        index = paths.index(start_level)  # a numeric path names the level stored there
+    if not 0 <= index < len(paths):
+        raise ValueError(f"start_level {start_level!r} is out of range: the image has {len(paths)} level(s).")
+    return index
+
+
+def populate_pyramid(
     root: zarr.Group,
     group_name: str | None = None,
     *,
     num_levels: int | None = None,
     downscale_factor: SpatialFactor = 2,
     method: str | None = None,
+    start_level: int | str = 0,
     num_workers: int | None = None,
     progress: bool = True,
 ) -> zarr.Group:
-    """Create or overwrite levels ``1..num_levels-1`` of an image from its level 0.
+    """Create or overwrite the levels after ``start_level`` of an image, from that level.
 
     Parameters
     ----------
@@ -167,8 +183,13 @@ def build_pyramid_inplace(
     num_levels
         Total number of levels, level 0 included. ``None`` keeps halving until no
         spatial axis is above 2048 pixels (see
-        :func:`zarrsmith.utils.chunks.default_num_levels`). ``1`` removes every
-        coarser level.
+        :func:`zarrsmith.utils.chunks.default_num_levels`). ``start_level + 1``
+        removes every level after the start level.
+    start_level
+        Level the new levels are built from: its index in ``multiscales.datasets``
+        or its path (e.g. ``"1"``). It and the levels above it are kept as they are
+        (data and metadata); every level after it is removed and rebuilt. ``0``
+        (default) rebuilds the whole pyramid from full resolution.
     downscale_factor
         Integer factor between consecutive levels: one value, or one per spatial
         axis (e.g. ``(1, 2, 2)`` to keep Z).
@@ -179,8 +200,8 @@ def build_pyramid_inplace(
         As in :class:`~zarrsmith.utils.ngff.ZarrWriteConfig`.
 
     The zarr format, NGFF version, codecs and chunk key encoding come from level 0,
-    so a zarr v2 store gets v2 levels (and no shards). Each level's ``scale`` is
-    level 0's times the factor; a ``translation`` follows the method (see
+    so a zarr v2 store gets v2 levels (and no shards). Each new level's ``scale`` is
+    the start level's times the factor per step; a ``translation`` follows the method (see
     :func:`zarrsmith.utils.translation.pyramid_translations`, the NGFF 0.6 convention). Every other key
     of the ``multiscales`` block, and every other group attribute, is kept.
     """
@@ -201,8 +222,11 @@ def build_pyramid_inplace(
             "one version throughout."
         )
 
-    level0_path = str(datasets[0]["path"])
-    level0 = group[level0_path]
+    start = _resolve_start_level(datasets, start_level)
+    kept = datasets[: start + 1]
+    kept_paths = [str(d["path"]) for d in kept]
+    level0 = group[kept_paths[0]]
+    source = group[kept_paths[-1]]
     axes = normalize_axes(axis_names_from_multiscales(multiscales) or None, ndim=level0.ndim)
     spatial_axes = spatial_axis_indices(axes)
     method = resolve_downsampling_method(method, _infer_data_type_from_group(group))
@@ -213,43 +237,50 @@ def build_pyramid_inplace(
         raise ValueError(f"downscale_factor must be >= 1, got {downscale_factor!r}.")
     if num_levels is None:
         num_levels = default_num_levels({"axes": "".join(axes), "size": [level0.shape]}, factors)
+        num_levels = max(int(num_levels), start + 1)
     num_levels = int(num_levels)
-    if num_levels < 1:
-        raise ValueError("num_levels must be >= 1.")
-    if num_levels > 1 and all(f == 1 for f in factors):
+    if num_levels < start + 1:
+        raise ValueError(
+            f"num_levels ({num_levels}) counts every level from level 0, so it must be at least "
+            f"start_level + 1 ({start + 1})."
+        )
+    if num_levels > start + 1 and all(f == 1 for f in factors):
         raise ValueError("downscale_factor is 1 on every spatial axis: the levels would all be identical.")
 
-    names = [level0_path] + [str(k) for k in range(1, num_levels)]
-    if level0_path in names[1:]:
-        raise ValueError(f"Level 0 is stored at {level0_path!r}, which a new level would replace.")
+    names = kept_paths + [str(k) for k in range(start + 1, num_levels)]
+    clash = set(kept_paths) & set(names[start + 1:])
+    if clash:
+        raise ValueError(f"Kept level(s) stored at {sorted(clash)}, which a new level would replace.")
 
     # Remove the old levels from the metadata first, so an interrupted run never
     # leaves the metadata pointing at a half-written level.
-    multiscales["datasets"] = [datasets[0]]
+    multiscales["datasets"] = list(kept)
     _set_multiscales(group, multiscales_all, ngff_version)
-    stale = {str(d["path"]) for d in datasets[1:]} | {
+    stale = {str(d["path"]) for d in datasets[start + 1:]} | {
         str(k) for k in group.array_keys() if str(k).isdigit()
     }
-    for key in sorted(stale - {level0_path}):
+    for key in sorted(stale - set(kept_paths)):
         if key in group:
             del group[key]
 
-    scale0 = dataset_transform_vector(datasets[0], "scale") or [1.0] * len(axes)
-    translation0 = dataset_transform_vector(datasets[0], "translation")
+    scale_s = dataset_transform_vector(kept[-1], "scale") or [1.0] * len(axes)
+    translation_s = dataset_transform_vector(kept[-1], "translation")
     # NGFF 0.6 convention (zarrsmith.utils.translation.pyramid_translations): "mean" and
-    # "mode" levels move by half their pixel growth; "nearest" keeps level 0's origin.
-    # Without a translation, "nearest" levels need none and the others get one.
+    # "mode" levels move by half their pixel growth; "nearest" keeps the start level's
+    # origin. Without a translation, "nearest" levels need none and the others get one.
     spatial_names = [axes[i] for i in spatial_axes]
-    level_scales = [[scale0[i] * f ** k for i, f in zip(spatial_axes, factors)] for k in range(num_levels)]
+    n_new = num_levels - start  # the start level plus the levels built from it
+    level_scales = [[scale_s[i] * f ** k for i, f in zip(spatial_axes, factors)] for k in range(n_new)]
     spatial_translations = pyramid_translations(
-        None if translation0 is None else {ax: translation0[i] for ax, i in zip(spatial_names, spatial_axes)},
+        None if translation_s is None else {ax: translation_s[i] for ax, i in zip(spatial_names, spatial_axes)},
         level_scales[0], level_scales, "".join(axes), method,
     )
 
     cfg = ZarrWriteConfig(num_workers=num_workers, progress=progress)
-    src = level0
-    new_datasets = [datasets[0]]
-    for k in range(1, num_levels):
+    src = source
+    new_datasets = list(kept)
+    for k in range(start + 1, num_levels):
+        j = k - start  # steps below the start level
         shape = list(src.shape)
         for axis, f in zip(spatial_axes, factors):
             shape[axis] = -(-int(shape[axis]) // f)
@@ -258,20 +289,20 @@ def build_pyramid_inplace(
         _write_level(src, dst, factors, spatial_axes, method, cfg=cfg,
                      desc=f"{label.strip('/') or 'image'} level {k}")
 
-        scale = list(scale0)
-        for i, value in zip(spatial_axes, level_scales[k]):
+        scale = list(scale_s)
+        for i, value in zip(spatial_axes, level_scales[j]):
             scale[i] = value
         transforms: list[dict[str, Any]] = [{"type": "scale", "scale": scale}]
         if spatial_translations is not None:
-            translation = list(translation0 or [0.0] * len(axes))
+            translation = list(translation_s or [0.0] * len(axes))
             for ax, i in zip(spatial_names, spatial_axes):
-                translation[i] = spatial_translations[k][ax]
+                translation[i] = spatial_translations[j][ax]
             transforms.append({"type": "translation", "translation": translation})
         new_datasets.append({"path": names[k], "coordinateTransformations": transforms})
         src = dst
 
     multiscales["datasets"] = new_datasets
-    if num_levels > 1:
+    if num_levels > start + 1:
         # NGFF 0.4-0.6: "type" SHOULD name the downscaling method, "metadata" SHOULD describe it.
         from .. import __version__
 
@@ -280,14 +311,18 @@ def build_pyramid_inplace(
         # Older stores used "type" to mark labels, and readers still honour it: keep such a marker.
         if multiscales.get("type") not in set(DATA_TYPES) | {"image", "labels"}:
             multiscales["type"] = method
+        where = "Each level" if start == 0 else f"Each level after {kept_paths[-1]!r}"
+        kwargs = {"method": method, "factors": list(factors)}
+        if start:
+            kwargs["start_level"] = kept_paths[-1]
         multiscales["metadata"] = {
-            "description": f"Each level is the {method} of {'x'.join(map(str, factors))} blocks "
+            "description": f"{where} is the {method} of {'x'.join(map(str, factors))} blocks "
                            "of the level above it.",
             "method": "zarrsmith.utils.downsampling.downsample_numpy",
             "version": __version__,
-            "kwargs": {"method": method, "factors": list(factors)},
+            "kwargs": kwargs,
         }
-    else:
+    elif start == 0:
         if multiscales.get("type") in DOWNSAMPLING_METHODS:
             multiscales.pop("type")
         multiscales.pop("metadata", None)
