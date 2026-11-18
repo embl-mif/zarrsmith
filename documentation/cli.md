@@ -148,7 +148,7 @@ The fusion options:
 | `-m`, `--microscope` | `luxendo`, `opera`, `zeiss` | auto-detected for raw Luxendo acquisitions, Opera Harmony exports (`Images/Index.xml`) and Zeiss `.czi` files |
 | `-rds`, `--downsample` | downsampling while reading (block mean): one value or `Z Y X` | 1 (full resolution) |
 | `-p`, `--projection` | `none` (3D), `max` or `sum` | `none` |
-| `-b`, `--blend` | `sigmoid`, `max`, `sum` or `midline` | `sigmoid` |
+| `-b`, `--blend` | `sigmoid`, `max`, `sum`, `midline` or `none` (no blending, for labels; see [Fusion options](mosaic.md#fusion-options)) | `sigmoid` |
 | `-ss`, `--sigmoid_steepness` | steepness of the `sigmoid` transition, higher is sharper | 4 |
 | `-ch`, `--channels` / `-g`, `--groups` | tile channels and groups (e.g. `L R`) to fuse | all |
 | `-cam`, `--cameras` | cameras to fuse (MuVi SPIM: `left right`); several are blended into one image, see [MuVi SPIM](mosaic.md#muvi-spim-two-opposing-cameras) | all |
@@ -162,6 +162,7 @@ The fusion options:
 | `-tf`, `--transforms` | a [transforms file](mosaic.md#transforms-file) giving the tile positions to use instead of the stage positions | the stage positions |
 | `-tfo`, `--transforms_only` | only write `<output>.transforms.json` (every fusion writes it first), fuse nothing | off |
 | `-od`, `--out_dtype` | output dtype | the input dtype (`float32` with `-b sum`) |
+| `-dt`, `--data_type` | `intensity` or `label` (a label image; needs `-b none` and an integer dtype) | `intensity` |
 | `-rw`, `--read_workers` | tiles read in parallel processes; not to be confused with `-nw` (write threads) | 4 |
 | `-td`, `--temp_dir` | folder for the temporary fused level 0 (a local disk is faster) | next to the output |
 | `-ow`, `--overwrite` | replace an existing output, once the fusion has succeeded | off |

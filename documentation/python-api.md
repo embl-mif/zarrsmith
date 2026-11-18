@@ -157,6 +157,23 @@ Only z, y and x are tiled. By default (`split="t"`) each write block holds one t
 
 An axis without a tile size is not split: one tile spans the whole region of interest (`roi=`, the whole level by default). Tiles start every `stride = tile_size - overlap` pixels; each tile writes its *core*, from its start to the next tile's start, so cores cover the ROI once. `allocate_kwargs` makes the output's write block (the shard on zarr v3, with inner chunks dividing it; the chunk on zarr v2) equal to the stride on tiled axes and to the whole axis on the others, so each core is whole blocks and `aligned=True` passes. With `physical=True`, `roi`, `tile_size`, `overlap` and `halo` are in physical units. A last tile shorter than the halo (and than 2 pixels) is folded into the one before it.
 
+### Cut only when a tile would not fit
+
+`max_tile_voxels` sets the most voxels one job may read for a tile, halo included, for example what fits in GPU memory. The image stays one tile if it fits; otherwise the axes without a `tile_size` are cut into as few tiles of about equal size as fit:
+
+```python
+plan = raw.plan_tiles(0, overlap=64, halo=32, max_tile_voxels=400_000_000)  # e.g. Cellpose 3D on a full A100
+plan = raw.plan_tiles(0, overlap=64, halo=32, max_tile_voxels=400_000_000,
+                      resize=30 / 15)                                     # Cellpose with diameter=15
+plan.max_load_voxels   # largest tile read, halo included
+```
+
+- The budget is per timepoint and channel: t and c are never tiled.
+- Of every way to cut the axes, the plan with the least area between tiles wins, then the one with the fewest tiles. A short axis such as z usually stays whole, and tiles are compact instead of thin slabs (less overlap, halo and merging).
+- Strides are multiples of a power of two: up to the default inner chunk (16 along z, 256 along y and x), and at most an eighth of the stride so rounding wastes little of the budget. `allocate_kwargs` then picks inner chunks that divide the stride.
+- A `tile_size` given for an axis is kept and counts towards the budget.
+- `resize` is the factor by which the tool enlarges each tile before processing: the budget is checked against `voxels * resize ** ndim`. Cellpose rescales objects to about 30 pixels, so use `30 / diameter`.
+
 ## Allocate an image and build its pyramid in place
 
 `allocate_zarr` creates an empty image from a template (what [`zarrsmith allocate`](cli.md) runs), with the template's pyramid levels by default. `populate_pyramid` fills or replaces the levels on disk after `start_level` (default 0, an index or a dataset path), from that level, one task per output shard (chunk on zarr v2). The start level and the levels above it are kept; `num_levels` counts every level from level 0. Without `num_levels` or `downscale_factor`, it keeps the levels the image already has:

@@ -158,3 +158,64 @@ def test_tiles_write_their_cores_in_parallel_safe_blocks(tmp_path, zarr_format, 
         region = plan.write_region(tile)
         expected[region["y"], region["x"]] = tile.index
     assert (written == expected).all() and (expected > 0).all()
+
+
+# ---------------------------------------------------------------------------
+# max_tile_voxels: cut only when a tile would not fit
+# ---------------------------------------------------------------------------
+
+def _core_volume(plan):
+    return sum(np.prod([hi - lo for lo, hi in plan.core(t).values()]) for t in plan.tiles)
+
+
+def test_an_image_that_fits_stays_one_tile():
+    plan = plan_tiles({"z": 50, "y": 1000, "x": 1000}, halo=8, max_tile_voxels=60_000_000)
+    assert len(plan.tiles) == 1
+
+
+def test_a_large_volume_is_cut_in_yx_into_few_aligned_tiles():
+    shape = {"t": 3, "z": 96, "y": 6000, "x": 5000}
+    plan = plan_tiles(shape, overlap=32, halo=16, max_tile_voxels=400_000_000)
+    assert plan.counts == {"z": 1, "y": 4, "x": 3}  # z short: kept whole
+    assert plan.stride["y"] % 128 == 0 and plan.stride["x"] % 128 == 0  # inner chunks of 128 fit
+    assert plan.max_load_voxels <= 400_000_000  # 4 x 3 even tiles: about 265 M voxels each
+    assert _core_volume(plan) == 96 * 6000 * 5000  # cores still cover the image once
+    # the budget is per timepoint: t is not tiled
+    assert all(set(t.bounds) == {"z", "y", "x"} for t in plan.tiles)
+
+
+def test_resize_shrinks_the_tiles():
+    shape = {"z": 96, "y": 6000, "x": 5000}
+    plain = plan_tiles(shape, max_tile_voxels=400_000_000)
+    doubled = plan_tiles(shape, max_tile_voxels=400_000_000, resize=2.0)  # e.g. Cellpose, diameter 15
+    assert len(doubled.tiles) > len(plain.tiles)
+    assert doubled.max_load_voxels * 8 <= 400_000_000
+
+
+def test_a_long_axis_is_cut_too():
+    plan = plan_tiles({"z": 4000, "y": 512, "x": 512}, max_tile_voxels=256 * 512 * 512)
+    assert plan.counts["z"] > 1 and plan.counts["y"] == plan.counts["x"] == 1
+    assert plan.max_load_voxels <= 256 * 512 * 512
+
+
+def test_small_budgets_drop_the_alignment():
+    plan = plan_tiles({"y": 1000, "x": 1000}, overlap=4, max_tile_voxels=10_000)
+    assert plan.max_load_voxels <= 10_000
+    assert _core_volume(plan) == 1000 * 1000
+
+
+def test_a_given_tile_size_is_kept_and_counted():
+    plan = plan_tiles({"z": 200, "y": 4000, "x": 4000}, tile_size={"z": 40}, max_tile_voxels=100_000_000)
+    assert plan.tile_size["z"] == 40 and plan.counts["y"] > 1
+    assert plan.max_load_voxels <= 100_000_000
+    with pytest.raises(ValueError, match="more than max_tile_voxels"):
+        plan_tiles({"y": 1000, "x": 1000}, tile_size=500, max_tile_voxels=1000)
+    with pytest.raises(ValueError, match="too small"):
+        plan_tiles({"y": 1000, "x": 1000}, overlap=20, halo=10, max_tile_voxels=1000)
+
+
+def test_zarr_manager_plans_within_a_budget(tmp_path):
+    path = tmp_path / "raw.ome.zarr"
+    _make_template(path, *FORMATS[1])  # zyx (8, 64, 64) per timepoint and channel
+    plan = ZarrManager(str(path)).plan_tiles(max_tile_voxels=8 * 32 * 32)
+    assert len(plan.tiles) > 1 and plan.max_load_voxels <= 8 * 32 * 32

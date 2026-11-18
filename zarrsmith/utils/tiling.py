@@ -166,6 +166,16 @@ class TilePlan:
             "zarr_format": zarr_format,
         }
 
+    def load_bounds(self, tile: Tile) -> dict[str, tuple[int, int]]:
+        """What a job reads for ``tile``: its bounds plus the halo, clipped to the image."""
+        return {ax: (max(lo - self.halo[ax], 0), min(hi + self.halo[ax], self.shape[ax]))
+                for ax, (lo, hi) in tile.bounds.items()}
+
+    @property
+    def max_load_voxels(self) -> int:
+        """Largest number of voxels read for one tile (halo included), over every tiled axis."""
+        return max(_volume(self.load_bounds(t)) for t in self.tiles)
+
     def rows(self) -> list[dict[str, Any]]:
         """One dict per tile: ``tile_index``, ``tile_id``, ``level`` and, per tiled
         axis, ``<ax>_min``/``<ax>_max`` (pixels), ``tile_size_<ax>`` (the requested
@@ -180,6 +190,75 @@ class TilePlan:
                 row[f"tile_overlap_{ax}"] = self.overlap[ax]
             out.append(row)
         return out
+
+
+def _volume(bounds: Mapping[str, tuple[int, int]]) -> int:
+    n = 1
+    for lo, hi in bounds.values():
+        n *= hi - lo
+    return n
+
+
+def _auto_strides(
+    lengths: dict[str, int],
+    overlaps: dict[str, int],
+    halos: dict[str, int],
+    budget: float,
+    align: Mapping[str, int],
+    whole: dict[str, int],
+) -> dict[str, int]:
+    """Strides along the axes of ``lengths`` (ROI lengths) for tiles of at most
+    ``budget`` loaded voxels (tile plus halo on both sides). ``whole`` is what is
+    read along an axis kept whole (the ROI plus the halo that lies in the image).
+
+    Every choice of axes kept whole (one tile along them) is tried; the budget
+    left is shared evenly by the axes that are cut. Each stride is the largest
+    multiple of a power of two within that share (``align`` at most, and at most
+    an eighth of the stride, so rounding wastes little), then evened out so
+    the tiles of an axis have about the same size. The choice with the least
+    area cut between tiles wins (what the overlap, the halo and merging the tiles
+    afterwards cost), then the one with the fewest tiles: so tiles are compact,
+    not thin slabs. Axes kept whole are left out of the result.
+    """
+    axes = list(lengths)
+    best = None
+    error = None
+    for keep in itertools.chain.from_iterable(itertools.combinations(axes, k) for k in range(len(axes))):
+        cut = [ax for ax in axes if ax not in keep]
+        left = float(budget)
+        for ax in keep:
+            left /= whole[ax]
+        share = left ** (1.0 / len(cut))
+        strides, counts = {}, {}
+        for ax in cut:
+            room = int(share) - 2 * halos[ax] - overlaps[ax]  # largest stride that fits
+            if room < 1:
+                error = (f"max_tile_voxels is too small: along {ax!r} a tile of about {int(share)} pixels "
+                         f"cannot hold the overlap ({overlaps[ax]}) and twice the halo ({halos[ax]}).")
+                break
+            unit = 1
+            while unit * 2 <= min(int(align.get(ax, 1)), room // 8):
+                unit *= 2
+            stride = room - room % unit
+            n = max(1, -(-(lengths[ax] - overlaps[ax]) // stride))  # tiles needed at that stride
+            even = -(-(lengths[ax] - overlaps[ax]) // n)  # same count, tiles of equal size
+            strides[ax] = min(-(-even // unit) * unit, stride)
+            counts[ax] = n
+        else:
+            count, area = 1, 0
+            for ax in axes:
+                count *= counts.get(ax, 1)
+                face = 1
+                for other in axes:
+                    if other != ax:
+                        face *= lengths[other]
+                area += (counts.get(ax, 1) - 1) * face  # cut planes across the ROI
+            key = (area, count)
+            if best is None or key < best[0]:
+                best = (key, strides)
+    if best is None:
+        raise ValueError(error)
+    return best[1]
 
 
 def _divisor_at_most(n: int, limit: int) -> int:
@@ -232,6 +311,8 @@ def plan_tiles(
     translation: Mapping[str, float] | None = None,
     physical: bool = False,
     level: int = 0,
+    max_tile_voxels: int | None = None,
+    resize: float = 1.0,
 ) -> TilePlan:
     """Cut the spatial axes of one level of an image into overlapping tiles.
 
@@ -242,7 +323,22 @@ def plan_tiles(
         "x": 2048}``); z, y and x are tiled, other axes are not.
     tile_size
         Tile size: one value for every tiled axis, or one per axis. An axis
-        without a tile size is not split: one tile spans the whole ROI.
+        without a tile size is not split: one tile spans the whole ROI, unless
+        ``max_tile_voxels`` cuts it.
+    max_tile_voxels
+        Most voxels one job may read for a tile, halo included (e.g. what fits in
+        GPU memory). Axes without a ``tile_size`` are cut only when a tile would
+        exceed it: the ROI stays one tile if it fits. Otherwise there are as few
+        tiles as fit, of about equal size: an axis shorter than an even share of
+        the budget stays whole (usually z), the others are cut evenly, with strides
+        that are multiples of the default inner chunk (16 along z, 256 along y and
+        x) when the budget allows, so the output's write blocks stay aligned to
+        it. ``tile_size`` given for an axis is kept and counts towards the budget.
+        It applies to one timepoint and channel: untiled axes are not counted.
+    resize
+        Linear factor by which the tool enlarges each tile before processing, so
+        the budget is checked against ``voxels * resize ** ndim``. For Cellpose,
+        ``30 / diameter`` (it rescales objects to about 30 pixels).
     overlap
         Pixels (or physical length) shared by consecutive tiles along an axis.
         Ignored on an axis with a single tile.
@@ -299,26 +395,58 @@ def plan_tiles(
             if v < (1 if name == "tile_size" else 0):
                 raise ValueError(f"{name} along {ax!r} must be {'> 0' if name == 'tile_size' else '>= 0'}, got {v}.")
 
-    per_axis_tiles, size_out, overlap_out = {}, {}, {}
-    for ax in axes:
-        lo, hi = roi_px[ax]
-        if ax not in sizes or sizes[ax] >= hi - lo:
-            # Not split: one tile spans the ROI.
-            per_axis_tiles[ax] = [(lo, hi)]
-            size_out[ax], overlap_out[ax] = hi - lo, 0
-            continue
-        per_axis_tiles[ax] = _axis_tiles(lo, hi, sizes[ax], overlaps.get(ax, 0), max(halos.get(ax, 0), 2))
-        size_out[ax], overlap_out[ax] = sizes[ax], overlaps.get(ax, 0)
+    def build(sizes: dict[str, int]) -> TilePlan:
+        per_axis_tiles, size_out, overlap_out = {}, {}, {}
+        for ax in axes:
+            lo, hi = roi_px[ax]
+            if ax not in sizes or sizes[ax] >= hi - lo:
+                # Not split: one tile spans the ROI.
+                per_axis_tiles[ax] = [(lo, hi)]
+                size_out[ax], overlap_out[ax] = hi - lo, 0
+                continue
+            per_axis_tiles[ax] = _axis_tiles(lo, hi, sizes[ax], overlaps.get(ax, 0), max(halos.get(ax, 0), 2))
+            size_out[ax], overlap_out[ax] = sizes[ax], overlaps.get(ax, 0)
 
-    tiles = []
-    for index, combo in enumerate(itertools.product(*(enumerate(per_axis_tiles[ax]) for ax in axes)), start=1):
-        tiles.append(Tile(
-            index=index,
-            grid={ax: i for ax, (i, _) in zip(axes, combo)},
-            bounds={ax: b for ax, (_, b) in zip(axes, combo)},
-        ))
-    return TilePlan(
-        level=level, shape=shape, roi=roi_px, tile_size=size_out, overlap=overlap_out,
-        halo={ax: halos.get(ax, 0) for ax in axes}, tiles=tiles,
-        counts={ax: len(per_axis_tiles[ax]) for ax in axes},
-    )
+        tiles = []
+        for index, combo in enumerate(itertools.product(*(enumerate(per_axis_tiles[ax]) for ax in axes)), start=1):
+            tiles.append(Tile(
+                index=index,
+                grid={ax: i for ax, (i, _) in zip(axes, combo)},
+                bounds={ax: b for ax, (_, b) in zip(axes, combo)},
+            ))
+        return TilePlan(
+            level=level, shape=shape, roi=roi_px, tile_size=size_out, overlap=overlap_out,
+            halo={ax: halos.get(ax, 0) for ax in axes}, tiles=tiles,
+            counts={ax: len(per_axis_tiles[ax]) for ax in axes},
+        )
+
+    if max_tile_voxels is None:
+        return build(sizes)
+    if not float(resize) > 0:
+        raise ValueError(f"resize must be > 0, got {resize!r}.")
+    limit = float(max_tile_voxels) / float(resize) ** len(axes)  # in source voxels
+    plan = build(sizes)
+    if plan.max_load_voxels <= limit:
+        return plan  # fits as asked (one tile on every axis without a tile size)
+    free = [ax for ax in axes if ax not in sizes]
+    if not free:
+        raise ValueError(
+            f"Tiles of tile_size {sizes} read up to {plan.max_load_voxels * float(resize) ** len(axes):.0f} "
+            f"voxels, more than max_tile_voxels={max_tile_voxels}."
+        )
+    fixed = 1
+    for ax in axes:
+        if ax in sizes:
+            fixed *= min(sizes[ax], roi_px[ax][1] - roi_px[ax][0]) + 2 * halos.get(ax, 0)
+    lengths = {ax: roi_px[ax][1] - roi_px[ax][0] for ax in free}
+    ov = {ax: overlaps.get(ax, 0) for ax in free}
+    hl = {ax: halos.get(ax, 0) for ax in free}
+    whole = {ax: min(roi_px[ax][1] + hl[ax], shape[ax]) - max(roi_px[ax][0] - hl[ax], 0) for ax in free}
+    budget = limit / fixed
+    for _ in range(50):  # rounding, folded last tiles: shrink until every tile fits
+        strides = _auto_strides(lengths, ov, hl, budget, DEFAULT_INNER_CHUNK, whole)
+        plan = build({**sizes, **{ax: s + ov[ax] for ax, s in strides.items()}})
+        if plan.max_load_voxels <= limit:
+            return plan
+        budget *= 0.9
+    raise ValueError(f"Could not fit tiles within max_tile_voxels={max_tile_voxels}.")

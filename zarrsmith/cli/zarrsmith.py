@@ -621,6 +621,7 @@ def mosaic_convert(
     reference_timepoint: Union[int, str, None] = None,
     midline_axis: Optional[str] = None,
     out_dtype: Optional[str] = None,
+    data_type: str = "intensity",
     read_workers: int = 4,
     temp_dir: Optional[str] = None,
     overwrite: bool = False,
@@ -767,6 +768,7 @@ def mosaic_convert(
         downscale_factor=factor,
         workers=int(read_workers),
         out_dtype=out_dtype,
+        data_type=data_type,
         midline_axis=midline_axis,
         sigmoid_steepness=SIGMOID_STEEPNESS if sigmoid_steepness is None else float(sigmoid_steepness),
         timepoints=timepoints,
@@ -818,7 +820,7 @@ def convert_mosaic_batch(args):
                 kwargs["read_downsample"] = _int_triplet(str(v[key]))
         if "transforms_only" in columns and _present(v.get("transforms_only")):
             kwargs["transforms_only"] = parse_bool(v["transforms_only"])
-        for key in ("projection", "blend", "midline_axis", "out_dtype", "temp_dir", "transforms"):
+        for key in ("projection", "blend", "midline_axis", "out_dtype", "data_type", "temp_dir", "transforms"):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = str(v[key]).strip()
         for key in ("channels", "groups", "cameras", "fields", "tiles", "skip_tiles"):

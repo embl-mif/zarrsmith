@@ -374,10 +374,17 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
         help='"none" writes a 3D volume; "max"/"sum" write a 2D projection along z.',
     )
     parser.add_argument(
-        '-b', '--blend', choices=['sigmoid', 'max', 'sum', 'midline'], default='sigmoid',
+        '-b', '--blend', choices=['sigmoid', 'max', 'sum', 'midline', 'none'], default='sigmoid',
         help='How overlapping tiles are merged: sigmoid (default: smooth transition across every overlap, '
-             'between tiles and between tile groups), max, sum (overlaps brighter), or midline (each tile group, '
-             'e.g. illumination side, up to the middle of the overlap, with a sharp switch there).',
+             'between tiles and between tile groups), max, sum (overlaps brighter), midline (each tile group, '
+             'e.g. illumination side, up to the middle of the overlap, with a sharp switch there), or none '
+             '(no blending: every voxel is copied unchanged from one tile, cut in the middle of each overlap; '
+             'required for --data_type label).',
+    )
+    parser.add_argument(
+        '-dt', '--data_type', choices=['intensity', 'label'], default='intensity',
+        help='Write the output as an intensity image (default) or as a label image (tiles of label IDs that '
+             'already agree across tiles; needs --blend none and an integer dtype).',
     )
     parser.add_argument('-ss', '--sigmoid_steepness', type=float,
                         help='Steepness of the blend=sigmoid transition: higher is sharper. Default: 4 '
@@ -524,7 +531,7 @@ FUSE_HELP = """\
     drop_singleton | num_workers | overwrite)
     and of the fusion columns
     downsample | projection | blend | sigmoid_steepness | channels | groups | cameras | fields | tiles | skip_tiles | timepoints |
-    reference_timepoint | midline_axis | out_dtype | read_workers | temp_dir | transforms |
+    reference_timepoint | midline_axis | out_dtype | data_type | read_workers | temp_dir | transforms |
     transforms_only (true/false) | flatfield (true/false, Opera only, default true), e.g.
       input                  | microscope | output                 | downsample | projection | blend   | num_levels
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_3D.zarr  | 4 8 8      | none       | sigmoid | 3

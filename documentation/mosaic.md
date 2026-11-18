@@ -209,7 +209,7 @@ The fused image records where it is: its NGFF `translation` (`zm.metadata["trans
 |---|---|---|
 | `ds` | `(z, y, x)` integers | downsampling applied while reading: each output voxel is the mean of its block (default `(1, 1, 1)`) |
 | `projection` | `None`, `"max"`, `"sum"` | 3D volume (default) or a 2D projection along z |
-| `blend` | `"sigmoid"`, `"max"`, `"sum"`, `"midline"` | how overlapping tiles are merged (default `"sigmoid"`), see below |
+| `blend` | `"sigmoid"`, `"max"`, `"sum"`, `"midline"`, `"none"` | how overlapping tiles are merged (default `"sigmoid"`), see below |
 | `sigmoid_steepness` | number > 0 | steepness of the `sigmoid` transition, higher is sharper (default 4) |
 | `channels` | list of names | tile channels to fuse, in output order (default: all) |
 | `channel_names`, `channel_colors` | lists | names and colours (hex or matplotlib names) of the output channels |
@@ -220,6 +220,7 @@ The fused image records where it is: its NGFF `translation` (`zm.metadata["trans
 | `levels`, `downscale_factor` | integer, integer or `(z, y, x)` | pyramid levels (default 1) and factor between them (default 2) |
 | `workers` | integer | tiles read in parallel (default 1) |
 | `out_dtype` | dtype | default: input dtype, `float32` for `sum` |
+| `data_type` | `"intensity"`, `"label"` | write a label image (default `"intensity"`); needs `blend="none"` and an integer dtype |
 | `midline_axis` | `"x"`, `"y"`, `"z"` | axis along which `sigmoid` and `midline` separate the groups or cameras (default: `z` for several cameras in 3D, `x` otherwise) |
 | `transforms_path` | path, `True`, `False` | where the [transforms file](#transforms-file) is written before fusing (default `True`: next to the output) |
 | `timepoints` | list of timepoints | timepoints to fuse (default: all), see [Timepoints](#timepoints) |
@@ -253,6 +254,13 @@ Blend modes:
 - **`max`**: keeps the brighter value.
 - **`sum`**: adds the values, so overlaps show up as brighter bands.
 - **`midline`**: uses `max` within each tile group. Where two groups overlap (for example the left and right illumination sides), the image switches sharply from one group to the other at the middle of their overlap, along `midline_axis`. Each side is then shown where its light sheet is sharpest.
+- **`none`**: no blending. Every voxel is copied unchanged from exactly one tile: the one whose border is farthest from it, so two tiles of the same size meet in the middle of their overlap (on a tie the earlier tile wins). Values keep the tile dtype, and `ds` keeps one voxel per block instead of the mean, so no value is ever mixed or rounded. Groups and cameras switch sharply as with `midline`. Use it for label images, with `data_type="label"`.
+
+Fusing labels: tiles of a segmentation whose label IDs already agree across tiles (for example after the labels of neighbouring tiles have been matched) are fused with `blend="none", data_type="label"`. The output is a label image, its pyramid levels sample voxels instead of averaging them, and no display window is written. Labels with any other blend are refused, since mixing IDs gives meaningless values.
+
+```python
+fuse_tiles(label_tiles, "labels.ome.zarr", blend="none", data_type="label", levels=4)
+```
 
 `plan_fusion(mosaic.tiles, ...)` takes the fusion arguments (`ds`, `projection`, `blend`, `channels`, `crop`, `skip`, `out_dtype`, `midline_axis`, `timepoints`, `reference_timepoint`) and returns the level-0 geometry without reading anything: `plan.summary()`, `plan.shape`, `plan.scale`, `plan.nbytes`.
 

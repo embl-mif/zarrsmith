@@ -709,10 +709,14 @@ class ZarrManager(MicroscopeManager):
         halo=0,
         roi=None,
         physical: bool = False,
+        max_tile_voxels: Optional[int] = None,
+        resize: float = 1.0,
     ):
         """Cut one level of an image into overlapping tiles for parallel processing.
 
-        An axis without a ``tile_size`` is not split. With ``physical=True``,
+        An axis without a ``tile_size`` is not split, unless a tile would read more
+        than ``max_tile_voxels`` voxels (halo included, times ``resize ** ndim``):
+        then the image is cut into as few, about equal tiles as fit. With ``physical=True``,
         ``roi``, ``tile_size``, ``overlap`` and ``halo`` are in physical units and
         converted with the level's scale and translation. Returns a
         :class:`zarrsmith.utils.tiling.TilePlan`: its ``tiles``, each tile's
@@ -727,6 +731,7 @@ class ZarrManager(MicroscopeManager):
         return _plan_tiles(
             shape, tile_size=tile_size, overlap=overlap, halo=halo, roi=roi,
             scale=scale, translation=translation, physical=physical, level=level,
+            max_tile_voxels=max_tile_voxels, resize=resize,
         )
 
     def write_image_region(
