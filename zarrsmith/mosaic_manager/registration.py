@@ -296,6 +296,7 @@ class CameraRegistration:
     initial: BlockMatches
     matches: BlockMatches
     factors: Tuple[int, int, int]
+    channel: Optional[str] = None  # channel the transform was measured on (None: several combined)
 
     @property
     def centre(self) -> np.ndarray:
@@ -321,7 +322,8 @@ class CameraRegistration:
     def summary(self) -> str:
         angle, axis = self.rotation
         rot = f", rotation {angle:.2f} deg about (z, y, x) {np.round(axis, 2).tolist()}" if self.model == "rigid" else ""
-        return (f"{self.moving} -> {self.reference} ({self.model}): shift (z, y, x) "
+        on = f", {self.channel}" if self.channel else ""
+        return (f"{self.moving} -> {self.reference} ({self.model}{on}): shift (z, y, x) "
                 f"{np.round(self.shift, 2).tolist()}{rot}; from {len(self.initial)} blocks in z "
                 f"{self.z_range[0]:.0f}..{self.z_range[1]:.0f}, median block misalignment "
                 f"{self.misalignment(False):.2f} (stage) -> {self.misalignment():.2f} (registered)")
@@ -330,6 +332,7 @@ class CameraRegistration:
         angle, axis = self.rotation
         return {
             "model": self.model,
+            "channel": self.channel,
             "reference_camera": self.reference,
             "moving_camera": self.moving,
             "matrix": self.matrix.tolist(),
@@ -443,8 +446,10 @@ def estimate_camera_registration(
         matches = measure(matrix)
         logger.info("Round %d: %d blocks, median misalignment %.2f", rnd + 1, len(matches),
                     float(np.median(np.linalg.norm(matches.shifts, axis=1))) if len(matches) else float("nan"))
+    channels = {t.channel for t in ref_tiles + mov_tiles}
     result = CameraRegistration(matrix=matrix, model=model, reference=str(r0.camera), moving=str(m0.camera),
-                                z_range=z_range, initial=initial, matches=matches, factors=factors)
+                                z_range=z_range, initial=initial, matches=matches, factors=factors,
+                                channel=channels.pop() if len(channels) == 1 else None)
     logger.info("Camera registration: %s", result.summary())
     return result
 
@@ -566,15 +571,29 @@ def tile_grid(tile: Tile) -> Dict[str, Any]:
             "flip": list(tile.flip)}
 
 
-def _view_key(t: Tile) -> tuple:
-    return (t.attrs.get("stack"), t.timepoint, t.group)
+#: ``reference_channel`` / ``reference_timepoint`` value that registers every channel / timepoint.
+ALL = "all"
+
+
+def _reference(value, available: Sequence, label: str):
+    """The reference among ``available`` (``None``: the first; ``ALL``: ``None``, each its own)."""
+    if value is None:
+        return available[0]
+    if isinstance(value, str) and value.lower() == ALL:
+        return None
+    if label == "timepoint":
+        value = int(value)
+    if value not in available:
+        raise ValueError(f"Reference {label} {value!r} is not among the {label}s {list(available)}.")
+    return value
 
 
 def register_cameras(
     tiles: Sequence[Tile],
     *,
     reference_camera: Optional[str] = None,
-    channels: Optional[Sequence[str]] = None,
+    reference_channel: Optional[str] = None,
+    reference_timepoint=None,
     model: str = "rigid",
     transforms: Optional[Dict[tuple, np.ndarray]] = None,
     **options,
@@ -583,8 +602,8 @@ def register_cameras(
 
     Returns ``(tiles, results)``: ``tiles`` in the same order, with the tiles of the other
     cameras replaced by :func:`registered_tile` copies (the input tiles are not changed),
-    and the :class:`CameraRegistration` of every ``(stack, timepoint, group, camera)``
-    that was measured.
+    and the :class:`CameraRegistration` measured for every
+    ``(stack, timepoint, group, camera, channel)``.
 
     Parameters
     ----------
@@ -593,14 +612,22 @@ def register_cameras(
         one camera alone are returned unchanged.
     reference_camera
         Camera the others are registered onto. Default: the first camera of ``tiles``.
-    channels
-        Channels whose images are matched (default: all, combined). The transform found
-        is applied to every channel.
+    reference_channel
+        Channel the transform is measured on (e.g. a nuclear stain), then applied to every
+        channel. Default: the first channel of ``tiles``. ``"all"``: every channel is
+        registered on its own images (this also corrects a chromatic difference between the
+        cameras); a channel that cannot be registered (too little structure) gets the
+        transform of the channel with the most matched blocks, with a warning.
+    reference_timepoint
+        Timepoint the transform is measured at, then applied to every timepoint (as the
+        fusion places every timepoint with the geometry of its reference timepoint).
+        Default: the first timepoint of ``tiles``. ``"all"``: every timepoint is registered.
     model
         ``"rigid"`` (translation and rotation) or ``"translation"``.
     transforms
-        Known 4 x 4 transforms by ``(stack, timepoint, group, camera)``; those views are
-        not measured.
+        Known 4 x 4 transforms, by ``(stack, timepoint, group, camera, channel)`` or by
+        ``(stack, timepoint, group, camera)`` for every channel (``timepoint`` is the one
+        measured, see ``reference_timepoint``); those are not measured.
     **options
         Passed to :func:`estimate_camera_registration`.
     """
@@ -612,32 +639,75 @@ def register_cameras(
     ref_cam = cameras[0] if reference_camera is None else reference_camera
     if ref_cam not in cameras:
         raise ValueError(f"Reference camera {ref_cam!r} is not among the cameras {cameras}.")
+    ref_ch = _reference(reference_channel, list(dict.fromkeys(t.channel for t in tiles)), "channel")
+    ref_tp = _reference(reference_timepoint, sorted({t.timepoint for t in tiles}), "timepoint")
     known = dict(transforms or {})
-    by_view: Dict[tuple, Dict[str, List[Tile]]] = {}
+    # position (stack, group) -> timepoint -> camera -> channel -> tile
+    views: Dict[tuple, Dict[int, Dict[str, Dict[str, Tile]]]] = {}
     for t in tiles:
-        by_view.setdefault(_view_key(t), {}).setdefault(t.camera, []).append(t)
+        views.setdefault((t.attrs.get("stack"), t.group), {}).setdefault(t.timepoint, {})              .setdefault(t.camera, {})[t.channel] = t
+
+    results: Dict[tuple, CameraRegistration] = {}
+    cache: Dict[tuple, Dict[str, Tuple[np.ndarray, str]]] = {}
+
+    def view_transforms(stack, group, tp, cam, refs, movs) -> Dict[str, Tuple[np.ndarray, str]]:
+        """``{channel: (matrix, channel measured on)}`` for the moving view ``cam`` at ``tp``."""
+        vkey = (stack, tp, group, cam)
+        if vkey in cache:
+            return cache[vkey]
+        wanted = [ref_ch] if ref_ch is not None else [c for c in movs if c in refs]
+        found: Dict[str, Tuple[np.ndarray, str]] = {}
+        failures = {}
+        for channel in wanted:
+            known_matrix = known.get(vkey + (channel,), known.get(vkey))
+            if known_matrix is not None:
+                found[channel] = (np.asarray(known_matrix, float), channel)
+                continue
+            if channel not in refs or channel not in movs:
+                raise ValueError(f"Stack {stack} (t={tp}): the reference channel {channel!r} is missing for "
+                                 f"camera {ref_cam!r} or {cam!r}.")
+            try:
+                reg = estimate_camera_registration(refs[channel], movs[channel], model=model, **options)
+            except ValueError as e:
+                if ref_ch is not None:
+                    raise
+                failures[channel] = e
+                continue
+            results[vkey + (channel,)] = reg
+            found[channel] = (reg.matrix, channel)
+        if ref_ch is None:  # every channel: those that failed take the best registered one
+            if not found:
+                raise ValueError(f"Stack {stack} (t={tp}): no channel could be registered ({failures}).")
+            best = max((c for c in found if vkey + (c,) in results),
+                       key=lambda c: len(results[vkey + (c,)].matches), default=next(iter(found)))
+            for channel, e in failures.items():
+                logger.warning("Stack %s (t=%s), %s: %s Using the transform of %s.", stack, tp, channel, e, best)
+                found[channel] = found[best]
+            for channel in movs:  # a channel without a reference view: same fallback
+                found.setdefault(channel, found[best])
+        cache[vkey] = found
+        return found
 
     out = {id(t): t for t in tiles}
-    results: Dict[tuple, CameraRegistration] = {}
-    for key, cams in by_view.items():
-        refs = cams.get(ref_cam)
-        if not refs:
-            logger.warning("Stack %s (t=%s) has no %s camera view: its views are not registered.",
-                           key[0], key[1], ref_cam)
-            continue
-        ref_by_channel = {t.channel: t for t in refs}
-        for cam, movs in cams.items():
-            if cam == ref_cam:
+    for (stack, group), by_tp in views.items():
+        for tp, cams in by_tp.items():
+            src_tp = tp if ref_tp is None else ref_tp
+            src = by_tp.get(src_tp)
+            if not src or ref_cam not in src or ref_cam not in cams:
+                logger.warning("Stack %s (t=%s): no %s camera view at timepoint %s: not registered.",
+                               stack, tp, ref_cam, src_tp)
                 continue
-            rkey = key + (cam,)
-            matrix = known.get(rkey)
-            if matrix is None:
-                r_use = [t for t in refs if not channels or t.channel in channels]
-                m_use = [t for t in movs if not channels or t.channel in channels]
-                if not r_use or not m_use:
-                    raise ValueError(f"Stack {key[0]}: no tile of channels {channels} for cameras {ref_cam}/{cam}.")
-                results[rkey] = estimate_camera_registration(r_use, m_use, model=model, **options)
-                matrix = results[rkey].matrix
-            for t in movs:
-                out[id(t)] = registered_tile(t, matrix, tile_grid(ref_by_channel.get(t.channel, refs[0])))
+            for cam, movs in cams.items():
+                if cam == ref_cam:
+                    continue
+                if cam not in src:
+                    logger.warning("Stack %s: no %s camera view at timepoint %s: not registered.", stack, cam, src_tp)
+                    continue
+                found = view_transforms(stack, group, src_tp, cam, src[ref_cam], src[cam])
+                refs = cams[ref_cam]
+                for channel, t in movs.items():
+                    key = channel if ref_ch is None else ref_ch
+                    matrix, measured = found[key] if key in found else next(iter(found.values()))
+                    out[id(t)] = registered_tile(t, matrix, tile_grid(refs.get(channel, next(iter(refs.values())))))
+                    out[id(t)].attrs["registration"].update(channel=measured, timepoint=int(src_tp))
     return [out[id(t)] for t in tiles], results

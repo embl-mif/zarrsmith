@@ -448,9 +448,13 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
              'view is resampled on the left grid) or translation (the right view is only moved).',
     )
     parser.add_argument(
-        '-rch', '--register_channels', nargs='+',
-        help='Channels matched by --register_cameras (e.g. a nuclear stain). Default: all, combined. '
-             'The transform found is applied to every channel.',
+        '-rch', '--register_channel',
+        help='Reference channel of --register_cameras (e.g. a nuclear stain such as DAPI): the transform is '
+             'measured on it and applied to every channel. "all" registers every channel on its own images '
+             '(also corrects a chromatic difference between the cameras; a channel that cannot be registered '
+             'takes the transform of the best registered one). Default: the first channel. Timepoints follow '
+             '--reference_timepoint: measured at the reference timepoint and applied to all, or at every '
+             'timepoint with -rtp all.',
     )
     parser.add_argument('-od', '--out_dtype', help='Output dtype, e.g. uint16 or float32. Default: input dtype '
                         '(float32 for blend=sum).')
@@ -551,7 +555,7 @@ FUSE_HELP = """\
     and of the fusion columns
     downsample | projection | blend | sigmoid_steepness | channels | groups | cameras | fields | tiles | skip_tiles | timepoints |
     reference_timepoint | midline_axis | out_dtype | data_type | read_workers | temp_dir | transforms |
-    transforms_only (true/false) | register_cameras (true/false) | register_channels | register_model |
+    transforms_only (true/false) | register_cameras (true/false) | register_model | register_channel |
     flatfield (true/false, Opera only, default true), e.g.
       input                  | microscope | output                 | downsample | projection | blend   | num_levels
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_3D.zarr  | 4 8 8      | none       | sigmoid | 3

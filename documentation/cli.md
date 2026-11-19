@@ -163,7 +163,7 @@ The fusion options:
 | `-tfo`, `--transforms_only` | only write `<output>.transforms.json` (every fusion writes it first), fuse nothing | off |
 | `-rc`, `--register_cameras` | MuVi SPIM: register the right camera view onto the left one on the images, at the camera handover (z centre of the stack), instead of the stage position alone; see [mosaic.md](mosaic.md#registering-the-camera-views) | off |
 | `-rm`, `--register_model` | `rigid` (translation and rotation; the right view is resampled) or `translation` (only moved) | `rigid` |
-| `-rch`, `--register_channels` | channels matched by `--register_cameras` (e.g. a nuclear stain); the shift is applied to every channel | all, combined |
+| `-rch`, `--register_channel` | reference channel of `--register_cameras` (e.g. a nuclear stain): the transform is measured on it and applied to every channel; `all` registers every channel on its own images. Timepoints follow `-rtp`: measured at the reference timepoint and applied to all, or at every timepoint with `-rtp all` | the first channel |
 | `-od`, `--out_dtype` | output dtype | the input dtype (`float32` with `-b sum`) |
 | `-dt`, `--data_type` | `intensity` or `label` (a label image; needs `-b none` and an integer dtype) | `intensity` |
 | `-rw`, `--read_workers` | tiles read in parallel processes; not to be confused with `-nw` (write threads) | 4 |
@@ -172,7 +172,7 @@ The fusion options:
 
 Every output option of `convert` is available too, applied to the fused output, with the same defaults. Two read differently for a mosaic: `-cs` is given in `C Z Y X` order (`C Y X` for projections, after `T` for several timepoints), and `-s/--subset` crops the fused output (`z`/`y`/`x` in output voxels, after `-rds`) and selects channels (`c`), e.g. `"z=0:100;y=200:900;c=1"`; timepoints are chosen with `-tp`. `-si` loads one scene of a Zeiss mosaic (default: every scene, one field each), ignored for the others.
 
-The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `cameras`, `fields`, `tiles`, `skip_tiles`, `timepoints`, `reference_timepoint`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `transforms`, `transforms_only`, `register_cameras`, `register_channels`, `register_model`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
+The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `cameras`, `fields`, `tiles`, `skip_tiles`, `timepoints`, `reference_timepoint`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `transforms`, `transforms_only`, `register_cameras`, `register_model`, `register_channel`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
 
 ```text
 input,microscope,output,downsample,projection,blend,num_levels,shards

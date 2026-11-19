@@ -629,7 +629,7 @@ def mosaic_convert(
     transforms: Optional[str] = None,
     transforms_only: bool = False,
     register_cameras: bool = False,
-    register_channels: Optional[List[str]] = None,
+    register_channel: Optional[str] = None,
     register_model: str = "rigid",
 ):
     """Fuse a mosaic into an OME-Zarr image (CLI helper for ``zarrsmith fuse``).
@@ -652,8 +652,10 @@ def mosaic_convert(
     fusing; with ``transforms_only`` nothing else is done. ``transforms`` is such a file
     to place the tiles with instead of the stage positions (its reference timepoint is
     used unless ``reference_timepoint`` is given). ``register_cameras`` registers the views
-    of opposing cameras on the images (on ``register_channels``, default all; ``register_model``
-    ``"rigid"`` or ``"translation"``) before fusing, see :meth:`MosaicManager.register_cameras
+    of opposing cameras on the images before fusing (``register_model`` ``"rigid"`` or
+    ``"translation"``), measured on the reference channel ``register_channel`` (default: the
+    first; ``"all"``: every channel) at the reference timepoint (every timepoint with
+    ``reference_timepoint="all"``) and applied to the others, see :meth:`MosaicManager.register_cameras
     <zarrsmith.mosaic_manager.MosaicManager.register_cameras>`.
     """
     from zarrsmith.mosaic_manager import (default_transforms_path, fuse_tiles, plan_fusion, reader_options,
@@ -712,8 +714,8 @@ def mosaic_convert(
         else:
             model = register_model or "rigid"
             print(f"\n--->Registering the camera views ({model}, at the camera handover)")
-            results = mosaic.register_cameras(use, channels=list(register_channels) if register_channels else None,
-                                              model=model)
+            results = mosaic.register_cameras(use, reference_channel=register_channel or None,
+                                              reference_timepoint=reference_timepoint, model=model)
             for r in results.values():
                 print(f"\t{r.summary()}")
 
@@ -839,10 +841,10 @@ def convert_mosaic_batch(args):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = parse_bool(v[key])
         for key in ("projection", "blend", "midline_axis", "out_dtype", "data_type", "temp_dir", "transforms",
-                    "register_model"):
+                    "register_model", "register_channel"):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = str(v[key]).strip()
-        for key in ("channels", "groups", "cameras", "fields", "tiles", "skip_tiles", "register_channels"):
+        for key in ("channels", "groups", "cameras", "fields", "tiles", "skip_tiles"):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = str(v[key]).split()
         # float: pandas reads a number in a column with empty cells as 3.0

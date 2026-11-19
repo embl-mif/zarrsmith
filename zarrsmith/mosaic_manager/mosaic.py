@@ -588,7 +588,8 @@ class MosaicManager(ABC):
         tiles: Optional[Sequence["Tile | str"]] = None,
         field: "str | Sequence[str] | None" = None,
         reference_camera: Optional[str] = None,
-        channels: Optional[Sequence[str]] = None,
+        reference_channel: Optional[str] = None,
+        reference_timepoint=None,
         model: str = "rigid",
         **options,
     ) -> Dict[tuple, Any]:
@@ -598,9 +599,13 @@ class MosaicManager(ABC):
 
         The tiles of the other cameras are registered in place onto the reference camera
         (default: the first camera), stack by stack, by a translation and a rotation
-        (``model="rigid"``, default) or a translation (``"translation"``); the transform
-        measured on ``channels`` (default: all, combined) is applied to every channel. A
-        translation moves the tiles; a rotation also resamples their data on the reference
+        (``model="rigid"``, default) or a translation (``"translation"``). The transform is
+        measured on ``reference_channel`` (default: the first channel; a nuclear stain works
+        best) at ``reference_timepoint`` (default: the first timepoint) and applied to every
+        channel and timepoint; ``"all"`` registers every channel (or timepoint) on its own
+        images instead, see :func:`~zarrsmith.mosaic_manager.registration.register_cameras`.
+        Pass the fusion's ``reference_timepoint``, so the registration follows its geometry.
+        A translation moves the tiles; a rotation also resamples their data on the reference
         tile's grid, lazily. Tiles start from their stage placement (an earlier registration
         or transforms file is undone). A following :meth:`fuse` uses the registration and its
         transforms file records it (``method`` ``"registration"``), so it can be reused with
@@ -610,15 +615,16 @@ class MosaicManager(ABC):
         ``tiles`` and ``field`` select the tiles as for :meth:`fuse` (default: every tile).
         ``options`` go to :func:`~zarrsmith.mosaic_manager.registration.estimate_camera_registration`.
         Returns the :class:`~zarrsmith.mosaic_manager.registration.CameraRegistration` of
-        every ``(stack, timepoint, group, camera)`` registered.
+        every ``(stack, timepoint, group, camera, channel)`` measured.
         """
         from .registration import register_cameras
 
         use = self.tiles if tiles is None and field is None else self.fusion_tiles(tiles, field)
         for t in use:
             self._reset_tile(t)
-        moved, results = register_cameras(use, reference_camera=reference_camera, channels=channels,
-                                          model=model, **options)
+        moved, results = register_cameras(use, reference_camera=reference_camera,
+                                          reference_channel=reference_channel,
+                                          reference_timepoint=reference_timepoint, model=model, **options)
         for t, m in zip(use, moved):
             if m is not t:
                 self._set_placement(t, m)
