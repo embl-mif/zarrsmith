@@ -1246,7 +1246,13 @@ def transforms_document(plan: FusionPlan, tile_id: Optional[Callable[[Tile], str
       position: with a reference timepoint, the tiles of every timepoint are placed where
       their reference tile is;
     * ``affine`` (4 x 4) maps a voxel index ``(z, y, x, 1)`` of the raw tile data to its
-      position as fused (``placed_at``, with the flips).
+      position as fused (``placed_at``, with the flips, and the rotation of a registration);
+    * ``registration`` (tiles registered on the images, see
+      :meth:`MosaicManager.register_cameras <zarrsmith.mosaic_manager.MosaicManager.register_cameras>`):
+      ``matrix``, the 4 x 4 transform from a reference position to the stage-placed tile,
+      and for a rotation ``grid``, the grid the raw data is resampled on (``origin``,
+      ``voxel_size``, ``shape``, ``flip``: ``translation``, ``shape`` and ``flip`` above are
+      then those of the resampled tile, ``source_shape`` the raw one).
     """
     tile_id = tile_id or _default_tile_id
     out_vox = np.array(plan.tiles[0].voxel_size) * np.array(plan.ds)
@@ -1264,7 +1270,10 @@ def transforms_document(plan: FusionPlan, tile_id: Optional[Callable[[Tile], str
                     v = t.voxel_size[a]
                     affine[a, a] = -v if t.flip[a] else v
                     affine[a, 3] = placed_at[a] + ((t.shape[a] - 1) * v if t.flip[a] else 0.0)
-                entries.append({
+                resampled = getattr(t.data, "matrix", None) is not None and "registration" in t.attrs
+                if resampled:  # AffineArray: raw voxel -> resampled voxel -> placed
+                    affine = affine @ np.linalg.inv(t.data.matrix)
+                entry = {
                     "id": tile_id(t),
                     "timepoint": int(tp),
                     "channel": t.channel,
@@ -1282,7 +1291,12 @@ def transforms_document(plan: FusionPlan, tile_id: Optional[Callable[[Tile], str
                     "offset": [int(v) for v in p.offset],
                     "placed_at": [float(v) for v in placed_at],
                     "affine": affine.tolist(),
-                })
+                }
+                if "registration" in t.attrs:
+                    entry["registration"] = t.attrs["registration"]
+                    if resampled:
+                        entry["source_shape"] = [int(v) for v in t.data.source.shape]
+                entries.append(entry)
     methods = sorted({e["method"] for e in entries})
     return {
         "format": TRANSFORMS_FORMAT,

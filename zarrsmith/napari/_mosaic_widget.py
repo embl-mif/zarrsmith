@@ -39,12 +39,15 @@ _MAP_COLORS = {True: ((0.2, 0.9, 0.3, 0.15), (0.2, 0.9, 0.3, 1.0)),
 #: A press that moves more than this (canvas pixels) is a pan, not a click on the tile map.
 _CLICK_TOLERANCE = 4
 
+#: Camera registration models offered (see :mod:`zarrsmith.mosaic_manager.registration`).
+REGISTER_MODELS = ("rigid", "translation")
+
 #: Columns of the CSV read by ``zarrsmith fuse --batch``.
 MOSAIC_BATCH_COLUMNS = [
     "input", "microscope", "output",
     "downsample", "projection", "blend", "channels", "groups", "cameras", "fields", "tiles", "skip_tiles",
     "timepoints", "reference_timepoint", "midline_axis", "out_dtype", "read_workers", "temp_dir", "overwrite", "flatfield",
-    "transforms", "transforms_only",
+    "transforms", "transforms_only", "register_cameras", "register_model", "register_channels",
     "chunk_size", "max_size(MB)", "scene_index", "zarr_format", "downscale_factor", "subset",
     "channel_colors", "channel_names", "num_levels", "shards", "shard_target_mb", "shard_exclude_axes",
     "drop_singleton", "num_workers",
@@ -158,6 +161,39 @@ def fuse_kwargs(
         "workers": int(workers),
         "overwrite": bool(overwrite),
     }
+
+
+def register_options(*, register_cameras: bool, register_model: str, register_channels: Sequence[str],
+                     all_channels: Sequence[str]) -> Optional[dict]:
+    """:meth:`~zarrsmith.mosaic_manager.MosaicManager.register_cameras` options from the widget
+    values, or ``None`` when the cameras are not registered. ``channels`` is ``None`` (all,
+    combined) when none or all of ``all_channels`` are chosen."""
+    if not register_cameras:
+        return None
+    chosen = list(register_channels or ())
+    return {"model": register_model or "rigid",
+            "channels": None if not chosen or set(chosen) >= set(all_channels) else chosen}
+
+
+def run_fusion(mosaic, tiles, out, kwargs: dict, register: Optional[dict] = None,
+               transforms_only: bool = False, plan_kwargs: Optional[dict] = None):
+    """The background part of *Fuse to OME-Zarr*: register the camera views of ``tiles`` in
+    place (``register``: options of :meth:`MosaicManager.register_cameras
+    <zarrsmith.mosaic_manager.MosaicManager.register_cameras>`, ``None``: no registration),
+    then fuse them (``kwargs`` of :func:`~zarrsmith.mosaic_manager.fuse_tiles`) or, with
+    ``transforms_only``, only write their transforms next to ``out`` (``plan_kwargs`` of
+    :func:`~zarrsmith.mosaic_manager.plan_fusion`).
+
+    Returns ``(result, registrations)``: the fused ``ZarrManager`` (or the transforms path)
+    and the camera registrations measured (empty without ``register``).
+    """
+    registrations = mosaic.register_cameras(tiles, **register) if register else {}
+    if transforms_only:
+        plan = mos.plan_fusion(tiles, **(plan_kwargs or {}))
+        path = mos.write_transforms(mos.default_transforms_path(out),
+                                    mos.transforms_document(plan, tile_id=mosaic.tile_id, source=str(mosaic.path)))
+        return path, registrations
+    return mos.fuse_tiles(tiles, out, **kwargs), registrations
 
 
 def tile_layers(layers, mosaic_path) -> list:
@@ -364,7 +400,7 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
               skip_ids: Sequence[str], picked: Optional[Sequence[str]] = None,
               all_stacks: Sequence[str] = (), all_fields: Sequence[str] = (),
               flatfield: Optional[bool] = None, all_timepoints: Sequence[int] = (),
-              all_cameras: Sequence[str] = ()) -> dict:
+              all_cameras: Sequence[str] = (), all_channels: Sequence[str] = ()) -> dict:
     """One ``zarrsmith fuse --batch`` CSV row from the fusion widget ``values``.
 
     ``picked`` are the stack ids picked on the tile map (``None``: all); the ``tiles``
@@ -375,7 +411,9 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
     reader has none, and the column stays empty). The ``timepoints`` column stays empty
     (every timepoint) when ``values["timepoints"]`` is missing or covers ``all_timepoints``;
     likewise ``cameras`` with ``all_cameras``. ``transforms`` (a file, or ``None``) and
-    ``transforms_only`` are the transforms options.
+    ``transforms_only`` are the transforms options. ``register_cameras``, ``register_model``
+    and ``register_channels`` give the camera registration columns (empty when the cameras
+    are not registered; ``register_channels`` also when it covers ``all_channels``).
     """
     groups = list(values["groups"])
     fields = list(values.get("fields") or ())
@@ -383,6 +421,10 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
     cameras = list(values.get("cameras") or ())
     reference = values.get("reference_timepoint")
     transforms = transforms_choice(values.get("transforms"))
+    register = register_options(register_cameras=bool(values.get("register_cameras")),
+                                register_model=values.get("register_model") or "rigid",
+                                register_channels=values.get("register_channels") or (),
+                                all_channels=all_channels or values.get("register_channels") or ())
     return {
         "input": str(Path(input_path)),
         "microscope": microscope,
@@ -405,6 +447,9 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
         "cameras": "" if not cameras or set(cameras) >= set(all_cameras) else " ".join(cameras),
         "transforms": "" if transforms is None else str(transforms),
         "transforms_only": "true" if values.get("transforms_only") else "",
+        "register_cameras": "true" if register else "",
+        "register_model": register["model"] if register else "",
+        "register_channels": " ".join(register["channels"]) if register and register["channels"] else "",
     }
 
 
@@ -440,9 +485,10 @@ def _scan_worker(reader, path, options=None):
 
 
 @thread_worker
-def _fuse_worker(tiles, out, kwargs):
-    """Run the fusion in the background and return the written dataset."""
-    return mos.fuse_tiles(tiles, out, **kwargs)
+def _fuse_worker(mosaic, tiles, out, kwargs, register=None, transforms_only=False, plan_kwargs=None):
+    """Run :func:`run_fusion` in the background (registration, then fusion or transforms)."""
+    return run_fusion(mosaic, tiles, out, kwargs, register=register, transforms_only=transforms_only,
+                      plan_kwargs=plan_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +516,7 @@ def mosaic_widget():
             state["streams"] = None
 
     def _busy(busy: bool):
+        state["busy"] = busy
         load_widget.enabled = not busy
         has_mosaic = state["mosaic"] is not None
         show_widget.enabled = has_mosaic and not busy
@@ -588,6 +635,12 @@ def mosaic_widget():
         fuse_widget.timepoints.visible = fuse_widget.reference_timepoint.visible = len(timepoints) > 1
         cameras = camera_labels(mosaic)
         state["transforms"] = None  # new tiles, at their stage positions
+        state["registered"] = False
+        fuse_widget.register_channels.choices = channels
+        fuse_widget.register_channels.value = channels  # all, combined
+        for name in ("register_cameras", "register_model", "register_channels"):
+            getattr(fuse_widget, name).visible = bool(cameras)
+        _register_enabled()
         for w in (show_widget, fuse_widget):
             w.cameras.choices = cameras
             w.cameras.value = cameras
@@ -604,7 +657,8 @@ def mosaic_widget():
         print(f"{len(mosaic.tiles)} tiles, channels {channels}, groups {groups}, fields {fields}")
         if cameras:
             print(f"{len(cameras)} cameras {cameras}: fused into one image, blended along z (the right view "
-                  "mirrored back); pick cameras to fuse only some of them.")
+                  "mirrored back); pick cameras to fuse only some of them. Tick 'Register cameras' to align "
+                  "the views on the images first (the stage positions alone leave a jump at the handover).")
         if len(timepoints) > 1:
             print(f"{len(timepoints)} timepoints: {timepoints}. Shown tiles have a time slider, starting on "
                   f"timepoint {timepoints[0]}; every timepoint is fused with the geometry of the reference timepoint.")
@@ -683,6 +737,21 @@ def mosaic_widget():
         cameras={"widget_type": "Select", "choices": [], "allow_multiple": True,
                  "tooltip": "Cameras to fuse. The opposing views of a MuVi SPIM are blended along z, each "
                             "camera on the side it images sharply."},
+        register_cameras={"label": "Register cameras", "widget_type": "CheckBox", "value": False,
+                          "tooltip": "Align the camera views on the images before fusing (about a minute per "
+                                     "stack): the transform between the right and the left view is measured "
+                                     "around the z centre of the stack, where the fusion hands over from one "
+                                     "camera to the other, and applied to the right view. Replaces the "
+                                     "positions of a transforms file for the fused tiles; the transforms "
+                                     "written with the output record the registration (reuse them as "
+                                     "'Transforms' to skip measuring again)."},
+        register_model={"label": "Registration model", "choices": list(REGISTER_MODELS), "value": "rigid",
+                        "tooltip": "rigid: translation and rotation (the right view is resampled on the left "
+                                   "grid). translation: the right view is only moved."},
+        register_channels={"label": "Registration channels", "widget_type": "Select", "choices": [],
+                           "allow_multiple": True,
+                           "tooltip": "Channels matched to register the cameras (e.g. a nuclear stain). All "
+                                      "selected: all, combined. The transform is applied to every channel."},
         fields={"widget_type": "Select", "choices": [], "allow_multiple": True,
                 "tooltip": "Field to fuse: fields are groups of touching tiles. Fields are fused one at a "
                            "time; tiles from several fields are not fused."},
@@ -720,6 +789,9 @@ def mosaic_widget():
         channels=(),
         groups=(),
         cameras=(),
+        register_cameras=False,
+        register_model="rigid",
+        register_channels=(),
         fields=(),
         timepoints=(),
         reference_timepoint=None,
@@ -765,7 +837,13 @@ def mosaic_widget():
             return
         out = Path(output_path)
         _capture()
-        if transforms_only:
+        register = register_options(register_cameras=register_cameras and _register_shown(),
+                                    register_model=register_model,
+                                    register_channels=register_channels, all_channels=mosaic.channels)
+        if register and len({t.camera for t in tiles}) < 2:
+            print("Register cameras: the fused tiles come from one camera, nothing to register.")
+            register = None
+        if transforms_only and not register:
             try:
                 path = mos.write_transforms(mos.default_transforms_path(out),
                                             mos.transforms_document(plan, tile_id=mosaic.tile_id,
@@ -776,19 +854,41 @@ def mosaic_widget():
             finally:
                 _release()
             return
-        if not output_allowed(out, overwrite=overwrite, sources=[state["input_path"]]):
+        if not transforms_only and not output_allowed(out, overwrite=overwrite, sources=[state["input_path"]]):
             _release()
             return
 
-        print(f"Fusing {len(plan.tiles)} tiles into {out}: {plan.summary()}")
+        if register:
+            if state.get("transforms") is not None:
+                print("Register cameras: the fused tiles start from their stage positions (the transforms "
+                      "file is not used for them).")
+            chans = "all channels" if register["channels"] is None else ", ".join(register["channels"])
+            print(f"Registering the camera views ({register['model']}, on {chans}) at the camera handover; "
+                  "this takes about a minute per stack...")
+        if transforms_only:
+            print(f"Writing the transforms of {len(plan.tiles)} tiles (nothing fused).")
+        else:
+            print(f"Fusing {len(plan.tiles)} tiles into {out}: {plan.summary()}")
+        plan_kwargs = {k: kwargs[k] for k in ("channels", "projection", "blend", "ds", "skip")}
+        plan_kwargs.update(_time_options())
         # all the tiles, not plan.tiles: skipped tiles and the reference timepoint set the geometry
-        worker = _fuse_worker(tiles, out, kwargs)
+        worker = _fuse_worker(mosaic, tiles, out, kwargs, register=register, transforms_only=transforms_only,
+                              plan_kwargs=plan_kwargs)
+        if register:
+            state["registered"] = True  # the tiles move in place: put them back before the next use
         _busy(True)
 
         @worker.returned.connect
-        def _done(zm):
-            print(f"Fusion completed: {out}")
+        def _done(result):
+            zm, registrations = result
+            for reg in registrations.values():
+                print(f"Camera registration: {reg.summary()}")
             _busy(False)
+            if transforms_only:
+                print(f"Transforms of {len(plan.tiles)} tiles written to {zm} (nothing fused).")
+                _release()
+                return
+            print(f"Fusion completed: {out}")
             _release()
             if open_result:
                 _clear_layers()
@@ -833,10 +933,13 @@ def mosaic_widget():
         when it is cleared (only when the choice changed)."""
         mosaic = state["mosaic"]
         choice = transforms_choice(fuse_widget.transforms_file.value)
-        if mosaic is None or choice == state.get("transforms"):
+        # a camera registration (done for one fusion) is undone too: the next fusion measures again;
+        # never while a fusion runs (it uses the tiles), e.g. the size estimate refreshed by napari events
+        if mosaic is None or state.get("busy") or (choice == state.get("transforms") and not state.get("registered")):
             return
         mosaic.reset_transforms()
         state["transforms"] = None
+        state["registered"] = False
         if choice is not None:
             doc = mosaic.apply_transforms(choice)
             state["transforms"] = choice
@@ -867,7 +970,19 @@ def mosaic_widget():
             plan_label.setText(f"Output: {e}")
             return
         if plan is not None:
-            plan_label.setText(f"Output: {plan.summary()}")
+            note = ""
+            if _register_shown() and fuse_widget.register_cameras.value and len(fuse_widget.cameras.value) > 1:
+                note = (f"; camera views registered on the images first ({fuse_widget.register_model.value}, "
+                        "about a minute per stack)")
+            plan_label.setText(f"Output: {plan.summary()}{note}")
+
+    def _register_shown() -> bool:
+        """The registration options are offered (the mosaic has several cameras)."""
+        return not fuse_widget.register_cameras.native.isHidden()
+
+    def _register_enabled(*_):
+        on = bool(fuse_widget.register_cameras.value)
+        fuse_widget.register_model.enabled = fuse_widget.register_channels.enabled = on
 
     def _update_output(*_, force=False):
         if "input_path" not in state:
@@ -883,8 +998,10 @@ def mosaic_widget():
             state["auto_output"] = new
 
     for name in ("channels", "groups", "cameras", "fields", "timepoints", "reference_timepoint", "tiles_to_fuse",
-                 "skip_all_channels", "projection", "blend", "ds_z", "ds_y", "ds_x", "transforms_file"):
+                 "skip_all_channels", "projection", "blend", "ds_z", "ds_y", "ds_x", "transforms_file",
+                 "register_cameras", "register_model"):
         getattr(fuse_widget, name).changed.connect(_update_plan)
+    fuse_widget.register_cameras.changed.connect(_register_enabled)
     if viewer is not None:
         viewer.layers.selection.events.changed.connect(_update_plan)
         viewer.layers.events.removed.connect(_update_plan)
@@ -901,6 +1018,9 @@ def mosaic_widget():
                   ("channels", "groups", "cameras", "fields", "projection", "blend", "ds_z", "ds_y", "ds_x",
                    "levels", "workers", "overwrite", "transforms_only")}
         values["transforms"] = fuse_widget.transforms_file.value
+        if _register_shown():  # only for a mosaic with several cameras
+            values.update({name: getattr(fuse_widget, name).value
+                           for name in ("register_cameras", "register_model", "register_channels")})
         values.update(_time_options())
         try:
             plan = _current_plan()
@@ -917,7 +1037,7 @@ def mosaic_widget():
                         all_groups=group_labels(mosaic), skip_ids=skip_ids, picked=_picked(),
                         all_stacks={stack_id(mosaic, t) for t in mosaic.tiles}, all_fields=mosaic.fields,
                         flatfield=state.get("flatfield"), all_timepoints=mosaic.timepoints,
-                        all_cameras=camera_labels(mosaic))
+                        all_cameras=camera_labels(mosaic), all_channels=mosaic.channels)
         _capture()  # print into this widget's log, not wherever sys.stdout points
         try:
             if not output_allowed(row["output"], overwrite=values["overwrite"], sources=[state["input_path"]]):
@@ -949,6 +1069,10 @@ def mosaic_widget():
         w.native.layout().setSpacing(2)
         w.native.layout().setContentsMargins(0, 0, 0, 0)
 
+    fuse_widget.register_channels.native.setMaximumHeight(48)
+    for name in ("register_cameras", "register_model", "register_channels"):
+        getattr(fuse_widget, name).visible = False  # until a mosaic with several cameras is loaded
+    _register_enabled()
     fuse_widget.timepoints.native.setMaximumHeight(48)
     fuse_widget.timepoints.visible = fuse_widget.reference_timepoint.visible = False  # until a timelapse is loaded
 
