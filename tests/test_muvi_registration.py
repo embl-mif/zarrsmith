@@ -130,31 +130,78 @@ def test_registered_tile_translation_moves_rotation_resamples():
     assert np.corrcoef(aligned.data[...][inner].ravel(), left[inner].ravel())[0, 1] > 0.98
 
 
-def test_register_cameras_registers_every_channel_of_the_other_camera():
+def test_register_cameras_reference_channel_applies_to_every_channel():
     left = _blobs()
     right = _right_of(left)
     dapi, gfp = _tiles(left, right, "DAPI"), _tiles(left // 2, right // 2, "GFP")
     tiles = [dapi[0], dapi[1], gfp[0], gfp[1]]
-    out, results = register_cameras(tiles, channels=["DAPI"], model="translation", **OPTS)
-    assert list(results) == [("0", 0, None, "right")]
-    shift = results[("0", 0, None, "right")].shift
+    out, results = register_cameras(tiles, reference_channel="DAPI", model="translation", **OPTS)
+    assert list(results) == [("0", 0, None, "right", "DAPI")]  # measured once, on DAPI
+    shift = results[("0", 0, None, "right", "DAPI")].shift
+    assert results[("0", 0, None, "right", "DAPI")].channel == "DAPI"
     assert out[0] is tiles[0] and out[2] is tiles[2]  # reference camera untouched
     for moved, orig in ((out[1], tiles[1]), (out[3], tiles[3])):
         assert np.allclose(moved.origin, np.array(orig.origin) - shift)
         assert moved.attrs["stage_origin"] == orig.origin and moved.attrs["transform_method"] == "registration"
+        assert moved.attrs["registration"]["channel"] == "DAPI" and moved.attrs["registration"]["timepoint"] == 0
     assert tiles[1].origin == (0.0, 0.0, 0.0)  # inputs are not changed
     out2, results2 = register_cameras(tiles, transforms={("0", 0, None, "right"): _rigid(shift=[1.0, 0, 0])})
     assert results2 == {} and out2[1].origin == (-1.0, 0.0, 0.0)  # known transform: not measured
     assert register_cameras(tiles[::2]) == (tiles[::2], {})  # one camera: nothing to do
+    with pytest.raises(ValueError, match="Reference channel 'RFP'"):
+        register_cameras(tiles, reference_channel="RFP")
+
+
+def test_register_cameras_every_channel_on_its_own():
+    """``reference_channel="all"``: a channel offset differently (chromatic) gets its own
+    transform; a channel without structure takes the best registered one."""
+    left = _blobs()
+    gfp_shift = SHIFT + [0.0, 1.0, 1.0]
+    flat = np.full(left.shape, 100, np.uint16)
+    dapi = _tiles(left, _right_of(left), "DAPI")
+    gfp = _tiles(left, _right_of(left, _rigid(shift=gfp_shift)), "GFP")
+    empty = _tiles(flat, flat, "empty")
+    tiles = [*dapi, *gfp, *empty]
+    out, results = register_cameras(tiles, reference_channel="all", model="translation", **OPTS)
+    assert sorted(k[-1] for k in results) == ["DAPI", "GFP"]
+    assert np.allclose(results[("0", 0, None, "right", "DAPI")].shift, SHIFT, atol=0.3)
+    assert np.allclose(results[("0", 0, None, "right", "GFP")].shift, gfp_shift, atol=0.3)
+    assert np.allclose(out[1].origin, -results[("0", 0, None, "right", "DAPI")].shift)
+    assert np.allclose(out[3].origin, -results[("0", 0, None, "right", "GFP")].shift)
+    assert out[5].attrs["registration"]["channel"] in ("DAPI", "GFP")  # fallback, no structure of its own
+    assert out[5].origin in (out[1].origin, out[3].origin)
+
+
+def test_register_cameras_timepoints_follow_the_reference():
+    """One transform measured at the reference timepoint holds for every timepoint;
+    ``"all"`` measures each timepoint."""
+    left = _blobs()
+    later = SHIFT + [0.0, -1.0, 1.5]
+    t0, t1 = _tiles(left, _right_of(left)), _tiles(left, _right_of(left, _rigid(shift=later)))
+    for t in t1:
+        t.timepoint = 1
+    tiles = [*t0, *t1]
+    opts = dict(model="translation", **OPTS)
+    out, results = register_cameras(tiles, **opts)  # default: the first timepoint
+    assert list(results) == [("0", 0, None, "right", "DAPI")]
+    assert out[1].origin == out[3].origin and out[3].attrs["registration"]["timepoint"] == 0
+    out, results = register_cameras(tiles, reference_timepoint=1, **opts)
+    assert list(results) == [("0", 1, None, "right", "DAPI")]
+    assert np.allclose(out[1].origin, -later, atol=0.3) and out[1].origin == out[3].origin
+    out, results = register_cameras(tiles, reference_timepoint="all", **opts)
+    assert sorted(k[1] for k in results) == [0, 1]
+    assert np.allclose(out[1].origin, -SHIFT, atol=0.3) and np.allclose(out[3].origin, -later, atol=0.3)
+    with pytest.raises(ValueError, match="Reference timepoint 5"):
+        register_cameras(tiles, reference_timepoint=5, **opts)
 
 
 def test_mosaic_register_cameras_fuse_records_and_reset(tmp_path):
     left = _blobs()
     m = LuxendoMosaicManager(_muvi(tmp_path, left=left, right=_right_of(left)), progress=False)
     stage = {m.tile_id(t): (t.origin, t.flip, t.data) for t in m.tiles}
-    results = m.register_cameras(field="field1", channels=["DAPI"], **OPTS)
-    reg = results[("1", 0, None, "right")]
-    assert list(results) == [("1", 0, None, "right")] and reg.model == "rigid"
+    results = m.register_cameras(field="field1", reference_channel="DAPI", **OPTS)
+    reg = results[("1", 0, None, "right", "DAPI")]
+    assert list(results) == [("1", 0, None, "right", "DAPI")] and reg.model == "rigid"
     for t in m.field_tiles("field1"):
         o, f, d = stage[m.tile_id(t)]
         if t.camera == "right":  # resampled on the left tile's grid
@@ -196,7 +243,7 @@ def test_cli_register_cameras(tmp_path, capsys, monkeypatch):
     acq = _muvi(tmp_path, left=left, right=_right_of(left))
     out = tmp_path / "cli.ome.zarr"
     cli_main(["fuse", "-i", str(acq), "-z", str(out), "-f", "field1", "-rc", "-rch", "DAPI", "-rm", "translation"])
-    assert "right -> left (translation): shift" in capsys.readouterr().out
+    assert "right -> left (translation, DAPI): shift" in capsys.readouterr().out
     doc = load_transforms(tmp_path / "cli.transforms.json")
     for e in doc["tiles"]:
         moved = np.array(e["stage_translation"]) - e["translation"]

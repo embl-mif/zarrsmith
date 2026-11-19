@@ -627,20 +627,22 @@ def test_batch_row_register_cameras():
               "blend": "sigmoid", "ds_z": 1, "ds_y": 1, "ds_x": 1, "levels": 1, "workers": 1,
               "overwrite": False, "transforms": Path(), "transforms_only": False}
     common = dict(input_path="acq", microscope="luxendo", output="o.zarr", all_groups=["(none)"], skip_ids=[],
-                  all_cameras=["left", "right"], all_channels=["A", "B"])
+                  all_cameras=["left", "right"])
     row = mw.batch_row(values=values, **common)  # no registration options (single camera mosaic)
-    assert row["register_cameras"] == row["register_model"] == row["register_channels"] == ""
-    off = {**values, "register_cameras": False, "register_model": "rigid", "register_channels": ["A"]}
+    assert row["register_cameras"] == row["register_model"] == row["register_channel"] == ""
+    off = {**values, "register_cameras": False, "register_model": "rigid", "register_channel": "A"}
     assert mw.batch_row(values=off, **common)["register_cameras"] == ""
     on = {**off, "register_cameras": True}
     row = mw.batch_row(values=on, **common)
-    assert (row["register_cameras"], row["register_model"], row["register_channels"]) == ("true", "rigid", "A")
-    row = mw.batch_row(values={**on, "register_model": "translation", "register_channels": ["A", "B"]}, **common)
-    assert (row["register_model"], row["register_channels"]) == ("translation", "")  # all channels: default
-    for column in ("register_cameras", "register_model", "register_channels"):
+    assert (row["register_cameras"], row["register_model"], row["register_channel"]) == ("true", "rigid", "A")
+    row = mw.batch_row(values={**on, "register_model": "translation", "register_channel": "all"}, **common)
+    assert (row["register_model"], row["register_channel"]) == ("translation", "all")
+    for column in ("register_cameras", "register_model", "register_channel"):
         assert column in mw.MOSAIC_BATCH_COLUMNS
-    assert mw.register_options(register_cameras=True, register_model="rigid", register_channels=[],
-                               all_channels=["A"]) == {"model": "rigid", "channels": None}
+    assert mw.register_options(register_cameras=True, register_model="rigid", register_channel="A",
+                               reference_timepoint=2) == {"model": "rigid", "reference_channel": "A",
+                                                          "reference_timepoint": 2}
+    assert mw.register_options(register_cameras=False, register_model="rigid", register_channel="A") is None
 
 
 def _own_enabled(widget, parent) -> bool:
@@ -704,12 +706,13 @@ def test_widget_registers_cameras(app, tmp_path, monkeypatch):
     dock.state["mosaic"] = m
     dock.populate(m, acq)
     assert not fw.register_cameras.native.isHidden() and not fw.register_cameras.value
-    assert list(fw.register_channels.value) == m.channels and not _own_enabled(fw.register_model, fw)
+    assert fw.register_channel.value == m.channels[0] and not _own_enabled(fw.register_model, fw)
+    assert list(fw.register_channel.choices) == ["all", *m.channels]
     fw.fields.value = ["field1"]
     fw.ds_z.value, fw.ds_y.value, fw.ds_x.value = 1, 1, 1
     fw.register_cameras.value = True
     assert _own_enabled(fw.register_model, fw) and "registered on the images first (rigid" in dock.plan_label.text()
-    fw.register_channels.value = ["DAPI"]
+    fw.register_channel.value = "DAPI"
 
     out = tmp_path / "reg.ome.zarr"
     fw.output_path.value = out
@@ -726,7 +729,7 @@ def test_widget_registers_cameras(app, tmp_path, monkeypatch):
     dock.batch_widget.batch_csv_path.value = csv
     dock.batch_widget()
     row = pd.read_csv(csv, dtype=str).fillna("").iloc[0]
-    assert (row["register_cameras"], row["register_model"], row["register_channels"]) == ("true", "rigid", "DAPI")
+    assert (row["register_cameras"], row["register_model"], row["register_channel"]) == ("true", "rigid", "DAPI")
     # any later use of the tiles (here the batch export's size estimate) undoes the registration
     assert not isinstance(tile.data, AffineArray) and not dock.state["registered"]
 
@@ -743,10 +746,10 @@ def test_run_fusion_registers_then_fuses(tmp_path):
     left = _blobs()
     m = LuxendoMosaicManager(_muvi(tmp_path, left=left, right=_right_of(left)), progress=False)
     tiles = m.field_tiles("field1")
-    register = {"model": "translation", "channels": ["DAPI"], **{k: v for k, v in OPTS.items()}}
+    register = {"model": "translation", "reference_channel": "DAPI", **OPTS}
     out = tmp_path / "f.ome.zarr"
     zm, regs = mw.run_fusion(m, tiles, out, {"ds": (1, 2, 2), "projection": "max", "tile_id": m.tile_id},
                              register=register)
-    assert list(regs) == [("1", 0, None, "right")] and zm.metadata["axes"] == "cyx"
+    assert list(regs) == [("1", 0, None, "right", "DAPI")] and zm.metadata["axes"] == "cyx"
     entry = next(e for e in load_transforms(tmp_path / "f.transforms.json")["tiles"] if e["id"] == "DAPI/1/right")
     assert entry["method"] == "registration"

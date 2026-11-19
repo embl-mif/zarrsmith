@@ -640,7 +640,7 @@ def mosaic_widget():
         cameras = camera_labels(mosaic)
         state["transforms"] = None  # new tiles, at their stage positions
         state["registered"] = False
-        fuse_widget.register_channel.choices = list(channels) + [REGISTER_ALL]
+        fuse_widget.register_channel.choices = [REGISTER_ALL] + [c for c in channels if c != REGISTER_ALL]
         fuse_widget.register_channel.value = channels[0]
         for name in ("register_cameras", "register_model", "register_channel"):
             getattr(fuse_widget, name).visible = bool(cameras)
@@ -752,7 +752,7 @@ def mosaic_widget():
         register_model={"label": "Registration model", "choices": list(REGISTER_MODELS), "value": "rigid",
                         "tooltip": "rigid: translation and rotation (the right view is resampled on the left "
                                    "grid). translation: the right view is only moved."},
-        register_channel={"label": "Registration channel", "widget_type": "ComboBox", "choices": [],
+        register_channel={"label": "Registration channel", "widget_type": "ComboBox", "choices": [REGISTER_ALL],
                           "tooltip": "Reference channel: the transform is measured on it (e.g. a nuclear "
                                      "stain) and applied to every channel. 'all': every channel is "
                                      "registered on its own images. Timepoints follow the reference "
@@ -796,7 +796,7 @@ def mosaic_widget():
         cameras=(),
         register_cameras=False,
         register_model="rigid",
-        register_channel=None,
+        register_channel=REGISTER_ALL,
         fields=(),
         timepoints=(),
         reference_timepoint=None,
