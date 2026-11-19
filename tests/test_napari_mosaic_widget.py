@@ -643,6 +643,11 @@ def test_batch_row_register_cameras():
                                all_channels=["A"]) == {"model": "rigid", "channels": None}
 
 
+def _own_enabled(widget, parent) -> bool:
+    """Enabled as set on the widget itself (the parent section may be disabled)."""
+    return widget.native.isEnabledTo(parent.native)
+
+
 class _SyncWorker:
     """Stands in for the napari thread worker: runs at ``start()``, in this thread."""
 
@@ -699,11 +704,11 @@ def test_widget_registers_cameras(app, tmp_path, monkeypatch):
     dock.state["mosaic"] = m
     dock.populate(m, acq)
     assert not fw.register_cameras.native.isHidden() and not fw.register_cameras.value
-    assert list(fw.register_channels.value) == m.channels and not fw.register_model.enabled
+    assert list(fw.register_channels.value) == m.channels and not _own_enabled(fw.register_model, fw)
     fw.fields.value = ["field1"]
     fw.ds_z.value, fw.ds_y.value, fw.ds_x.value = 1, 1, 1
     fw.register_cameras.value = True
-    assert fw.register_model.enabled and "registered on the images first (rigid" in dock.plan_label.text()
+    assert _own_enabled(fw.register_model, fw) and "registered on the images first (rigid" in dock.plan_label.text()
     fw.register_channels.value = ["DAPI"]
 
     out = tmp_path / "reg.ome.zarr"
