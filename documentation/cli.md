@@ -150,7 +150,7 @@ The fusion options:
 | `-p`, `--projection` | `none` (3D), `max` or `sum` | `none` |
 | `-b`, `--blend` | `sigmoid`, `max`, `sum`, `midline` or `none` (no blending, for labels; see [Fusion options](mosaic.md#fusion-options)) | `sigmoid` |
 | `-ss`, `--sigmoid_steepness` | steepness of the `sigmoid` transition, higher is sharper | 4 |
-| `-ch`, `--channels` / `-g`, `--groups` | tile channels and groups (e.g. `L R`) to fuse | all |
+| `-ch`, `--channels` / `-g`, `--groups` | tile channels and groups (e.g. `L R`) to fuse. Quote a name with spaces: `-ch "Alexa 488"` on the command line, `"Alexa 488" Brightfield` in a `--batch` CSV cell (double quotes: Excel drops a leading `'` when it saves) | all |
 | `-cam`, `--cameras` | cameras to fuse (MuVi SPIM: `left right`); several are blended into one image, see [MuVi SPIM](mosaic.md#muvi-spim-two-opposing-cameras) | all |
 | `-f`, `--fields` | the field to fuse (groups of touching tiles, `field0`, `field1`, ... listed when the mosaic is loaded). Tiles from several fields are not fused: an error is printed (see [Fields](mosaic.md#fields)) | the first field, unless `-t` is given |
 | `-t`, `--tiles` | only fuse these tiles, and fit the output to them: stacks such as `1-x00-y00` (every channel), or `channel/stack` ids | all |

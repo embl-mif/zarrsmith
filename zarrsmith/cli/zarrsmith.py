@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -817,6 +818,17 @@ def convert_mosaic_single(args):
         raise SystemExit(1)
 
 
+def _split_names(cell, column: str) -> List[str]:
+    """Space separated names of a batch CSV cell; quote a name with spaces: "Alexa 488" Brightfield."""
+    try:
+        return shlex.split(str(cell))
+    except ValueError:
+        raise ValueError(
+            f"Unbalanced quote in the {column!r} cell {str(cell)!r} of the batch CSV. Quote names with spaces "
+            f"with double quotes, e.g. \"Alexa 488\" Brightfield (Excel drops a leading ' when it saves)."
+        ) from None
+
+
 def convert_mosaic_batch(args):
     """Runmode to fuse a batch of mosaics listed in a CSV file."""
     csv_path = getattr(args, "input_file", args)  # parsed arguments or a path
@@ -846,7 +858,7 @@ def convert_mosaic_batch(args):
                 kwargs[key] = str(v[key]).strip()
         for key in ("channels", "groups", "cameras", "fields", "tiles", "skip_tiles"):
             if key in columns and _present(v.get(key)):
-                kwargs[key] = str(v[key]).split()
+                kwargs[key] = _split_names(v[key], key)
         # float: pandas reads a number in a column with empty cells as 3.0
         if "timepoints" in columns and _present(v.get("timepoints")):
             kwargs["timepoints"] = [int(float(t)) for t in str(v["timepoints"]).split()]

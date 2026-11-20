@@ -561,7 +561,8 @@ FUSE_HELP = """\
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_3D.zarr  | 4 8 8      | none       | sigmoid | 3
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_MIP.zarr | 1 8 8      | max        | midline |
     Leave a cell empty for the default. Lists (channels, groups, fields, tiles, skip_tiles, timepoints, channel_names...) are space
-    separated.
+    separated; put a name that contains spaces in double quotes in channels, groups, cameras, fields, tiles and
+    skip_tiles, e.g. "Alexa 488" Brightfield.
     The napari "Mosaic Fusion" widget writes such files with "Append to batch CSV".
 """
 
