@@ -1,3 +1,4 @@
+import logging
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -5,9 +6,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import dask.array as da
 import h5py
+import numpy as np
 
 from .microscope_manager import MicroscopeManager
 from ..utils.metadata import ChannelInfo, build_metadata, scale_for_level
+
+logger = logging.getLogger("zarrsmith")
 
 
 class LuxendoManager(MicroscopeManager):
@@ -93,6 +97,46 @@ class LuxendoManager(MicroscopeManager):
         x, y, z = (cast(v) for v in text.split())
         return z, y, x
 
+    @staticmethod
+    def _view_translation(root: ET.Element, source: str = "the XML") -> Optional[Dict[str, float]]:
+        """Position of voxel ``[0, 0, 0]`` from the BigDataViewer ``<ViewRegistrations>``, or ``None``.
+
+        The registration of the first view (first timepoint, lowest setup id) is used:
+        its ``<ViewTransform>`` affines (row-major 3x4, ``x y z``, voxels to the world
+        frame in the units of ``voxelSize``) are composed as BigDataViewer does, the
+        first listed applied last, and the translation column of the result is the
+        world position of voxel 0. All setups of a Luxendo dataset share it. NGFF
+        cannot store a rotation: when the affine has one, only its translation is kept
+        (with a warning).
+        """
+        registrations = root.findall(".//ViewRegistrations/ViewRegistration")
+        if not registrations:
+            return None
+
+        def key(reg):
+            try:
+                return int(reg.get("timepoint", 0)), int(reg.get("setup", 0))
+            except ValueError:
+                return 0, 0
+
+        registration = min(registrations, key=key)
+        matrix = np.eye(4)
+        try:
+            for transform in registration.findall("ViewTransform"):
+                values = [float(v) for v in (transform.findtext("affine") or "").split()]
+                if len(values) != 12:
+                    raise ValueError(f"an affine of {len(values)} values")
+                affine = np.vstack([np.reshape(values, (3, 4)), [0.0, 0.0, 0.0, 1.0]])
+                matrix = matrix @ affine
+        except ValueError as e:
+            logger.warning("Cannot read the view registration of %s (%s): position not used.", source, e)
+            return None
+        linear = matrix[:3, :3]
+        if not np.allclose(linear, np.diag(np.diag(linear))):
+            logger.warning("The view registration of %s rotates the data; only its translation is kept.", source)
+        x, y, z = (float(v) for v in matrix[:3, 3])
+        return {"z": z, "y": y, "x": x}
+
     def _parse_metadata(self) -> Dict[str, Any]:
         """
         Parse XML metadata from the Luxendo dataset.
@@ -138,6 +182,7 @@ class LuxendoManager(MicroscopeManager):
             size=[(size_t, len(channels)) + tuple(shape) for shape in shapes],
             scales=scales,
             units=(unit,) * 3,
+            translations=self._view_translation(root, xml_path.name),
             channels=channels,
             dtype=dtype,
             # The Luxendo XML does not record the interval between timepoints.

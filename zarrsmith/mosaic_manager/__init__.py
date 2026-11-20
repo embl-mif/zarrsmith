@@ -9,4 +9,5 @@ from .fusion import (FusionPlan, default_transforms_path, display_windows, fuse_
 from .luxendo_mosaic_manager import LuxendoMosaicManager
 from .opera_mosaic_manager import OperaFlatfield, OperaMosaicManager
 from .zeiss_mosaic_manager import ZeissMosaicManager
+from .zarr_mosaic_manager import ZarrMosaicManager, ZarrTileArray
 from .readers import MOSAIC_READERS, WrongReaderError, check_reader, detect_microscope

@@ -7,6 +7,7 @@ from typing import Dict, Optional, Type
 from .luxendo_mosaic_manager import LuxendoMosaicManager
 from .mosaic import MosaicManager
 from .opera_mosaic_manager import INDEX_NAMES, OperaMosaicManager
+from .zarr_mosaic_manager import ZarrMosaicManager, is_zarr_store, zarr_stores
 from .zeiss_mosaic_manager import ZeissMosaicManager
 
 #: Mosaic readers by microscope name (``zarrsmith fuse --microscope``, napari widget).
@@ -14,6 +15,7 @@ MOSAIC_READERS: Dict[str, Type[MosaicManager]] = {
     "luxendo": LuxendoMosaicManager,
     "opera": OperaMosaicManager,
     "zeiss": ZeissMosaicManager,
+    "zarr": ZarrMosaicManager,
 }
 
 
@@ -30,10 +32,13 @@ def detect_microscope(path: str | Path) -> Optional[str]:
 
     * ``"zeiss"``: a ``.czi`` file;
     * ``"opera"``: a Harmony export (``Images/Index.xml``), its ``Images`` folder or the index;
-    * ``"luxendo"``: ``*.lux.h5`` files in ``raw/<stack>/``, in ``<stack>/`` or in the folder.
+    * ``"luxendo"``: ``*.lux.h5`` files in ``raw/<stack>/``, in ``<stack>/`` or in the folder;
+    * ``"zarr"``: an OME-Zarr store, or a folder holding OME-Zarr stores.
 
     Opera is checked first: it takes a few file checks, Luxendo lists folders (slow
-    for an Opera ``Images`` folder of thousands of files on a network drive).
+    for an Opera ``Images`` folder of thousands of files on a network drive). OME-Zarr
+    comes last, so an acquisition folder that also holds converted or fused stores keeps
+    its microscope.
     """
     path = Path(path)
     if path.suffix.lower() == ".czi":
@@ -45,6 +50,8 @@ def detect_microscope(path: str | Path) -> Optional[str]:
         raw = path / "raw" if (path / "raw").is_dir() else path
         if any(raw.glob("*.lux.h5")) or any(raw.glob("*/*.lux.h5")):
             return "luxendo"
+        if is_zarr_store(path) or zarr_stores(path):
+            return "zarr"
     return None
 
 

@@ -253,6 +253,30 @@ def test_batch_row_groups_and_skips():
     assert row["channels"] == "A B" and row["overwrite"] == "true" and row["downsample"] == "4 8 8"
 
 
+def test_batch_row_channel_with_space_round_trips(tmp_path, monkeypatch):
+    """A channel name with a space ('Alexa 488', Opera) is quoted in the CSV and read back whole."""
+    import pandas as pd
+
+    import zarrsmith.cli.zarrsmith as cli
+
+    values ={"channels": ["Alexa 488", "Brightfield"], "groups": ["L"], "projection": "max", "blend": "max",
+              "ds_z": 1, "ds_y": 1, "ds_x": 1, "levels": 1, "workers": 1, "overwrite": False}
+    row = mw.batch_row(input_path="acq", microscope="opera", output="o.zarr", values=values, all_groups=["L"],
+                       skip_ids=[])
+    assert row["channels"] == '"Alexa 488" Brightfield'  # double quotes: Excel drops a leading '
+    csv = tmp_path / "batch.csv"
+    pd.DataFrame([row]).to_csv(csv, index=False)
+    seen = {}
+    monkeypatch.setattr(cli, "mosaic_convert", lambda **kw: seen.update(kw) or True)
+    cli.convert_mosaic_batch(str(csv))
+    assert seen["channels"] == ["Alexa 488", "Brightfield"]
+
+    # what Excel leaves of 'Alexa 488' Brightfield: a clear error naming the cell
+    pd.DataFrame([dict(row, channels="Alexa 488' Brightfield")]).to_csv(csv, index=False)
+    with pytest.raises(ValueError, match="Unbalanced quote in the 'channels' cell"):
+        cli.convert_mosaic_batch(str(csv))
+
+
 def test_widget_leaves_hidden_tiles_blank(app, monkeypatch):
     from napari.components import ViewerModel
 
@@ -620,3 +644,136 @@ def test_batch_row_cameras_and_transforms(tmp_path):
                        all_groups=["(none)"], skip_ids=[], all_cameras=["left", "right"])
     assert row["cameras"] == "" and row["transforms"] == "" and row["transforms_only"] == ""
     assert mw.transforms_choice(Path()) is None and mw.transforms_choice(tmp_path / "missing.json") is None
+
+
+def test_batch_row_register_cameras():
+    values = {"channels": ["A", "B"], "groups": ["(none)"], "cameras": ["left", "right"], "projection": "none (3D)",
+              "blend": "sigmoid", "ds_z": 1, "ds_y": 1, "ds_x": 1, "levels": 1, "workers": 1,
+              "overwrite": False, "transforms": Path(), "transforms_only": False}
+    common = dict(input_path="acq", microscope="luxendo", output="o.zarr", all_groups=["(none)"], skip_ids=[],
+                  all_cameras=["left", "right"])
+    row = mw.batch_row(values=values, **common)  # no registration options (single camera mosaic)
+    assert row["register_cameras"] == row["register_model"] == row["register_channel"] == ""
+    off = {**values, "register_cameras": False, "register_model": "rigid", "register_channel": "A"}
+    assert mw.batch_row(values=off, **common)["register_cameras"] == ""
+    on = {**off, "register_cameras": True}
+    row = mw.batch_row(values=on, **common)
+    assert (row["register_cameras"], row["register_model"], row["register_channel"]) == ("true", "rigid", "A")
+    row = mw.batch_row(values={**on, "register_model": "translation", "register_channel": "all"}, **common)
+    assert (row["register_model"], row["register_channel"]) == ("translation", "all")
+    for column in ("register_cameras", "register_model", "register_channel"):
+        assert column in mw.MOSAIC_BATCH_COLUMNS
+    assert mw.register_options(register_cameras=True, register_model="rigid", register_channel="A",
+                               reference_timepoint=2) == {"model": "rigid", "reference_channel": "A",
+                                                          "reference_timepoint": 2}
+    assert mw.register_options(register_cameras=False, register_model="rigid", register_channel="A") is None
+
+
+def _own_enabled(widget, parent) -> bool:
+    """Enabled as set on the widget itself (the parent section may be disabled)."""
+    return widget.native.isEnabledTo(parent.native)
+
+
+class _SyncWorker:
+    """Stands in for the napari thread worker: runs at ``start()``, in this thread."""
+
+    def __init__(self, fn, *args, **kwargs):
+        self.call, self.done, self.failed = (fn, args, kwargs), [], []
+        self.returned = type("S", (), {"connect": lambda _, f: self.done.append(f)})()
+        self.errored = type("S", (), {"connect": lambda _, f: self.failed.append(f)})()
+
+    def start(self):
+        fn, args, kwargs = self.call
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as e:  # pragma: no cover - reported like the real worker
+            for f in self.failed:
+                f(e)
+            raise
+        for f in self.done:
+            f(result)
+
+
+def test_widget_registers_cameras(app, tmp_path, monkeypatch):
+    """MuVi SPIM: the registration options appear with two cameras, run before the
+    fusion (here: before writing the transforms), go to the batch CSV, and the tiles go
+    back to the stage positions afterwards."""
+    import functools
+
+    import pandas as pd
+    from napari.components import ViewerModel
+
+    from zarrsmith.mosaic_manager import LuxendoMosaicManager, load_transforms
+    from zarrsmith.mosaic_manager import registration
+    from zarrsmith.mosaic_manager.registration import AffineArray
+
+    from .test_muvi_registration import OPTS, _blobs, _right_of
+    from .test_muvi_fusion import _muvi
+
+    viewer = ViewerModel()
+    monkeypatch.setattr(mw, "current_viewer", lambda: viewer)
+    monkeypatch.setattr(mw, "_fuse_worker", lambda *a, **k: _SyncWorker(mw.run_fusion, *a, **k))
+    # the synthetic stack is small: the fine block settings of the registration tests
+    monkeypatch.setattr(registration, "estimate_camera_registration",
+                        functools.partial(registration.estimate_camera_registration, **OPTS))
+
+    dock = mw.mosaic_widget()
+    fake = FakeMosaic(".")
+    dock.state["mosaic"] = fake
+    dock.populate(fake, Path("."))
+    fw = dock.fuse_widget
+    assert fw.register_cameras.native.isHidden()  # one camera: nothing to register
+
+    left = _blobs()
+    acq = _muvi(tmp_path, left=left, right=_right_of(left))
+    m = LuxendoMosaicManager(acq, progress=False)
+    dock.state["mosaic"] = m
+    dock.populate(m, acq)
+    assert not fw.register_cameras.native.isHidden() and not fw.register_cameras.value
+    assert fw.register_channel.value == m.channels[0] and not _own_enabled(fw.register_model, fw)
+    assert list(fw.register_channel.choices) == ["all", *m.channels]
+    fw.fields.value = ["field1"]
+    fw.ds_z.value, fw.ds_y.value, fw.ds_x.value = 1, 1, 1
+    fw.register_cameras.value = True
+    assert _own_enabled(fw.register_model, fw) and "registered on the images first (rigid" in dock.plan_label.text()
+    fw.register_channel.value = "DAPI"
+
+    out = tmp_path / "reg.ome.zarr"
+    fw.output_path.value = out
+    fw.transforms_only.value = True
+    fw()  # registers, then writes the transforms
+    doc = load_transforms(tmp_path / "reg.transforms.json")
+    right = [e for e in doc["tiles"] if e["camera"] == "right"]
+    assert right and all(e["method"] == "registration" and "grid" in e["registration"] for e in right)
+    assert all(e["method"] == "stage" for e in doc["tiles"] if e["camera"] == "left")
+    tile = m.tiles_by_ids(["GFP/1/right"])[0]
+    assert isinstance(tile.data, AffineArray) and dock.state["registered"]
+
+    csv = tmp_path / "b.csv"
+    dock.batch_widget.batch_csv_path.value = csv
+    dock.batch_widget()
+    row = pd.read_csv(csv, dtype=str).fillna("").iloc[0]
+    assert (row["register_cameras"], row["register_model"], row["register_channel"]) == ("true", "rigid", "DAPI")
+    # any later use of the tiles (here the batch export's size estimate) undoes the registration
+    assert not isinstance(tile.data, AffineArray) and not dock.state["registered"]
+
+
+def test_run_fusion_registers_then_fuses(tmp_path):
+    import functools
+
+    from zarrsmith.mosaic_manager import LuxendoMosaicManager, load_transforms
+    from zarrsmith.mosaic_manager import registration
+
+    from .test_muvi_registration import OPTS, _blobs, _right_of
+    from .test_muvi_fusion import _muvi
+
+    left = _blobs()
+    m = LuxendoMosaicManager(_muvi(tmp_path, left=left, right=_right_of(left)), progress=False)
+    tiles = m.field_tiles("field1")
+    register = {"model": "translation", "reference_channel": "DAPI", **OPTS}
+    out = tmp_path / "f.ome.zarr"
+    zm, regs = mw.run_fusion(m, tiles, out, {"ds": (1, 2, 2), "projection": "max", "tile_id": m.tile_id},
+                             register=register)
+    assert list(regs) == [("1", 0, None, "right", "DAPI")] and zm.metadata["axes"] == "cyx"
+    entry = next(e for e in load_transforms(tmp_path / "f.transforms.json")["tiles"] if e["id"] == "DAPI/1/right")
+    assert entry["method"] == "registration"

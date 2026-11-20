@@ -256,6 +256,7 @@ class MosaicManager(ABC):
             {
                 "axes": "zyx",
                 "scales": [t.voxel_size],
+                "translations": dict(zip("zyx", (float(v) for v in t.origin))),
                 "units": (t.units,) * 3,
                 "name": f"{t.channel} tile {i}",
             },
@@ -528,12 +529,16 @@ class MosaicManager(ABC):
         ``transforms`` is a path to a JSON file written by a fusion (see
         :func:`~zarrsmith.mosaic_manager.fusion.transforms_document`) or that document as a
         dict. Every listed tile (matched by :meth:`tile_id` and timepoint) gets the listed
-        ``translation`` as its ``origin`` and the listed ``flip``, in place. Tiles that are
-        not listed keep their stage positions. Returns the document.
+        ``translation`` as its ``origin`` and the listed ``flip``, in place. A tile registered
+        with a rotation (``registration`` with a ``grid``, see :meth:`register_cameras`) is
+        resampled again from its raw data. Tiles that are not listed keep their stage
+        positions. Returns the document.
         """
         from .fusion import load_transforms
+        from .registration import registered_tile
 
         doc = load_transforms(transforms)
+        self.reset_transforms()
         by_key = {(self.tile_id(t), t.timepoint): t for t in self.tiles}
         unknown = []
         for entry in doc["tiles"]:
@@ -541,9 +546,16 @@ class MosaicManager(ABC):
             if t is None:
                 unknown.append(f"{entry['id']} (t={entry['timepoint']})")
                 continue
+            method = entry.get("method") or doc.get("method") or "file"
+            reg = entry.get("registration") or {}
+            if reg.get("grid"):  # rotated: resample the raw data on the recorded grid
+                self._set_placement(t, registered_tile(t, np.array(reg["matrix"]), reg["grid"], method=method))
+                continue
             t.attrs.setdefault("stage_origin", t.origin)
             t.attrs.setdefault("stage_flip", t.flip)
-            t.attrs["transform_method"] = entry.get("method") or doc.get("method") or "file"
+            t.attrs["transform_method"] = method
+            if reg:
+                t.attrs["registration"] = reg
             t.origin = tuple(float(v) + 0.0 for v in entry["translation"])
             t.flip = tuple(bool(v) for v in entry.get("flip", t.flip))
         if unknown:
@@ -554,14 +566,75 @@ class MosaicManager(ABC):
                     listed, doc.get("method", "?"), len(by_key))
         return doc
 
+    @staticmethod
+    def _set_placement(t: Tile, placed: Tile) -> None:
+        """Copy the placement (data, origin, voxel size, flips, attrs) of ``placed`` onto ``t``."""
+        t.data, t.origin, t.voxel_size, t.flip = placed.data, placed.origin, placed.voxel_size, placed.flip
+        t.attrs = placed.attrs
+
+    @staticmethod
+    def _reset_tile(t: Tile) -> None:
+        if "stage_data" in t.attrs:
+            t.data = t.attrs.pop("stage_data")
+        if "stage_origin" in t.attrs:
+            t.origin = tuple(t.attrs.pop("stage_origin"))
+        if "stage_flip" in t.attrs:
+            t.flip = tuple(t.attrs.pop("stage_flip"))
+        t.attrs.pop("transform_method", None)
+        t.attrs.pop("registration", None)
+
+    def register_cameras(
+        self,
+        tiles: Optional[Sequence["Tile | str"]] = None,
+        field: "str | Sequence[str] | None" = None,
+        reference_camera: Optional[str] = None,
+        reference_channel: Optional[str] = None,
+        reference_timepoint=None,
+        model: str = "rigid",
+        **options,
+    ) -> Dict[tuple, Any]:
+        """Register the views of opposing cameras (MuVi SPIM) on the images, around the
+        plane where the fusion hands over from one camera to the other (see
+        :mod:`~zarrsmith.mosaic_manager.registration`).
+
+        The tiles of the other cameras are registered in place onto the reference camera
+        (default: the first camera), stack by stack, by a translation and a rotation
+        (``model="rigid"``, default) or a translation (``"translation"``). The transform is
+        measured on ``reference_channel`` (default: the first channel; a nuclear stain works
+        best) at ``reference_timepoint`` (default: the first timepoint) and applied to every
+        channel and timepoint; ``"all"`` registers every channel (or timepoint) on its own
+        images instead, see :func:`~zarrsmith.mosaic_manager.registration.register_cameras`.
+        Pass the fusion's ``reference_timepoint``, so the registration follows its geometry.
+        A translation moves the tiles; a rotation also resamples their data on the reference
+        tile's grid, lazily. Tiles start from their stage placement (an earlier registration
+        or transforms file is undone). A following :meth:`fuse` uses the registration and its
+        transforms file records it (``method`` ``"registration"``), so it can be reused with
+        :meth:`apply_transforms` without measuring again; :meth:`reset_transforms` puts the
+        tiles back at the stage positions.
+
+        ``tiles`` and ``field`` select the tiles as for :meth:`fuse` (default: every tile).
+        ``options`` go to :func:`~zarrsmith.mosaic_manager.registration.estimate_camera_registration`.
+        Returns the :class:`~zarrsmith.mosaic_manager.registration.CameraRegistration` of
+        every ``(stack, timepoint, group, camera, channel)`` measured.
+        """
+        from .registration import register_cameras
+
+        use = self.tiles if tiles is None and field is None else self.fusion_tiles(tiles, field)
+        for t in use:
+            self._reset_tile(t)
+        moved, results = register_cameras(use, reference_camera=reference_camera,
+                                          reference_channel=reference_channel,
+                                          reference_timepoint=reference_timepoint, model=model, **options)
+        for t, m in zip(use, moved):
+            if m is not t:
+                self._set_placement(t, m)
+        return results
+
     def reset_transforms(self) -> None:
-        """Undo :meth:`apply_transforms`: every tile back at the position (and flips) of the reader."""
+        """Undo :meth:`apply_transforms` and :meth:`register_cameras`: every tile back at the
+        position (flips and data) of the reader."""
         for t in self.tiles:
-            if "stage_origin" in t.attrs:
-                t.origin = tuple(t.attrs.pop("stage_origin"))
-            if "stage_flip" in t.attrs:
-                t.flip = tuple(t.attrs.pop("stage_flip"))
-            t.attrs.pop("transform_method", None)
+            self._reset_tile(t)
 
     def _resolve_tiles(self, tiles) -> List[Tile]:
         """``Tile`` objects of a list mixing tiles and tile ids."""

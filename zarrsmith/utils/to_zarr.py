@@ -10,6 +10,7 @@ import zarr
 
 from .axes import normalize_axes, normalize_data_type, spatial_axes_in_order
 from .output_path import check_output_path
+from .translation import drop_axes, normalize_translations
 from .ngff import (
     ZarrWriteConfig,
     _resolve_format,
@@ -84,6 +85,7 @@ def _drop_singleton_axes(
             out["scales"] = [tuple(s[i] for i in keep_spatial) for s in out["scales"]]
         if out.get("units"):
             out["units"] = tuple(out["units"][i] for i in keep_spatial)
+        out["translations"] = drop_axes(normalize_translations(out.get("translations"), axes), dropped_axes)
     if "t" in dropped_axes:
         out.pop("time_increment", None)
         out.pop("time_increment_unit", None)

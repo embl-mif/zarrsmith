@@ -52,8 +52,9 @@ from .tile import Tile, series_keys
 
 logger = logging.getLogger("zarrsmith")
 
-BLENDS = ("sigmoid", "max", "sum", "midline")
+BLENDS = ("sigmoid", "max", "sum", "midline", "none")
 PROJECTIONS = (None, "max", "sum")
+DATA_TYPES = ("intensity", "label")
 
 #: Default steepness of the ``sigmoid`` transition (see :func:`fuse_tiles`).
 SIGMOID_STEEPNESS = 4.0
@@ -83,6 +84,8 @@ ALL_TIMEPOINTS = "all"
 
 #: Root attribute recording the timepoints and the reference of a fused timelapse.
 PROVENANCE_KEY = "zarrsmith_fusion"
+#: Root attribute of a fused image: the files or folders its tiles were read from.
+SOURCES_KEY = "zarrsmith_sources"
 
 #: ``format`` and ``version`` of the transforms files (see :func:`transforms_document`).
 TRANSFORMS_FORMAT = "zarrsmith-fusion-transforms"
@@ -159,9 +162,20 @@ def _downsample(block: np.ndarray, ds: Tuple[int, int, int]) -> np.ndarray:
     return r.mean(axis=(1, 3, 5), dtype=np.float32)
 
 
+def _subsample(block: np.ndarray, ds: Tuple[int, ...]) -> np.ndarray:
+    """Downsample a block whose shape is a multiple of ``ds`` by keeping the first voxel
+    of every ``ds`` block, unchanged (``blend="none"``: label values are never mixed)."""
+    return block[tuple(slice(None, None, d) for d in ds)]
+
+
 def _cast(arr: np.ndarray, dtype: np.dtype) -> np.ndarray:
     """Cast a float array to ``dtype``, rounding and clipping for integers."""
     dtype = np.dtype(dtype)
+    if arr.dtype == dtype:
+        return arr
+    if np.issubdtype(dtype, np.integer) and np.issubdtype(arr.dtype, np.integer):
+        info = np.iinfo(dtype)
+        return np.clip(arr, info.min, info.max).astype(dtype)
     if np.issubdtype(dtype, np.integer):
         info = np.iinfo(dtype)
         return np.clip(np.rint(arr), info.min, info.max).astype(dtype)
@@ -332,7 +346,7 @@ def _layout_blocks(index: int, channel: str, placed: Sequence[_Placed], yx: Tupl
             for j in ranges[1]:
                 for n in ranges[2]:
                     cells.setdefault((j, n, k), []).append(i)
-    midline = (axis, _midline_ranges(placed, axis, key, order)) if blend == "midline" else None
+    midline = (axis, _midline_ranges(placed, axis, key, order)) if blend in ("midline", "none") else None
     transitions = (axis, _sigmoid_transitions(placed, axis, key, order)) if blend == "sigmoid" else None
     return [(index, channel,
              (j * cy, min((j + 1) * cy, yx[0]), n * cx, min((n + 1) * cx, yx[1])),
@@ -346,9 +360,12 @@ def _read_block(job) -> np.ndarray:
 
     Returns float32 ``(h, w)`` for projections, ``(d, h, w)`` otherwise. Positions are
     those of the tile flipped along ``Tile.flip``: the matching data range is read and
-    mirrored.
+    mirrored. With ``exact`` (``blend="none"``) the values keep the tile dtype and are
+    downsampled by keeping one voxel per block instead of the mean.
     """
-    p, region, zrange, ds, projection = job
+    p, region, zrange, ds, projection = job[:5]
+    exact = len(job) > 5 and job[5]
+    shrink = _subsample if exact else _downsample
     k0, k1, j0, j1, i0, i1 = _overlap(p, region, zrange)
     oz, oy, ox = p.offset
     dz, dy, dx = ds
@@ -376,13 +393,13 @@ def _read_block(job) -> np.ndarray:
             else:
                 part = raw.sum(axis=0, dtype=np.float32)
                 reduced = part if reduced is None else reduced + part
-        return _downsample(reduced[None], (1, dy, dx))[0]
+        return shrink(reduced[None], (1, dy, dx))[0]
 
-    out = np.empty((k1 - k0, j1 - j0, i1 - i0), np.float32)
+    out = np.empty((k1 - k0, j1 - j0, i1 - i0), p.tile.dtype if exact else np.float32)
     step = max(1, _SLAB_PLANES // dz)
     for a in range(k0, k1, step):
         b = min(a + step, k1)
-        out[a - k0 : b - k0] = _downsample(read((a - oz) * dz, (b - oz) * dz), ds)
+        out[a - k0 : b - k0] = shrink(read((a - oz) * dz, (b - oz) * dz), ds)
     return out
 
 
@@ -411,7 +428,7 @@ def _merge_groups(canvases, midline, region, flat: bool, shape, z0: int = 0) -> 
     bshape = [1] * len(shape)
     bshape[arr_axis] = length
 
-    result = np.zeros(shape, np.float32)
+    result = np.zeros(shape, next(iter(canvases.values()))[0].dtype)
     filled = np.zeros(shape, bool)
     for g, (lo, hi) in ranges.items():
         if g not in canvases:
@@ -625,24 +642,40 @@ def _fuse_region(r: _Region, arr, ds, projection, blend, dtype,
     z0, z1 = r.zrange
     shape = (y1 - y0, x1 - x0) if flat else (z1 - z0, y1 - y0, x1 - x0)
     sigmoid = blend == "sigmoid"
+    exact = blend == "none"
     canvases: Dict[Optional[str], tuple] = {}
     filled: Dict[Optional[str], List[tuple]] = {}  # sigmoid: canvas slices of the tiles added so far
+    best: Dict[Optional[str], np.ndarray] = {}  # none: log border distance of the tile kept at each voxel
     for p in r.placed:
-        key = getattr(p.tile, r.key) if blend in ("midline", "sigmoid") else None
+        key = getattr(p.tile, r.key) if blend in ("midline", "sigmoid", "none") else None
         if key not in canvases:
-            canvases[key] = (_new_softmax_state(shape) if sigmoid
-                             else (np.zeros(shape, np.float32), np.zeros(shape, bool)))
+            if sigmoid:
+                canvases[key] = _new_softmax_state(shape)
+            else:
+                canvases[key] = (np.zeros(shape, np.dtype(dtype) if exact else np.float32), np.zeros(shape, bool))
+            if exact:
+                best[key] = np.full(shape, -np.inf, np.float32)
         sl = _target(p, r.bounds, r.zrange, flat)
-        blk = _read_block((p, r.bounds, r.zrange, ds, projection))
+        blk = _read_block((p, r.bounds, r.zrange, ds, projection, exact))
         if sigmoid:
             _sigmoid_add(canvases[key], sl, blk, _tile_log_weight(p, r.bounds, r.zrange, flat, steepness),
                          filled.setdefault(key, []))
+        elif exact:
+            # The voxel goes to the tile whose border is farthest from it (the tile with the
+            # largest sigmoid weight, i.e. a sigmoid of infinite steepness); ties keep the
+            # tile added first. Values are copied, never mixed.
+            acc, cov = canvases[key]
+            lw = _tile_log_weight(p, r.bounds, r.zrange, flat, 1.0)
+            wins = lw > best[key][sl]
+            np.copyto(acc[sl], _cast(blk, acc.dtype), where=wins)
+            np.copyto(best[key][sl], lw, where=wins)
+            cov[sl] = True
         else:
             acc, cov = canvases[key]
             _combine(acc[sl], cov[sl], blk, blend)
         del blk
 
-    if flat and r.key == "camera" and len(canvases) > 1:
+    if flat and r.key == "camera" and len(canvases) > 1 and not exact:
         # projected views of opposing cameras cannot be blended along their (projected) detection axis
         merged = _merge_views(canvases, sigmoid, shape, projection)
     elif sigmoid:
@@ -764,12 +797,24 @@ def _write_display_windows(path, windows: Sequence[Tuple[float, float]]) -> None
     root.attrs.update({"ome": attrs["ome"]} if nested else {"omero": omero})
 
 
+def tile_sources(tiles: Sequence[Tile]) -> List[str]:
+    """Files or folders the ``tiles`` are read from (``attrs["path"]``, else ``attrs["folder"]``)."""
+    found = {str(t.attrs.get("path") or t.attrs.get("folder")) for t in tiles
+             if t.attrs.get("path") or t.attrs.get("folder")}
+    return sorted(found)
+
+
 def _write_provenance(path, plan: "FusionPlan") -> None:
     """Record which acquired timepoints the output's ``t`` axis holds and the reference."""
     zarr.open_group(str(path), mode="r+").attrs[PROVENANCE_KEY] = {
         "timepoints": list(plan.timepoints),
         "reference_timepoint": plan.reference_timepoint,
     }
+
+
+def _write_sources(path, plan: "FusionPlan") -> None:
+    """Record the files or folders of the fused tiles (:data:`SOURCES_KEY`)."""
+    zarr.open_group(str(path), mode="r+").attrs[SOURCES_KEY] = tile_sources(plan.tiles)
 
 
 def display_windows(path) -> List[Tuple[float, float]]:
@@ -784,6 +829,23 @@ def display_windows(path) -> List[Tuple[float, float]]:
 # ---------------------------------------------------------------------------
 # planning
 # ---------------------------------------------------------------------------
+
+def fused_position(plan: "FusionPlan") -> Dict[str, float]:
+    """Position of voxel ``[0, 0, 0]`` of the fused image, the NGFF ``translation`` of the output.
+
+    The fused grid starts at ``plan.origin``: the corner of the fused tiles (the field,
+    or the given tiles), moved to the ``crop`` when there is one, in the frame the
+    mosaic reader places its tiles in. An output voxel is the mean of ``ds`` input
+    voxels, so its centre is ``(ds - 1) / 2`` input voxels further. A projection has no
+    ``z`` axis, hence no ``z`` position.
+    """
+    vox = np.array(plan.tiles[0].voxel_size, float)
+    centre = np.array(plan.origin, float) + (np.array(plan.ds) - 1) / 2 * vox
+    position = dict(zip("zyx", (float(v) for v in centre)))
+    if "z" not in plan.axes:
+        position.pop("z")
+    return position
+
 
 @dataclass
 class FusionPlan:
@@ -1001,6 +1063,9 @@ def plan_fusion(
         raise ValueError("midline_axis must be 'x', 'y' or 'z'.")
     if flat and midline_axis == "z":
         raise ValueError("midline_axis='z' is not available for projections.")
+    if blend == "none" and flat and blend_by == "camera":
+        raise ValueError("blend='none' cannot merge the projections of several cameras: fuse one camera "
+                         "at a time (cameras=...) or fuse a 3D volume.")
     if blend_by == "camera" and not flat:
         order = _camera_order(tiles, "zyx".index(midline_axis))
 
@@ -1089,7 +1154,7 @@ def _blend_groups(tiles: Sequence[Tile], blend: str) -> Tuple[str, Dict]:
         return "group", {}
     if None in cameras:
         raise ValueError("Some tiles have a camera and others not: they cannot be fused together.")
-    if blend in ("sigmoid", "midline") and any(t.group is not None for t in tiles):
+    if blend in ("sigmoid", "midline", "none") and any(t.group is not None for t in tiles):
         raise ValueError("Tiles come from several cameras and several groups (e.g. illumination sides): "
                          "blending both is not supported yet. Fuse one group at a time (--groups).")
     return "camera", {}
@@ -1181,7 +1246,13 @@ def transforms_document(plan: FusionPlan, tile_id: Optional[Callable[[Tile], str
       position: with a reference timepoint, the tiles of every timepoint are placed where
       their reference tile is;
     * ``affine`` (4 x 4) maps a voxel index ``(z, y, x, 1)`` of the raw tile data to its
-      position as fused (``placed_at``, with the flips).
+      position as fused (``placed_at``, with the flips, and the rotation of a registration);
+    * ``registration`` (tiles registered on the images, see
+      :meth:`MosaicManager.register_cameras <zarrsmith.mosaic_manager.MosaicManager.register_cameras>`):
+      ``matrix``, the 4 x 4 transform from a reference position to the stage-placed tile,
+      and for a rotation ``grid``, the grid the raw data is resampled on (``origin``,
+      ``voxel_size``, ``shape``, ``flip``: ``translation``, ``shape`` and ``flip`` above are
+      then those of the resampled tile, ``source_shape`` the raw one).
     """
     tile_id = tile_id or _default_tile_id
     out_vox = np.array(plan.tiles[0].voxel_size) * np.array(plan.ds)
@@ -1199,7 +1270,10 @@ def transforms_document(plan: FusionPlan, tile_id: Optional[Callable[[Tile], str
                     v = t.voxel_size[a]
                     affine[a, a] = -v if t.flip[a] else v
                     affine[a, 3] = placed_at[a] + ((t.shape[a] - 1) * v if t.flip[a] else 0.0)
-                entries.append({
+                resampled = getattr(t.data, "matrix", None) is not None and "registration" in t.attrs
+                if resampled:  # AffineArray: raw voxel -> resampled voxel -> placed
+                    affine = affine @ np.linalg.inv(t.data.matrix)
+                entry = {
                     "id": tile_id(t),
                     "timepoint": int(tp),
                     "channel": t.channel,
@@ -1217,7 +1291,12 @@ def transforms_document(plan: FusionPlan, tile_id: Optional[Callable[[Tile], str
                     "offset": [int(v) for v in p.offset],
                     "placed_at": [float(v) for v in placed_at],
                     "affine": affine.tolist(),
-                })
+                }
+                if "registration" in t.attrs:
+                    entry["registration"] = t.attrs["registration"]
+                    if resampled:
+                        entry["source_shape"] = [int(v) for v in t.data.source.shape]
+                entries.append(entry)
     methods = sorted({e["method"] for e in entries})
     return {
         "format": TRANSFORMS_FORMAT,
@@ -1279,6 +1358,7 @@ def fuse_tiles(
     workers: int = 1,
     executor: str = "auto",
     out_dtype=None,
+    data_type: str = "intensity",
     midline_axis: Optional[str] = None,
     sigmoid_steepness: float = SIGMOID_STEEPNESS,
     timepoints: Optional[Sequence[int]] = None,
@@ -1320,7 +1400,14 @@ def fuse_tiles(
         * ``"sum"`` -- add the values, so overlaps show up as brighter bands;
         * ``"midline"`` -- ``max`` within each tile ``group``; where groups
           overlap, the image switches sharply from one group to the next at the
-          middle of their overlap, along ``midline_axis``.
+          middle of their overlap, along ``midline_axis``;
+        * ``"none"`` -- no blending: every voxel is copied unchanged from exactly
+          one tile, the one whose border is farthest from it (so two tiles of the
+          same size meet in the middle of their overlap; on a tie the earlier
+          tile wins). Values keep the tile dtype (no float32 round trip) and ``ds``
+          keeps one voxel per block instead of the mean, so label IDs are never
+          mixed or rounded. Groups and cameras switch sharply as for
+          ``"midline"``. Required for ``data_type="label"``.
 
         Tiles of several **cameras** (``Tile.camera``, e.g. the opposing views of a
         MuVi SPIM) are blended like groups, one view per camera: the tiles of each
@@ -1357,8 +1444,13 @@ def fuse_tiles(
         threads otherwise). h5py serialises reads inside one process, so processes
         are what actually speeds up reading from HDF5 tiles.
     out_dtype
-        Output dtype. Default: input dtype for ``sigmoid``/``max``/``midline``,
+        Output dtype. Default: input dtype for ``sigmoid``/``max``/``midline``/``none``,
         ``float32`` for ``sum``.
+    data_type
+        ``"intensity"`` (default) or ``"label"``: write the output as a label image
+        (segmentation, e.g. tiles of label IDs that already agree across tiles). Labels
+        need ``blend="none"`` and an integer dtype; their pyramid levels sample voxels
+        instead of averaging them, and no display window is written.
     midline_axis
         ``"x"``, ``"y"`` or ``"z"``: axis along which groups (or cameras) are separated
         (``midline`` and ``sigmoid``). Default: ``"z"`` for the views of several cameras
@@ -1426,7 +1518,11 @@ def fuse_tiles(
     areas, so viewers open the result with a usable contrast; see :func:`display_windows`.
 
     When ``tiles`` hold several timepoints, the root attribute ``zarrsmith_fusion``
-    records the acquired timepoints of the output's ``t`` axis and the reference.
+    records the acquired timepoints of the output's ``t`` axis and the reference. The root
+    attribute ``zarrsmith_sources`` lists the files or folders of the fused tiles
+    (:class:`~zarrsmith.mosaic_manager.ZarrMosaicManager` uses it to leave out a fusion of
+    its own stores). The NGFF ``translation`` is the position of the fused field (see
+    :func:`fused_position`).
 
     Use :func:`plan_fusion` with the same arguments to get the output shape and
     size without reading or writing anything.
@@ -1444,10 +1540,16 @@ def fuse_tiles(
         raise ValueError("executor must be 'auto', 'process' or 'thread'.")
     if not sigmoid_steepness > 0:
         raise ValueError(f"sigmoid_steepness must be positive, got {sigmoid_steepness!r}.")
+    if data_type not in DATA_TYPES:
+        raise ValueError(f"data_type must be one of {DATA_TYPES}, got {data_type!r}.")
+    if data_type == "label" and blend != "none":
+        raise ValueError(f"Labels must be fused with blend='none' (blend={blend!r} would mix label IDs).")
     _check_write_options(write_options)
     plan = plan_fusion(tiles, ds=ds, projection=projection, blend=blend, channels=channels,
                        crop=crop, skip=skip, out_dtype=out_dtype, midline_axis=midline_axis,
                        timepoints=timepoints, reference_timepoint=reference_timepoint)
+    if data_type == "label" and not np.issubdtype(plan.dtype, np.integer):
+        raise ValueError(f"Labels need an integer dtype, got {plan.dtype} (set out_dtype).")
     check_single_field([p.tile for ps in plan.layout.values() for p in ps])
     blend, out_dtype, names, ds = plan.blend, plan.dtype, plan.channels, plan.ds
     flat = projection is not None
@@ -1521,6 +1623,7 @@ def fuse_tiles(
             size=[plan.shape],
             scales=[plan.scale],
             units=(plan.tiles[0].units,) * len(plan.scale),
+            translations=fused_position(plan),
             channels=[ChannelInfo(
                 (channel_names or names)[i],
                 None if channel_colors is None else channel_colors[i],
@@ -1529,15 +1632,17 @@ def fuse_tiles(
             axes=plan.axes,
             chunksize=[chunks],
             name=name or "fused mosaic",
-            data_type="intensity",
+            data_type=data_type,
         )
         dataset = ArrayManager(da.from_zarr(str(tmp)).rechunk(chunks), metadata)
         dataset.build_pyramid(num_levels=max(1, int(levels)),
                               downscale_factor=_spatial_factor(downscale_factor, flat))
         dataset.to_zarr(str(out), overwrite=overwrite, progress=progress, **write_options)
-        # Sensible display range for viewers (the writer's default is the whole dtype range).
-        _write_display_windows(out, windows)
-        logger.info("Display window per channel: %s", windows)
+        if data_type == "intensity":
+            # Sensible display range for viewers (the writer's default is the whole dtype range).
+            _write_display_windows(out, windows)
+            logger.info("Display window per channel: %s", windows)
+        _write_sources(out, plan)
         if plan.n_available > 1:
             _write_provenance(out, plan)
     finally:

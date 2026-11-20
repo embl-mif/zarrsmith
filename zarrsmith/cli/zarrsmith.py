@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -621,12 +622,16 @@ def mosaic_convert(
     reference_timepoint: Union[int, str, None] = None,
     midline_axis: Optional[str] = None,
     out_dtype: Optional[str] = None,
+    data_type: str = "intensity",
     read_workers: int = 4,
     temp_dir: Optional[str] = None,
     overwrite: bool = False,
     flatfield: bool = True,
     transforms: Optional[str] = None,
     transforms_only: bool = False,
+    register_cameras: bool = False,
+    register_channel: Optional[str] = None,
+    register_model: str = "rigid",
 ):
     """Fuse a mosaic into an OME-Zarr image (CLI helper for ``zarrsmith fuse``).
 
@@ -647,7 +652,12 @@ def mosaic_convert(
     :func:`~zarrsmith.mosaic_manager.default_transforms_path` of ``zarr_path`` before
     fusing; with ``transforms_only`` nothing else is done. ``transforms`` is such a file
     to place the tiles with instead of the stage positions (its reference timepoint is
-    used unless ``reference_timepoint`` is given).
+    used unless ``reference_timepoint`` is given). ``register_cameras`` registers the views
+    of opposing cameras on the images before fusing (``register_model`` ``"rigid"`` or
+    ``"translation"``), measured on the reference channel ``register_channel`` (default: the
+    first; ``"all"``: every channel) at the reference timepoint (every timepoint with
+    ``reference_timepoint="all"``) and applied to the others, see :meth:`MosaicManager.register_cameras
+    <zarrsmith.mosaic_manager.MosaicManager.register_cameras>`.
     """
     from zarrsmith.mosaic_manager import (default_transforms_path, fuse_tiles, plan_fusion, reader_options,
                                           transforms_document, write_transforms)
@@ -698,6 +708,17 @@ def mosaic_convert(
         use = [t for t in use if str(t.camera) in wanted]
         if not use:
             raise ValueError(f"No tile of cameras {sorted(wanted)}; available: {mosaic.cameras}.")
+
+    if register_cameras and parse_bool(register_cameras):
+        if len({t.camera for t in use}) < 2:
+            print("--register_cameras: the fused tiles come from one camera, nothing to register.")
+        else:
+            model = register_model or "rigid"
+            print(f"\n--->Registering the camera views ({model}, at the camera handover)")
+            results = mosaic.register_cameras(use, reference_channel=register_channel or None,
+                                              reference_timepoint=reference_timepoint, model=model)
+            for r in results.values():
+                print(f"\t{r.summary()}")
 
     skip = mosaic.tiles_by_ids(list(skip_tiles)) if skip_tiles else None
     if skip:
@@ -767,6 +788,7 @@ def mosaic_convert(
         downscale_factor=factor,
         workers=int(read_workers),
         out_dtype=out_dtype,
+        data_type=data_type,
         midline_axis=midline_axis,
         sigmoid_steepness=SIGMOID_STEEPNESS if sigmoid_steepness is None else float(sigmoid_steepness),
         timepoints=timepoints,
@@ -796,6 +818,17 @@ def convert_mosaic_single(args):
         raise SystemExit(1)
 
 
+def _split_names(cell, column: str) -> List[str]:
+    """Space separated names of a batch CSV cell; quote a name with spaces: "Alexa 488" Brightfield."""
+    try:
+        return shlex.split(str(cell))
+    except ValueError:
+        raise ValueError(
+            f"Unbalanced quote in the {column!r} cell {str(cell)!r} of the batch CSV. Quote names with spaces "
+            f"with double quotes, e.g. \"Alexa 488\" Brightfield (Excel drops a leading ' when it saves)."
+        ) from None
+
+
 def convert_mosaic_batch(args):
     """Runmode to fuse a batch of mosaics listed in a CSV file."""
     csv_path = getattr(args, "input_file", args)  # parsed arguments or a path
@@ -816,14 +849,16 @@ def convert_mosaic_batch(args):
         for key in ("downsample", "read_downsample"):  # read_downsample: the earlier column name
             if key in columns and _present(v.get(key)):
                 kwargs["read_downsample"] = _int_triplet(str(v[key]))
-        if "transforms_only" in columns and _present(v.get("transforms_only")):
-            kwargs["transforms_only"] = parse_bool(v["transforms_only"])
-        for key in ("projection", "blend", "midline_axis", "out_dtype", "temp_dir", "transforms"):
+        for key in ("transforms_only", "register_cameras"):
+            if key in columns and _present(v.get(key)):
+                kwargs[key] = parse_bool(v[key])
+        for key in ("projection", "blend", "midline_axis", "out_dtype", "data_type", "temp_dir", "transforms",
+                    "register_model", "register_channel"):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = str(v[key]).strip()
         for key in ("channels", "groups", "cameras", "fields", "tiles", "skip_tiles"):
             if key in columns and _present(v.get(key)):
-                kwargs[key] = str(v[key]).split()
+                kwargs[key] = _split_names(v[key], key)
         # float: pandas reads a number in a column with empty cells as 3.0
         if "timepoints" in columns and _present(v.get("timepoints")):
             kwargs["timepoints"] = [int(float(t)) for t in str(v["timepoints"]).split()]
@@ -1098,8 +1133,88 @@ def resample_batch(args):
     _warn_rows_skipped(skipped)
 
 
+# ---------------------------------------------------------------------------
+# Empty stores and in-place pyramids: allocate / pyramid
+# ---------------------------------------------------------------------------
+
+def _single_or_tuple(values):
+    """A one-value CLI list as a scalar, else a tuple (``None`` stays ``None``)."""
+    if values is None:
+        return None
+    values = list(values)
+    return values[0] if len(values) == 1 else tuple(values)
+
+
+def allocate_single(args):
+    """Runmode creating an empty OME-Zarr image from a template or an explicit geometry."""
+    from zarrsmith.utils.allocate import allocate_zarr
+
+    _refuse_output(args.out, overwrite=args.overwrite, input_path=args.template)
+    translation = args.translation
+    if translation is not None:
+        translation = True if len(translation) == 0 else tuple(translation)
+    compression = _compression_kwargs(args.compressor, args.compressor_level)
+    units = None if args.units is None else (args.units[0] if len(args.units) == 1 else tuple(args.units))
+    root = allocate_zarr(
+        args.out,
+        template=args.template,
+        size=args.size,
+        axes=args.axes,
+        scale=_single_or_tuple(args.scale),
+        units=units,
+        time_increment=args.time_increment,
+        dtype=args.dtype,
+        data_type=args.data_type,
+        channel_names=args.channel_names,
+        channel_colors=args.channel_colors,
+        num_channels=args.num_channels,
+        crop=args.crop,
+        chunk_size=args.chunk_size,
+        shards=_normalize_shards(args.shards),
+        shard_target_mb=args.shard_target_mb,
+        num_levels=args.num_levels,
+        downscale_factor=_single_or_tuple(args.downscale_factor),
+        start_level=args.start_level,
+        translation=translation,
+        zarr_format=args.zarr_format,
+        extra_attributes=args.attrs,
+        name=args.name,
+        overwrite=args.overwrite,
+        **compression,
+    )
+    level0 = root["0"]
+    print(f"Created {args.out}: zarr v{root.metadata.zarr_format}, shape {tuple(level0.shape)}, "
+          f"dtype {level0.dtype}, chunks {tuple(level0.chunks)}, shards {level0.shards}")
+
+
+def _pyramid_groups(z, groups) -> List[Optional[str]]:
+    """Group paths of ``zarrsmith pyramid --group`` (``None`` is the root image)."""
+    if not groups:
+        return [None]
+    if any(str(g).lower() == "all" for g in groups):
+        return [None] + list(z.groups) + [f"labels/{name}" for name in z.labels]
+    return [None if g in ("/", "") else g for g in groups]
+
+
+def pyramid_single(args):
+    """Runmode building the pyramid of an OME-Zarr image in place."""
+    z = mm.ZarrManager(path=str(args.zarr_path), mode="r+")
+    for group in _pyramid_groups(z, args.group):
+        print(f"\n--->Building the pyramid of {args.zarr_path}{'' if group is None else '/' + group}")
+        z.populate_pyramid(
+            group=group,
+            num_levels=args.num_levels,
+            downscale_factor=_single_or_tuple(args.downscale_factor),
+            method=args.method,
+            start_level=args.start_level,
+            num_workers=args.num_workers,
+        )
+    print(f"Saved {args.zarr_path}")
+
+
 def main(argv=None):
-    """Entry point of the ``zarrsmith`` command: ``convert``, ``fuse``, ``chromatic-shift`` or ``resample``."""
+    """Entry point of the ``zarrsmith`` command: ``convert``, ``fuse``, ``chromatic-shift``, ``resample``,
+    ``allocate`` or ``pyramid``."""
     args = _parse_arguments(argv)
     if args.renamed_to:
         print(f"Note: `zarrsmith {args.command}` is now `{args.renamed_to}`; the old name still works for now.",
@@ -1113,6 +1228,8 @@ def main(argv=None):
         "chromatic_shift_batch": chromatic_shift_batch,
         "resample": resample_single,
         "resample_batch": resample_batch,
+        "allocate": allocate_single,
+        "pyramid": pyramid_single,
     }
     runners[args.mode](args)
 

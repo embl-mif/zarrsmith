@@ -5,6 +5,7 @@ from typing import Optional, Sequence, Union
 import dask.array as da
 
 from .axes import index_list_from_selection, normalize_axes, selection_length_and_spacing, spatial_axes_in_order
+from .translation import normalize_translations, shifted
 
 Selection = Optional[Union[int, slice, Sequence[int]]]
 
@@ -94,6 +95,19 @@ def subset_metadata(
         if axis_map[ax] is not None:
             new_scales[scale_index] *= spacing_by_axis.get(ax, 1)
     new_metadata["scales"] = [tuple(new_scales)]
+
+    # The first kept voxel becomes voxel 0: move the origin there.
+    translations = normalize_translations(metadata.get("translations"), axes)
+    if translations is not None:
+        offsets = {}
+        for scale_index, ax in enumerate(spatial_axes):
+            selection = axis_map[ax]
+            if selection is None:
+                continue
+            indices = index_list_from_selection(selection, shape[axes.index(ax)])
+            if indices:
+                offsets[ax] = indices[0] * old_scales[scale_index]
+        new_metadata["translations"] = [shifted(translations[0], offsets)]
 
     if C is not None and "c" in axes:
         c_axis = axes.index("c")

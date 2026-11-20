@@ -9,10 +9,11 @@ A mosaic manager is different from a [microscope manager](readers.md): a `Micros
 | `LuxendoMosaicManager` | raw Luxendo acquisitions (`raw/<stack>/Cam_*.lux.h5` + `.json`), including the two cameras of a [MuVi SPIM](#muvi-spim-two-opposing-cameras) | available |
 | `OperaMosaicManager` | Opera Phenix / Operetta Harmony exports (`Images/Index.xml` + one TIFF per plane) | available |
 | `ZeissMosaicManager` | Zeiss tile scans (one `.czi` file) | available |
+| `ZarrMosaicManager` | a folder of [OME-Zarr stores](#ome-zarr-stores-any-microscope) from any microscope, each placed at its NGFF translation | available |
 
-These readers are for the **raw** tiles. Data already fused by the vendor software is read with `LuxendoManager`, `OperaManager` (Harmony's `stitchresult/*.ome.tiff`) and `ZeissManager`.
+The first three readers are for the **raw** tiles. Data already fused by the vendor software is read with `LuxendoManager`, `OperaManager` (Harmony's `stitchresult/*.ome.tiff`) and `ZeissManager`.
 
-Every reader first checks that the folder is not another microscope's: a Harmony export (`Images/Index.xml`) opened with `LuxendoMosaicManager`, or a Luxendo acquisition (`*.lux.h5`) opened with `OperaMosaicManager`, stops at once with a `WrongReaderError` naming the right reader. `detect_microscope(path)` returns `"zeiss"` (a `.czi` file), `"opera"`, `"luxendo"` or `None`; `zarrsmith fuse` uses it when `--microscope` is not given, and the napari widget switches its *Microscope* choice to the detected one.
+Every reader first checks that the folder is not another microscope's: a Harmony export (`Images/Index.xml`) opened with `LuxendoMosaicManager`, or a Luxendo acquisition (`*.lux.h5`) opened with `OperaMosaicManager`, stops at once with a `WrongReaderError` naming the right reader. `detect_microscope(path)` returns `"zeiss"` (a `.czi` file), `"opera"`, `"luxendo"`, `"zarr"` (an OME-Zarr store or a folder of them, checked last) or `None`; `zarrsmith fuse` uses it when `--microscope` is not given, and the napari widget switches its *Microscope* choice to the detected one.
 
 A runnable walk-through with synthetic data is in [examples/10_mosaic_fusion.ipynb](https://github.com/embl-mif/zarrsmith/blob/main/examples/10_mosaic_fusion.ipynb).
 
@@ -58,7 +59,27 @@ zm = mosaic.fuse("sample0.ome.zarr", field="field0", ds=(1, 4, 4))   # both came
 - **Blending the cameras.** The tiles of each camera are fused first, e.g. tiles `x00` and `x01` across their overlap in y, exactly as for any mosaic. Then the two views are blended along z, the detection axis: each camera gets the side of the stack it images sharply, the one its `detection_directions` points to (left: high z, right: low z). The switch follows the `sigmoid` of the other blends, over the whole depth and centred in the middle of the stack (`blend="midline"`: a sharp switch there). `plan.summary()` shows it as `2 cameras (blended along z, right -> left)`.
 - **Projections.** The views of several cameras are merged with the maximum (`projection="max"`) or the mean (`"sum"`), since they cannot be blended along z once projected.
 - **Selection.** `--cameras left` (CLI) or the *cameras* selector (napari) fuses only some cameras. Tile ids end with the camera (`DAPI/0-x00-y00/right`); `DAPI/0-x00-y00` still names both cameras, `0-x00-y00/left` every channel of one camera, and `0-x00-y00` everything at that position.
-- **Not supported yet.** Tiles split by camera *and* by illumination side are refused. Positions come from the stage; image-based registration of the cameras is the next step and will write the same [transforms file](#transforms-file).
+- **Not supported yet.** Tiles split by camera *and* by illumination side are refused.
+
+#### Registering the camera views
+
+Both cameras share the stage position, but their detection paths (objective, tube lens, camera) never match exactly: at the stage position the views are offset by a few micrometres and slightly rotated with respect to each other, so the fused image jumps where one camera hands over to the other. `register_cameras` measures the transform between the views on the images and applies it to the right view:
+
+```python
+results = mosaic.register_cameras(field="field0", reference_channel="DAPI")   # default: the first channel
+for r in results.values():
+    print(r.summary())   # right -> left (rigid): shift, rotation, misalignment before/after
+zm = mosaic.fuse("sample0.ome.zarr", field="field0", ds=(1, 4, 4))
+```
+
+- **Where.** The fusion switches camera around the middle of the stack, so the transform is measured in a z band (default 200 um, `band_um`) centred on that handover plane, the middle of the overlap of the two views along z.
+- **How.** Both views are read downsampled (`factors`, default `(1, 4, 4)`), band-passed to keep nucleus-sized structure (`structure_um`), and cut into 3D blocks. Blocks where both views hold structure are matched by phase correlation and kept when they correlate well once shifted (`min_ncc`). The model is fitted to the block shifts, weighted by their correlation, discarding outliers, and the matching is repeated on the corrected views (`rounds`).
+- **Models.** `model="rigid"` (default): translation and rotation. The right tiles are then resampled on the left tile's grid, lazily, when the fusion (or napari) reads them (linear interpolation). `model="translation"`: the right tiles are only moved (`Tile.origin`), their data is read unchanged.
+- **Channels.** The transform is measured on `reference_channel` (default: the first channel; a nuclear stain such as DAPI matches best) and applied to every channel of the stack. `reference_channel="all"` registers every channel on its own images instead, which also corrects a chromatic difference between the two cameras; a channel that cannot be registered (too little structure) takes the transform of the channel with the most matched blocks, with a warning.
+- **Timepoints.** The transform is measured at `reference_timepoint` (default: the first timepoint) and applied to every timepoint, as the fusion places every timepoint with the geometry of its reference timepoint; `reference_timepoint="all"` registers every timepoint. On the command line and in napari, the fusion's reference timepoint (`-rtp`) is used.
+- **Transforms file.** The [transforms file](#transforms-file) records the registration (`method` `"registration"`, and per tile `registration`: the matrix, and for a rotation the grid the data is resampled on), so `-tf` reuses it without measuring again. `reset_transforms()` goes back to the stage positions.
+
+On the command line: `zarrsmith fuse ... -rc` (`--register_cameras`), optionally `-rch DAPI` (`--register_channel`, `all` for every channel) and `-rm translation` (`--register_model`) for a translation only.
 
 ### Opera (Harmony exports)
 
@@ -99,6 +120,22 @@ mos.ZeissMosaicManager("tile_scan.czi", scene_index=1)   # only this scene
 - **Placement.** `y` and `x` come from the pixel coordinates of the tile in the file, which are the stage position rounded to a pixel, and `z` from the `FocusPosition` of its first plane. Tiles are not registered, so the result can differ from the images stitched by ZEN by a few pixels.
 - **Timelapses.** The file records slightly different positions at every timepoint. By default every timepoint is fused with those of the reference timepoint; `reference_timepoint="all"` uses those of each timepoint, see [Timepoints](#own-positions-per-timepoint). The fused output has 1 second per timepoint, like every fused timelapse, not the interval of the experiment.
 - **Files without tiles**, such as the output of ZEN's *Stitching*, are refused: read them with `ZeissManager`.
+
+### OME-Zarr stores (any microscope)
+
+`ZarrMosaicManager` takes a folder of OME-Zarr stores, from any microscope, converted with ZarrSmith or written by another tool, and places each one at its [position](readers.md#position-translation) (its NGFF `translation`):
+
+```python
+mosaic = mos.ZarrMosaicManager("converted/")   # every *.zarr store directly in the folder
+mosaic.visualize()                             # one layer per store, at its stage position
+mosaic.fields                                  # stores that touch form one field
+mosaic.fuse("slide.ome.zarr", field="field0", ds=(1, 4, 4))
+```
+
+- **Tiles.** Every store gives one tile per timepoint and channel, from its full-resolution level, with its voxel size. Stores with the same channel names are fused channel by channel (`ch0`, `ch1`, ... without names). A 2D store is a tile one plane deep.
+- **Left out**, with a message: label stores (a fusion would blend their ids), and a store fused from the stores of the same folder, i.e. an earlier fusion of this mosaic written into it (the widget's default output). Fused images record the files or folders of their tiles in the root attribute `zarrsmith_sources`. A fused field moved to another folder is an ordinary tile there.
+- **Without a position**, a store is placed at the origin, with a warning: convert it with a reader that finds the position, or set one with `update_metadata({"translations": ...})`.
+- **Fusion** needs one voxel size and unit for all the stores of a field. Stores that do not touch stay in separate fields, so for separately imaged positions (e.g. the files of a slide scanned one region at a time) the mosaic is mostly a way to see them side by side.
 
 ### Fields
 
@@ -182,13 +219,17 @@ mip.metadata["axes"]       # 'cyx'
 
 The projection is computed at full resolution along z and then downsampled in y/x, so the output is small even for a large acquisition. A `crop` in `z` limits the planes that are projected.
 
+## Position of the fused image
+
+The fused image records where it is: its NGFF `translation` (`zm.metadata["translations"]`) is the corner of the fused tiles (the field, or the given tiles; moved to the `crop` when there is one), in the frame the reader places the tiles in, plus half an output voxel of `ds` (an output voxel averages `ds` input voxels). A projection has no `z` position. Fields fused separately therefore open side by side in a viewer, and an image stitched by the microscope software and read with a microscope manager (`ZeissManager`, `OperaManager`) lands at the same place as the fusion of its raw tiles. Per-timepoint positions (`reference_timepoint="all"`) stay in the placement of the data: NGFF has one translation per image.
+
 ## Fusion options
 
 | Option | Values | Meaning |
 |---|---|---|
 | `ds` | `(z, y, x)` integers | downsampling applied while reading: each output voxel is the mean of its block (default `(1, 1, 1)`) |
 | `projection` | `None`, `"max"`, `"sum"` | 3D volume (default) or a 2D projection along z |
-| `blend` | `"sigmoid"`, `"max"`, `"sum"`, `"midline"` | how overlapping tiles are merged (default `"sigmoid"`), see below |
+| `blend` | `"sigmoid"`, `"max"`, `"sum"`, `"midline"`, `"none"` | how overlapping tiles are merged (default `"sigmoid"`), see below |
 | `sigmoid_steepness` | number > 0 | steepness of the `sigmoid` transition, higher is sharper (default 4) |
 | `channels` | list of names | tile channels to fuse, in output order (default: all) |
 | `channel_names`, `channel_colors` | lists | names and colours (hex or matplotlib names) of the output channels |
@@ -199,6 +240,7 @@ The projection is computed at full resolution along z and then downsampled in y/
 | `levels`, `downscale_factor` | integer, integer or `(z, y, x)` | pyramid levels (default 1) and factor between them (default 2) |
 | `workers` | integer | tiles read in parallel (default 1) |
 | `out_dtype` | dtype | default: input dtype, `float32` for `sum` |
+| `data_type` | `"intensity"`, `"label"` | write a label image (default `"intensity"`); needs `blend="none"` and an integer dtype |
 | `midline_axis` | `"x"`, `"y"`, `"z"` | axis along which `sigmoid` and `midline` separate the groups or cameras (default: `z` for several cameras in 3D, `x` otherwise) |
 | `transforms_path` | path, `True`, `False` | where the [transforms file](#transforms-file) is written before fusing (default `True`: next to the output) |
 | `timepoints` | list of timepoints | timepoints to fuse (default: all), see [Timepoints](#timepoints) |
@@ -232,12 +274,19 @@ Blend modes:
 - **`max`**: keeps the brighter value.
 - **`sum`**: adds the values, so overlaps show up as brighter bands.
 - **`midline`**: uses `max` within each tile group. Where two groups overlap (for example the left and right illumination sides), the image switches sharply from one group to the other at the middle of their overlap, along `midline_axis`. Each side is then shown where its light sheet is sharpest.
+- **`none`**: no blending. Every voxel is copied unchanged from exactly one tile: the one whose border is farthest from it, so two tiles of the same size meet in the middle of their overlap (on a tie the earlier tile wins). Values keep the tile dtype, and `ds` keeps one voxel per block instead of the mean, so no value is ever mixed or rounded. Groups and cameras switch sharply as with `midline`. Use it for label images, with `data_type="label"`.
+
+Fusing labels: tiles of a segmentation whose label IDs already agree across tiles (for example after the labels of neighbouring tiles have been matched) are fused with `blend="none", data_type="label"`. The output is a label image, its pyramid levels sample voxels instead of averaging them, and no display window is written. Labels with any other blend are refused, since mixing IDs gives meaningless values.
+
+```python
+fuse_tiles(label_tiles, "labels.ome.zarr", blend="none", data_type="label", levels=4)
+```
 
 `plan_fusion(mosaic.tiles, ...)` takes the fusion arguments (`ds`, `projection`, `blend`, `channels`, `crop`, `skip`, `out_dtype`, `midline_axis`, `timepoints`, `reference_timepoint`) and returns the level-0 geometry without reading anything: `plan.summary()`, `plan.shape`, `plan.scale`, `plan.nbytes`.
 
 ## Transforms file
 
-Every fusion first works out where each tile goes, then applies it. Those positions are written **before anything is fused**, to a JSON file next to the output: `fused.ome.zarr` → `fused.transforms.json`. The file lists every fused tile at every fused timepoint. It is the hand-off between computing the placement (today the stage positions, later image-based registration) and applying it.
+Every fusion first works out where each tile goes, then applies it. Those positions are written **before anything is fused**, to a JSON file next to the output: `fused.ome.zarr` → `fused.transforms.json`. The file lists every fused tile at every fused timepoint. It is the hand-off between computing the placement (the stage positions, or an image-based [camera registration](#registering-the-camera-views)) and applying it.
 
 ```python
 mosaic.fuse("fused.ome.zarr", field="field0")                  # also writes fused.transforms.json
@@ -271,7 +320,8 @@ Content (positions are `(z, y, x)` in `units`, in the frame of the tile origins,
 | &nbsp;&nbsp;`translation` | position of voxel `[0, 0, 0]` of the flipped tile: **what `apply_transforms` reads**; edit it to move a tile |
 | &nbsp;&nbsp;`stage_translation`, `method` | the position given by the reader, and how `translation` was obtained |
 | &nbsp;&nbsp;`offset`, `placed_at` | output voxel where the tile starts and its position (with a reference timepoint, a tile at every timepoint is placed where its reference tile is) |
-| &nbsp;&nbsp;`affine` | 4 × 4 matrix from a raw voxel index `(z, y, x, 1)` to its fused position, flips included |
+| &nbsp;&nbsp;`affine` | 4 × 4 matrix from a raw voxel index `(z, y, x, 1)` to its fused position, flips (and a registration's rotation) included |
+| &nbsp;&nbsp;`registration` | tiles registered on the images ([camera registration](#registering-the-camera-views)): `matrix` (4 × 4, reference position → stage-placed tile) and, for a rotation, `grid` (`origin`, `voxel_size`, `shape`, `flip` of the grid the raw data is resampled on; `translation`, `shape` and `flip` are then those of the resampled tile, `source_shape` the raw one) |
 
 Tiles that are not in the file keep their stage positions, and entries without a matching tile are ignored, with a warning. Since positions are rounded to output voxels when they are placed, a translation edit smaller than one output voxel (`ds` × voxel size) has no effect.
 
@@ -281,6 +331,7 @@ Tiles that are not in the file keep their stage positions, and entries without a
 |---|---|---|
 | Stitch tiles (any microscope) | `zarrsmith fuse -i ACQ -z out.ome.zarr -rds 4 8 8` | `mosaic.fuse(out, ds=(4, 8, 8))` |
 | Fuse the two MuVi cameras of one sample | `zarrsmith fuse -i ACQ -z s0.ome.zarr -f field0 -rds 1 4 4` | `mosaic.fuse(out, field="field0", ds=(1, 4, 4))` |
+| Fuse the two MuVi cameras, registered on the images | `... -f field0 -rc -rch DAPI` | `mosaic.register_cameras(field="field0", reference_channel="DAPI")`, then `mosaic.fuse(...)` |
 | One camera only | `... -f field0 -cam left` | `mosaic.fuse(out, tiles=[t for t in mosaic.field_tiles("field0") if t.camera == "left"])` |
 | Quick look (MIP, cameras merged by max) | `... -f field0 -p max -rds 1 4 4` | `mosaic.fuse(out, field="field0", projection="max")` |
 | Every sample of a MuVi experiment | one `--batch` row per field (`fields` column) | loop over `mosaic.fields` |
@@ -332,7 +383,7 @@ The fields are listed when the mosaic is loaded. Without `-f/--fields` (or `-t/-
 2. **Show tiles**: show the picked tiles of the selected channels, groups and fields as one layer per tile at its stage position, with one linked contrast per channel. A channel starts at the whole range of its data type, so nothing is read before the tiles appear: set the contrast of one tile and the others follow. Every displayed plane reads data from all shown tiles, so show only a few channels or groups at a time. Change the picks on the tile map and click *Show tiles in napari* again to update the view; the contrast you set is kept, and *Remove existing layers* keeps the tile map. A mosaic with several timepoints opens on the first timepoint, and the **T slider** at the bottom of the image scrolls through time, each tile at its stage position of that timepoint, rounded to a voxel, so a tile moves when its position changes. The tile map stays at the position of the first timepoint. Only the planes displayed at the current timepoint are read. A timepoint without that tile shows as blank.
 3. **Fuse to OME-Zarr**: the main fusion options, with a live estimate of the output size. For a mosaic with several timepoints, *Timepoints* selects those to fuse (all by default) and *Reference timepoint* the one whose geometry they all use (the first by default), or `all` to place every timepoint at [its own positions](#own-positions-per-timepoint). Only the picked tiles of the selected field are fused, and the output fits them. Selecting several fields shows an error in the size estimate, and *Fuse to OME-Zarr* and *Append to batch CSV* then print an error and do nothing. With several fields, the default output name ends with the field, e.g. `<acquisition>_3D_ds4-8-8_field1.ome.zarr`. *Tiles to fuse* can be set to *visible layers only* or *selected layers only*: tiles whose layer is hidden (eye icon off) or not selected in the layer list are then left blank (the output keeps its size), and *Blank in all channels* also blanks that position in the other channels. Picked tiles that are not shown in napari are fused normally. The output path follows the parameters (for example `<acquisition>_3D_ds4-8-8.ome.zarr`) until you type your own; dropping a folder on the output field writes the result inside that folder. When fusion finishes, the result can be opened directly, on its first timepoint (the tile map is then hidden, since the result is not placed at the stage position).
 
-   For a mosaic with several **cameras** (MuVi SPIM), *Show tiles* and *Fuse to OME-Zarr* get a *cameras* selector (all by default: the views are blended into one image), the log says how they are blended, and the tile map still has one rectangle per stack position. *Transforms (optional)* takes a `.transforms.json` (written by an earlier fusion, possibly edited): the tiles are then shown and fused at its positions, and clearing the field puts them back at the stage positions. *Only write transforms* writes `<output>.transforms.json` and fuses nothing. Every fusion writes that file before it starts.
+   For a mosaic with several **cameras** (MuVi SPIM), *Show tiles* and *Fuse to OME-Zarr* get a *cameras* selector (all by default: the views are blended into one image), the log says how they are blended, and the tile map still has one rectangle per stack position. *Transforms (optional)* takes a `.transforms.json` (written by an earlier fusion, possibly edited): the tiles are then shown and fused at its positions, and clearing the field puts them back at the stage positions. *Only write transforms* writes `<output>.transforms.json` and fuses nothing. Every fusion writes that file before it starts. *Register cameras* (shown with several cameras) aligns the camera views on the images before fusing ([camera registration](#registering-the-camera-views)), with *Registration model* (rigid or translation) and *Registration channel* (the reference channel, measured and applied to every channel, or `all` to register every channel on its own; timepoints follow the *Reference timepoint*). It runs in the background with the fusion (about a minute per stack and channel measured); with *Only write transforms* it registers and writes the transforms, so the registered positions can be checked, or reused as *Transforms*, before fusing. The registration holds for that fusion only: the tiles go back to their stage positions (or the transforms file) afterwards, and *Append to batch CSV* writes the options to the `register_cameras`, `register_model` and `register_channel` columns.
 
 4. **Batch CSV export**: *Append to batch CSV* adds the current settings, including the picked tiles (`tiles` column), the timepoints and the tiles left blank, as a row of a CSV file. Run the file later, for example on a workstation close to the data, with `zarrsmith fuse --batch mosaic_batch.csv`.
 

@@ -32,11 +32,15 @@ def write_image_region(
     level: int = 0,
     group_name: Optional[str] = None,
     downscale_factor: SpatialFactor | None = None,
+    aligned: bool = False,
 ):
     """Write image data into an existing OME-Zarr pyramid region.
 
     The target array axes are read from the group's multiscales metadata.  Axes
     may be any subset of ``tczyx``; selectors for missing axes are ignored.
+    With ``aligned=True`` the region must lie on the shard grid (chunk grid
+    without shards) of every level written, else ``ValueError`` is raised
+    before anything is written (see :func:`check_region_aligned`).
     """
     return _write_region(
         root=root,
@@ -47,6 +51,7 @@ def write_image_region(
         group_name=group_name,
         downscale_factor=downscale_factor,
         expected_data_type="intensity",
+        aligned=aligned,
     )
 
 
@@ -60,6 +65,7 @@ def _write_region(
     group_name: Optional[str],
     downscale_factor: SpatialFactor | None,
     expected_data_type: str | None = None,
+    aligned: bool = False,
 ):
     if mode not in ("r+", "a", "w"):
         raise PermissionError(
@@ -124,6 +130,14 @@ def _write_region(
     else:
         raise TypeError("data must be a NumPy array, Dask array, or list of such arrays.")
 
+    selector_tuple = tuple(selectors.get(ax, slice(None)) for ax in ("t", "c", "z", "y", "x"))
+    if aligned:
+        for i, subdata in enumerate(data_list[:n_levels]):
+            arr_path = datasets[i]["path"]
+            if arr_path in group and subdata.ndim == len(axes):
+                index = _scale_index(selector_tuple, subdata.shape, level_scale_ratios[i], axes=axes)
+                check_region_aligned(group[arr_path], index, axes=axes, level=i)
+
     for i, subdata in enumerate(data_list):
         if i >= n_levels:
             break
@@ -141,12 +155,7 @@ def _write_region(
             )
             continue
 
-        index = _scale_index(
-            (selectors.get("t", slice(None)), selectors.get("c", slice(None)), selectors.get("z", slice(None)), selectors.get("y", slice(None)), selectors.get("x", slice(None))),
-            subdata.shape,
-            level_scale_ratios[i],
-            axes=axes,
-        )
+        index = _scale_index(selector_tuple, subdata.shape, level_scale_ratios[i], axes=axes)
 
         if isinstance(subdata, da.Array):
             subdata = subdata.compute()
@@ -163,6 +172,51 @@ def _write_region(
     store = getattr(root, "store", None)
     if store is not None and hasattr(store, "flush"):
         store.flush()
+
+
+def check_region_aligned(
+    array: zarr.Array,
+    index: tuple,
+    *,
+    axes: Sequence[str] | None = None,
+    level: int | None = None,
+) -> None:
+    """Raise ``ValueError`` unless ``index`` covers whole blocks of ``array``.
+
+    A block is a shard, or a chunk when the array has no shards (always on
+    zarr v2). Every selected range must start on a block boundary and end on
+    one or at the array's end; that is what makes concurrent writes of
+    different regions safe, since no two of them touch the same file.
+    """
+    block = tuple(array.shards or array.chunks)
+    names = list(axes) if axes is not None else [str(i) for i in range(array.ndim)]
+    kind = "shard" if array.shards else "chunk"
+    where = "" if level is None else f" at level {level}"
+    for ax, sel, n, b in zip(names, index, array.shape, block):
+        if isinstance(sel, (int, np.integer)):
+            sel = int(sel) + (n if sel < 0 else 0)
+            start, stop = sel, sel + 1
+        elif isinstance(sel, slice):
+            start, stop, step = sel.indices(n)
+            if step != 1 and b != 1:
+                raise ValueError(f"Axis {ax!r}{where}: a strided selection ({sel}) cannot be aligned.")
+        elif isinstance(sel, Sequence) and not isinstance(sel, (str, bytes)):
+            values = sorted(int(v) + (n if v < 0 else 0) for v in sel)
+            if not values:
+                continue
+            start, stop = values[0], values[-1] + 1
+            if values != list(range(start, stop)):
+                if b == 1:
+                    continue
+                raise ValueError(f"Axis {ax!r}{where}: a non-contiguous selection cannot be aligned.")
+        else:
+            continue
+        if start % b or (stop % b and stop != n):
+            raise ValueError(
+                f"Region {start}:{stop} along axis {ax!r}{where} is not aligned with the {kind} "
+                f"size {b} (array shape {tuple(array.shape)}): it must start at a multiple of {b} "
+                f"and end at a multiple of {b} or at {n}."
+            )
 
 
 def _get_nested_group(root: zarr.Group, group_name: str | None) -> zarr.Group | None:

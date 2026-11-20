@@ -288,6 +288,26 @@ def test_opera_manager(tmp_path):
     assert o.metadata["units"] == ("micrometer",) * 3
 
 
+def test_opera_pyramid_levels_are_placed_as_binned(tmp_path, monkeypatch):
+    """Harmony averages 2x2 blocks in Y/X and keeps Z: each level's pixel centre moves by
+    half its pixel growth per axis, from the shape ratios (Z factor 1 -> no Z shift)."""
+    path = tmp_path / "opera.ome.tiff"
+    data = np.zeros((1, 1, 4, 16, 16), np.uint16)
+    with tifffile.TiffWriter(path, ome=True) as tw:
+        tw.write(data, subifds=1,
+                 metadata={"axes": "TCZYX", "PhysicalSizeX": 0.5813, "PhysicalSizeY": 0.5813,
+                           "PhysicalSizeZ": 3.0})
+        tw.write(data[..., ::2, ::2], subfiletype=1)
+    monkeypatch.setattr(mm.OperaManager, "_stage_position",
+                        lambda self, units: {"z": 5.0, "y": 10.0, "x": 20.0})
+    o = mm.OperaManager(path)
+    assert [a.shape for a in o.data] == [(1, 1, 4, 16, 16), (1, 1, 4, 8, 8)]
+    assert o.metadata["scales"][1] == pytest.approx((3.0, 1.1626, 1.1626))
+    t0, t1 = o.metadata["translations"]
+    assert t0 == pytest.approx({"z": 5.0, "y": 10.0, "x": 20.0})
+    assert t1 == pytest.approx({"z": 5.0, "y": 10.0 + 0.29065, "x": 20.0 + 0.29065})
+
+
 def test_scape_manager(tmp_path):
     (tmp_path / "Metadata").mkdir()
     dims = "".join(

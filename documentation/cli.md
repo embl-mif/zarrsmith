@@ -1,6 +1,6 @@
 # Command line
 
-The `zarrsmith` command has four subcommands:
+The `zarrsmith` command has six subcommands:
 
 | Command | Does |
 |---|---|
@@ -8,8 +8,10 @@ The `zarrsmith` command has four subcommands:
 | `zarrsmith fuse` | fuse the raw tiles of a mosaic into one OME-Zarr image, or every mosaic listed in a CSV file with `--batch` |
 | `zarrsmith chromatic-shift` | measure and correct the Z chromatic shift between the channels of an OME-Zarr image, or of every image listed in a CSV file with `--batch` |
 | `zarrsmith resample` | change the pixel size of an OME-Zarr image, or of every image listed in a CSV file with `--batch` |
+| `zarrsmith allocate` | create an empty OME-Zarr image from a template image, or from an explicit size, to fill tile by tile |
+| `zarrsmith pyramid` | build or rebuild the pyramid levels of an OME-Zarr image in place, from level 0 |
 
-`zarrsmith -h` lists them, and `zarrsmith convert -h`, `zarrsmith fuse -h`, `zarrsmith chromatic-shift -h` and `zarrsmith resample -h` show every option, examples and the batch CSV columns. `zarrsmith --version` prints the installed version.
+`zarrsmith -h` lists them, and `zarrsmith convert -h`, `zarrsmith fuse -h`, `zarrsmith chromatic-shift -h`, `zarrsmith resample -h`, `zarrsmith allocate -h` and `zarrsmith pyramid -h` show every option, examples and the batch CSV columns. `zarrsmith --version` prints the installed version.
 
 Each command runs either one dataset (`-i INPUT -z OUTPUT`) or a CSV file (`--batch FILE.csv`), never both (`chromatic-shift` can also run with `-i` alone, to only measure). In a batch file, one row is one run and the columns take the place of the options.
 
@@ -69,6 +71,58 @@ Large datasets are written one batch at a time, each as large as the free memory
 
 The batch CSV has the columns `input`, `output`, `pixel_size`, plus any of `fast`, `include_groups`, `include_labels`, `overwrite`, `num_workers`.
 
+## Create an empty image and build its pyramid
+
+`allocate` and `pyramid` split writing an image into three steps, for pipelines where several jobs write tiles of the same output (e.g. a pixel classifier writing probabilities):
+
+```bash
+# 1. an empty image with the geometry and pyramid levels of raw.ome.zarr, float32, 3 channels
+zarrsmith allocate -t raw.ome.zarr -o prob.ome.zarr --dtype float32 --num_channels 3
+
+# 2. jobs write tiles of level 0, e.g. with ZarrManager(..., mode="r+").write_image_region(tile, ..., aligned=True)
+
+# 3. fill the other levels from level 0 on disk (same levels and factors as raw.ome.zarr)
+zarrsmith pyramid -z prob.ome.zarr
+```
+
+From a template, the output keeps its axes, level-0 size, dtype, pixel size, units, origin (`translation`), channels, chunks, shards, pyramid levels and zarr format, unless an option changes them. `--start_level 1` makes level 1 of the template the output's level 0 (e.g. to segment at a coarser resolution); `--crop` is then in level-1 pixels. Without a template, `--axes`, `--size` and optionally `--scale`, `--units` and `--time_increment` describe it:
+
+```bash
+zarrsmith allocate -o new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale 2 0.5 0.5
+```
+
+| Option | Does | Default |
+|---|---|---|
+| `-t`, `--template` | OME-Zarr image whose root image gives the geometry | none |
+| `-o`, `--out` (or `-z`, `--zarr_path`) | the new store | none, required |
+| `-dt`, `--dtype` / `-dty`, `--data_type` | dtype, and `intensity` or `label`; a label output drops the template's channel axis unless channels are given | the template's |
+| `-cn`, `--channel_names` / `-nc`, `--num_channels` / `-cc`, `--channel_colors` | the channels of the output (adds a `c` axis if needed) | the template's |
+| `-cr`, `--crop` | the part of the template to keep, e.g. `"t=0:10;y=512:1536"`; it moves the origin, so the output gets a translation | the whole template |
+| `-cs`, `--chunk_size` / `-sh`, `--shards` | level-0 chunks and shards, one value per output axis (`--shards auto` or `none` also work) | the template's; `auto` shards without a template |
+| `-sl`, `--start_level` | level of the template (index or path) that becomes the output's level 0; `--crop` is in its pixels | 0 |
+| `-nl`, `--num_levels` / `-df`, `--downscale_factor` | levels to create, and the factor between them | the template's levels from `--start_level` on; 1 level without a template |
+| `-tr`, `--translation` | without a value: keep the template's origin (moved by `--crop`); with one value per spatial axis: the level-0 origin. An all-zero origin is not written, which NGFF reads the same way | written when the template has one or the crop moves the origin |
+| `-zf`, `--zarr_format` | 2 (NGFF 0.4) or 3 (NGFF 0.5) | the template's, else 3 |
+| `-at`, `--attrs` | custom group attributes, as JSON or a `.json` file, e.g. `'{"t_range": [0, 10]}'` | none |
+| `-cp`, `--compressor` / `-cpl`, `--compressor_level` | codec | blosc, level 1 |
+| `-ow`, `--overwrite` | replace an existing output | off |
+
+Zarr v2 has no shards: an explicit `--shards` shape is refused, `--shards auto` is dropped with a warning, and a v3 template's shards are not carried over. Parallel jobs must write tiles that start and end on the shard grid (the chunk grid on zarr v2 or without shards), so no two jobs write the same file; `aligned=True` raises an error for any other tile.
+
+`pyramid` creates or replaces the levels after `--start_level` (default 0) of the root image (or of `--group labels/nuclei`, or of every image with `--group all`). The start level and the levels above it are kept as they are. Each new level is computed from the level above it, one task per output shard (chunk on zarr v2), with the zarr format, codecs and chunk layout of level 0, and the `multiscales` metadata is updated. Running it again replaces the levels cleanly. `zarrsmith pyramid -z img.ome.zarr --start_level 2 --num_levels 6` keeps levels 0-2 and rebuilds 3-5 from level 2.
+
+| Option | Does | Default |
+|---|---|---|
+| `-z`, `--zarr_path` | the store to update | none, required |
+| `-g`, `--group` | image(s) to process: group paths, or `all` | the root image |
+| `-nl`, `--num_levels` | total number of levels, level 0 included | the levels the image already has (e.g. allocated from a template); with one level, until no spatial axis is above 2048 pixels |
+| `-df`, `--downscale_factor` | one value, or one per spatial axis (`1 2 2` keeps Z) | the factor between the existing levels, else 2 |
+| `-me`, `--method` | `mean` (average), `nearest` (one pixel per block) or `mode` (most frequent value, smoother label pyramids) | `mean` for intensity data, `nearest` for labels |
+| `-sl`, `--start_level` | level to build from, by index or path; it and the levels above it are kept | 0 |
+| `-nw`, `--num_workers` | number of threads | half the cores, at most 8 |
+
+Translations follow the NGFF 0.6 convention, where a pixel's position is its centre: with `mean` and `mode` a coarse pixel sits at the centre of the block it summarizes, so level `k` is at `t_s + (s_k - s_s) / 2` (`s_k` its pixel size, `s` the start level); with `nearest` it keeps the origin of the start level.
+
 ## Fuse a mosaic
 
 `fuse` fuses the raw tiles of a mosaic (see [Mosaics](mosaic.md)) into one OME-Zarr image:
@@ -94,9 +148,9 @@ The fusion options:
 | `-m`, `--microscope` | `luxendo`, `opera`, `zeiss` | auto-detected for raw Luxendo acquisitions, Opera Harmony exports (`Images/Index.xml`) and Zeiss `.czi` files |
 | `-rds`, `--downsample` | downsampling while reading (block mean): one value or `Z Y X` | 1 (full resolution) |
 | `-p`, `--projection` | `none` (3D), `max` or `sum` | `none` |
-| `-b`, `--blend` | `sigmoid`, `max`, `sum` or `midline` | `sigmoid` |
+| `-b`, `--blend` | `sigmoid`, `max`, `sum`, `midline` or `none` (no blending, for labels; see [Fusion options](mosaic.md#fusion-options)) | `sigmoid` |
 | `-ss`, `--sigmoid_steepness` | steepness of the `sigmoid` transition, higher is sharper | 4 |
-| `-ch`, `--channels` / `-g`, `--groups` | tile channels and groups (e.g. `L R`) to fuse | all |
+| `-ch`, `--channels` / `-g`, `--groups` | tile channels and groups (e.g. `L R`) to fuse. Quote a name with spaces: `-ch "Alexa 488"` on the command line, `"Alexa 488" Brightfield` in a `--batch` CSV cell (double quotes: Excel drops a leading `'` when it saves) | all |
 | `-cam`, `--cameras` | cameras to fuse (MuVi SPIM: `left right`); several are blended into one image, see [MuVi SPIM](mosaic.md#muvi-spim-two-opposing-cameras) | all |
 | `-f`, `--fields` | the field to fuse (groups of touching tiles, `field0`, `field1`, ... listed when the mosaic is loaded). Tiles from several fields are not fused: an error is printed (see [Fields](mosaic.md#fields)) | the first field, unless `-t` is given |
 | `-t`, `--tiles` | only fuse these tiles, and fit the output to them: stacks such as `1-x00-y00` (every channel), or `channel/stack` ids | all |
@@ -107,14 +161,18 @@ The fusion options:
 | `-ma`, `--midline_axis` | axis along which `sigmoid`/`midline` separate the tile groups (or cameras): `x`, `y` or `z` | `z` for several cameras in 3D, `x` otherwise |
 | `-tf`, `--transforms` | a [transforms file](mosaic.md#transforms-file) giving the tile positions to use instead of the stage positions | the stage positions |
 | `-tfo`, `--transforms_only` | only write `<output>.transforms.json` (every fusion writes it first), fuse nothing | off |
+| `-rc`, `--register_cameras` | MuVi SPIM: register the right camera view onto the left one on the images, at the camera handover (z centre of the stack), instead of the stage position alone; see [mosaic.md](mosaic.md#registering-the-camera-views) | off |
+| `-rm`, `--register_model` | `rigid` (translation and rotation; the right view is resampled) or `translation` (only moved) | `rigid` |
+| `-rch`, `--register_channel` | reference channel of `--register_cameras` (e.g. a nuclear stain): the transform is measured on it and applied to every channel; `all` registers every channel on its own images. Timepoints follow `-rtp`: measured at the reference timepoint and applied to all, or at every timepoint with `-rtp all` | the first channel |
 | `-od`, `--out_dtype` | output dtype | the input dtype (`float32` with `-b sum`) |
+| `-dt`, `--data_type` | `intensity` or `label` (a label image; needs `-b none` and an integer dtype) | `intensity` |
 | `-rw`, `--read_workers` | tiles read in parallel processes; not to be confused with `-nw` (write threads) | 4 |
 | `-td`, `--temp_dir` | folder for the temporary fused level 0 (a local disk is faster) | next to the output |
 | `-ow`, `--overwrite` | replace an existing output, once the fusion has succeeded | off |
 
 Every output option of `convert` is available too, applied to the fused output, with the same defaults. Two read differently for a mosaic: `-cs` is given in `C Z Y X` order (`C Y X` for projections, after `T` for several timepoints), and `-s/--subset` crops the fused output (`z`/`y`/`x` in output voxels, after `-rds`) and selects channels (`c`), e.g. `"z=0:100;y=200:900;c=1"`; timepoints are chosen with `-tp`. `-si` loads one scene of a Zeiss mosaic (default: every scene, one field each), ignored for the others.
 
-The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `cameras`, `fields`, `tiles`, `skip_tiles`, `timepoints`, `reference_timepoint`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `transforms`, `transforms_only`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
+The batch CSV has the columns `input`, `microscope`, `output`, plus any of the output columns of `convert --batch` and of the fusion columns `downsample`, `projection`, `blend`, `sigmoid_steepness`, `channels`, `groups`, `cameras`, `fields`, `tiles`, `skip_tiles`, `timepoints`, `reference_timepoint`, `midline_axis`, `out_dtype`, `read_workers`, `temp_dir`, `transforms`, `transforms_only`, `register_cameras`, `register_model`, `register_channel`, `overwrite`. Leave a cell empty for the default; lists are space separated. A row asking for tiles from several fields is not fused; the other rows still run, and the rows that were not fused are listed at the end. The napari *Mosaic Fusion* widget writes such rows with *Append to batch CSV*.
 
 ```text
 input,microscope,output,downsample,projection,blend,num_levels,shards

@@ -71,6 +71,22 @@ def _check_scales(key, value, *, data, metadata, label):
     return value, None
 
 
+def _check_translations(key, value, *, data, metadata, label):
+    """A position (dict or numbers, for every level) or one per level; ``None`` clears it."""
+    from .translation import normalize_translations
+
+    try:
+        return normalize_translations(value, _axes_of(metadata), len(data)), None
+    except (TypeError, ValueError) as e:
+        raise type(e)(f"Invalid 'translations' for {label}: {e}") from e
+
+
+def _check_extra_attributes(key, value, **_):
+    if value is not None and not isinstance(value, dict):
+        raise TypeError("'extra_attributes' must be a dict or None.")
+    return (dict(value) if value else None), None
+
+
 def _check_time_increment(key, value, **_):
     if value is not None and (
         not isinstance(value, Real) or isinstance(value, bool) or value <= 0
@@ -103,6 +119,8 @@ _VALIDATORS: dict[str, Callable[..., tuple[Any, Optional[str]]]] = {
     "channel_names": _check_channel_values,
     "channel_colors": _check_channel_values,
     "scales": _check_scales,
+    "translations": _check_translations,
+    "extra_attributes": _check_extra_attributes,
     "time_increment": _check_time_increment,
     "time_increment_unit": _check_time_unit,
     "units": _check_units,
@@ -251,7 +269,12 @@ def subset_levels(
             continue
         size = shape[axes.index(name.lower())]
         indices = index_list_from_selection(sel, size)
-        if indices and (min(indices) < 0 or max(indices) >= size):
+        if not indices:  # e.g. slice(30, 100) of a single timepoint: an empty axis cannot be written
+            raise ValueError(
+                f"{name}={sel!r} selects nothing on axis '{name.lower()}' of {label}, "
+                f"which has {size} element(s) (indices 0 to {size - 1})."
+            )
+        if min(indices) < 0 or max(indices) >= size:
             raise ValueError(
                 f"Index for axis '{name.lower()}' out of range in {label}. Axis size is {size}."
             )

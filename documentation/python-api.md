@@ -110,6 +110,101 @@ z.write_image_region(
 )
 ```
 
+With `aligned=True`, `write_image_region` and `write_label_region` raise `ValueError` unless the region starts and ends on the shard grid (the chunk grid on zarr v2 or without shards) of every level they write. Only such regions are safe to write from several processes at once.
+
+## Read a region with a halo
+
+`read_region` reads one region of a level, plus a halo on the spatial axes (clipped at the image edge), e.g. to segment a tile with context and keep only its core:
+
+```python
+z = mm.ZarrManager("raw.ome.zarr")
+r = z.read_region(1, t=0, c=2, z=(10, 20), y=(512, 1024), x=(0, 512), halo=16)  # level 1, pixels
+r.data    # the block read, halo included
+r.core    # the region alone (r.data[r.crop])
+r.bounds, r.window, r.halo   # pixel bounds of the region and of the block; halo actually read
+
+# bounds and halo in physical units, with the level's scale and translation
+r = z.read_region(1, y=(250.0, 500.0), x=(0.0, 250.0), halo=8.0, physical=True)
+r.core_translation()  # translation of an image holding only the core
+```
+
+`group="seg"` or `group="labels/nuclei"` reads another image of the store. The conversions are also available on their own in `zarrsmith.utils.region`: `physical_to_pixel_bounds`, `pixel_to_physical_bounds`, `physical_to_pixels` and `halo_window`. Positions follow NGFF 0.6, where a translation is the centre of the first pixel: pixel `i` covers `[t + (i - 1/2) s, t + (i + 1/2) s)`, and physical bounds take every pixel they overlap.
+
+## Plan tiles for parallel processing
+
+`plan_tiles` cuts the spatial axes of one level into overlapping tiles, and gives the layout of an output that every tile can write to in parallel:
+
+```python
+from zarrsmith.utils.allocate import allocate_zarr
+
+raw = mm.ZarrManager("raw.ome.zarr")
+plan = raw.plan_tiles(1, tile_size={"y": 1024, "x": 1024}, overlap=64, halo=32)  # z is not split
+plan.tiles            # Tile(index, grid, bounds) in level-1 pixels, numbered from 1 in z, y, x order
+plan.rows()           # one dict per tile (bounds, tile size, overlap), e.g. for a CSV
+
+allocate_zarr("seg.ome.zarr", template="raw.ome.zarr", data_type="label", dtype="uint32",
+              **plan.allocate_kwargs("tzyx"))  # level 1, cropped to the ROI, shard = stride
+
+seg = mm.ZarrManager("seg.ome.zarr", mode="r+")
+for tile in plan.tiles:                        # in practice, one job per tile
+    core = plan.core(tile)                     # the part this tile writes: up to the next tile's start
+    r = raw.read_region(1, c=0, halo=plan.halo, **core)
+    labels = segment(r.data)[r.crop]           # segment with context, keep the core
+    seg.write_label_region(labels, aligned=True, **plan.write_region(tile))
+```
+
+Only z, y and x are tiled. By default (`split="t"`) each write block holds one timepoint, so jobs can be split per tile and per timepoint: each writes `t=slice(k, k + 1)` with `aligned=True` and holds one timepoint of its tile in memory. A job writing every timepoint of its tile writes several whole blocks, which is safe too. `split=""` puts every timepoint of a tile in one block (fewer, larger files, but one job per tile); `split="tc"` also splits channels. `crop={"t": (0, 5)}` keeps part of `t`.
+
+An axis without a tile size is not split: one tile spans the whole region of interest (`roi=`, the whole level by default). Tiles start every `stride = tile_size - overlap` pixels; each tile writes its *core*, from its start to the next tile's start, so cores cover the ROI once. `allocate_kwargs` makes the output's write block (the shard on zarr v3, with inner chunks dividing it; the chunk on zarr v2) equal to the stride on tiled axes and to the whole axis on the others, so each core is whole blocks and `aligned=True` passes. With `physical=True`, `roi`, `tile_size`, `overlap` and `halo` are in physical units. A last tile shorter than the halo (and than 2 pixels) is folded into the one before it.
+
+### Cut only when a tile would not fit
+
+`max_tile_voxels` sets the most voxels one job may read for a tile, halo included, for example what fits in GPU memory. The image stays one tile if it fits; otherwise the axes without a `tile_size` are cut into as few tiles of about equal size as fit:
+
+```python
+plan = raw.plan_tiles(0, overlap=64, halo=32, max_tile_voxels=400_000_000)  # e.g. Cellpose 3D on a full A100
+plan = raw.plan_tiles(0, overlap=64, halo=32, max_tile_voxels=400_000_000,
+                      resize=30 / 15)                                     # Cellpose with diameter=15
+plan.max_load_voxels   # largest tile read, halo included
+```
+
+- The budget is per timepoint and channel: t and c are never tiled.
+- Of every way to cut the axes, the plan with the least area between tiles wins, then the one with the fewest tiles. A short axis such as z usually stays whole, and tiles are compact instead of thin slabs (less overlap, halo and merging).
+- Strides are multiples of a power of two: up to the default inner chunk (16 along z, 256 along y and x), and at most an eighth of the stride so rounding wastes little of the budget. `allocate_kwargs` then picks inner chunks that divide the stride.
+- A `tile_size` given for an axis is kept and counts towards the budget.
+- `resize` is the factor by which the tool enlarges each tile before processing: the budget is checked against `voxels * resize ** ndim`. Cellpose rescales objects to about 30 pixels, so use `30 / diameter`.
+
+## Allocate an image and build its pyramid in place
+
+`allocate_zarr` creates an empty image from a template (what [`zarrsmith allocate`](cli.md) runs), with the template's pyramid levels by default. `populate_pyramid` fills or replaces the levels on disk after `start_level` (default 0, an index or a dataset path), from that level, one task per output shard (chunk on zarr v2). The start level and the levels above it are kept; `num_levels` counts every level from level 0. Without `num_levels` or `downscale_factor`, it keeps the levels the image already has:
+
+```python
+from zarrsmith.utils.allocate import allocate_zarr
+
+allocate_zarr("seg.ome.zarr", template="raw.ome.zarr", data_type="label", dtype="uint32",
+              crop={"t": (0, 10)}, extra_attributes={"t_range": [0, 10]})
+# translation= takes the stored format, {"z": .., "y": .., "x": ..}; axes left out keep the template's origin
+# start_level=1 makes level 1 of the template the output's level 0 (crop is then in level-1 pixels)
+
+z = mm.ZarrManager("seg.ome.zarr", mode="r+")
+z.write_label_region(labels, aligned=True)
+z.populate_pyramid()                              # the levels allocate laid out, from the template
+z.populate_pyramid(num_levels=4, method="mode")  # also group="labels/nuclei"
+z.populate_pyramid(num_levels=6, start_level=2)   # keep levels 0-2, rebuild 3-5 from level 2
+```
+
+`method` is `"mean"`, `"nearest"` or `"mode"`; by default `"nearest"` for labels and `"mean"` otherwise. The lazy `build_pyramid` also takes `method` (default `"nearest"`). The method is recorded in the `multiscales` `type` and `metadata` fields, as the NGFF spec recommends.
+
+A sharded level is built one inner chunk at a time, so each task holds one output shard plus one chunk's source window; the number of threads is limited to what fits in memory, sharded or not.
+
+NGFF 0.6 stores can be read (axes from `coordinateSystems`, `scale`/`translation` from a `sequence`), but zarrsmith writes only 0.4 and 0.5: `populate_pyramid` and `create_empty_group` refuse a 0.6 store rather than mix versions, and `allocate_zarr` from a 0.6 template writes 0.5.
+
+## Origins and custom attributes
+
+`metadata["translations"]` holds one position per level as a dict keyed by spatial axis, e.g. `{"z": 0.0, "y": 1200.5, "x": -340.0}` (see [readers](readers.md#position-translation)), written as a `translation` after each level's `scale` and read back from any store that has one. It is `None` when the position is unknown, and then none is written; an all-zero position is not written either, which NGFF reads the same way. Subsetting moves it to the first kept pixel. Coarser levels follow the NGFF 0.6 convention (`zarrsmith.utils.translation.pyramid_translations`): `mean`/`mode` levels sit at `t0 + (s_k - s0) / 2`, `nearest` levels at `t0`.
+
+`metadata["extra_attributes"]` holds the group attributes that are not NGFF metadata, such as a pipeline's `t_range`. They are read from a store and written back next to `multiscales` on zarr v2, and next to (not inside) `ome` on zarr v3. Both can be changed with `update_metadata`.
+
 ## Change the pixel size
 
 `resample_dataset` gives a dataset a new pixel size and rescales the data accordingly. Nothing is computed until the dataset is written, and it works with every manager:

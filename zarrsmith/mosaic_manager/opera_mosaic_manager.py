@@ -295,6 +295,108 @@ def _orientation(settings) -> Optional[List[List[float]]]:
     return json.loads(text) if text else None
 
 
+def _well_index(name: str) -> Optional[Tuple[int, int]]:
+    """``"C9"`` -> ``(3, 9)``, ``"AA1"`` -> ``(27, 1)`` (``None`` if not a well name)."""
+    m = re.fullmatch(r"([A-Za-z]+)(\d+)", name)
+    if not m:
+        return None
+    row = 0
+    for letter in m.group(1).upper():
+        row = row * 26 + ord(letter) - ord("A") + 1
+    return row, int(m.group(2))
+
+
+def stitched_position(tiff_path: str | Path) -> Optional[Dict[str, float]]:
+    """Position (µm) of voxel ``[0, 0, 0]`` of an image stitched by Harmony, or ``None``.
+
+    Harmony writes ``<measurement>/stitchresult/<well>_F<n>.ome.tiff`` without any
+    stage position; the positions of its fields are in the export's raw index,
+    ``<measurement>/Images/Index.xml``, which is looked up there. The stitched canvas
+    starts at the corner of its fields, so the position is that corner in the frame of
+    :class:`OperaMosaicManager` (well placed on the plate, field positions, ``y`` flipped
+    as the ``OrientationMatrix`` says, ``z`` the lowest ``PositionZ``): the stitched image
+    and a fusion of the raw fields land at the same place. Harmony refines the field
+    positions by registration, by about 2 µm. ``stitchresult/FieldTables.json``, when
+    present, gives the fields of cluster ``F<n>``; otherwise all the fields of the well
+    are used. Without the index, or when the well cannot be found in it, ``None``.
+    """
+    # Absolute, so that a bare file name finds the measurement folder; abspath keeps a
+    # mapped drive letter (resolve() would turn it into a UNC path).
+    tiff_path = Path(os.path.abspath(tiff_path))
+    index = _raw_index(tiff_path.parent.parent)
+    if index is None:
+        logger.info("No raw Harmony index (Images/%s) above %s: position not used.", INDEX_NAMES[0], tiff_path.name)
+        return None
+    name = re.match(r"([A-Za-z]+\d+)_F(\d+)", tiff_path.name)
+    try:
+        channels, stacks = read_index(index, progress=False)
+    except (OSError, ValueError, KeyError) as e:
+        logger.warning("Cannot read %s (%s): position not used.", index, e)
+        return None
+    wells = sorted({key[:2] for key in stacks})
+    well = _well_index(name.group(1)) if name else (wells[0] if len(wells) == 1 else None)
+    if well is None or well not in wells:
+        logger.info("Well of %s not found in %s: position not used.", tiff_path.name, index)
+        return None
+    cluster_fields = (_cluster_fields(tiff_path.parent / "FieldTables.json", name.group(1), int(name.group(2)) - 1)
+                      if name else None)
+
+    first = min(key for key in stacks if key[:2] == well)  # first field, timepoint and channel
+    channel, timepoint = first[4], first[3]
+    selected = {key[2]: s for key, s in stacks.items()
+                if key[:2] == well and key[3] == timepoint and key[4] == channel
+                and (cluster_fields is None or key[2] in cluster_fields)}
+    if not selected:
+        return None
+    settings = channels.get(channel, {})
+    size = OperaMosaicManager._image_size(settings)
+    if size is None or "ImageResolutionX" not in settings:
+        logger.info("No image size or resolution in %s: position not used.", index)
+        return None
+    py, px = OperaMosaicManager._pixel_sizes(channels, {channel: "c"})
+    sy, sx = OperaMosaicManager._flips(settings)
+    ny, nx = size
+    pitch = OperaMosaicManager._well_pitch(read_plate(index), stacks, max(ny * py, nx * px))
+    wy, wx = (well[0] - 1) * pitch, (well[1] - 1) * pitch
+    planes = [p[1] for s in selected.values() for p in s["planes"]]
+    return {
+        "z": min(planes) if planes else 0.0,
+        "y": min(wy + sy * s["y"] - (ny - 1) / 2 * py for s in selected.values()),
+        "x": min(wx + sx * s["x"] - (nx - 1) / 2 * px for s in selected.values()),
+    }
+
+
+def _raw_index(measurement: Path) -> Optional[Path]:
+    """The raw index of a Harmony export: ``<measurement>/Images/Index.xml`` (or the export
+    folder itself). Never Harmony's ``stitchresult/index.xml``, which has no field positions
+    and which Windows would match by name, as file names are case-insensitive there."""
+    for folder in (measurement / "Images", measurement):
+        if folder.name.lower() == "stitchresult":
+            continue
+        for name in INDEX_NAMES:
+            if (folder / name).is_file():
+                return folder / name
+    return None
+
+
+def _cluster_fields(path: Path, well_name: str, cluster: int) -> Optional[set]:
+    """Opera field ids of stitched cluster ``cluster`` of a well in Harmony's ``FieldTables.json``
+    (``None`` without the file or the entry)."""
+    if not path.is_file():
+        return None
+    try:
+        tables = json.loads(path.read_text(encoding="utf-8"))
+        for well in tables:
+            if str(well.get("Well", "")).upper() != well_name.upper():
+                continue
+            for table in well.get("FieldTables", []):
+                if int(table.get("ClusterID", -1)) == cluster:
+                    return {int(f) for f in table["FieldTable"]["Field"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        logger.info("Cannot read %s (%s): all the fields of the well are used.", path, e)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # mosaic
 # ---------------------------------------------------------------------------
