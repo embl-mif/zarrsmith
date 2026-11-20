@@ -91,6 +91,54 @@ class ZarrTileArray:
                 f"shape={self.shape}, dtype={self.dtype})")
 
 
+class RelabeledArray:
+    """Read-only view of a label array whose ids are changed as they are read.
+
+    Every voxel other than ``background`` first gets ``offset`` added, then the ids found
+    in ``mapping`` are replaced by their value; other ids are kept. This is how the tiles
+    of a segmentation run tile by tile are given one numbering before they are fused:
+    ``offset`` makes the ids of each tile unique (e.g. ``tile_index * step``) and
+    ``mapping`` merges the objects split between tiles. The result has ``dtype``
+    (default ``uint32``); an id that does not fit raises ``ValueError``. It can be sent to
+    worker processes when the wrapped array can (``picklable``).
+    """
+
+    def __init__(self, data, *, offset: int = 0, mapping: Optional[Dict[int, int]] = None,
+                 background: int = 0, dtype="uint32"):
+        self.data = data
+        self.offset = int(offset)
+        self.background = int(background)
+        self.dtype = np.dtype(dtype)
+        if self.dtype.kind not in "iu":
+            raise ValueError(f"RelabeledArray needs an integer dtype, got {self.dtype}.")
+        items = sorted((int(k), int(v)) for k, v in (mapping or {}).items())
+        self._keys = np.array([k for k, _ in items], dtype=np.int64)
+        self._values = np.array([v for _, v in items], dtype=np.int64)
+        self.shape = tuple(int(s) for s in data.shape)
+        self.ndim = len(self.shape)
+        self.picklable = bool(getattr(data, "picklable", False))
+
+    def __getitem__(self, key) -> np.ndarray:
+        block = np.asarray(self.data[key]).astype(np.int64)
+        fg = block != self.background
+        block[fg] += self.offset
+        if self._keys.size and block.size:
+            ids, inverse = np.unique(block, return_inverse=True)
+            pos = np.clip(np.searchsorted(self._keys, ids), 0, self._keys.size - 1)
+            hit = (self._keys[pos] == ids) & (ids != self.background)
+            block = np.where(hit, self._values[pos], ids)[inverse.reshape(block.shape)]
+        info = np.iinfo(self.dtype)
+        if block.size and (block.max() > info.max or block.min() < info.min):
+            raise ValueError(f"Relabelled ids up to {int(block.max())} do not fit in {self.dtype}.")
+        return block.astype(self.dtype)
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def __repr__(self) -> str:
+        return f"RelabeledArray({self.data!r}, offset={self.offset}, {self._keys.size} mapped ids)"
+
+
 class ZarrMosaicManager(MosaicManager):
     """OME-Zarr stores (any microscope, converted with ZarrSmith or not) as one mosaic.
 
@@ -155,32 +203,53 @@ class ZarrMosaicManager(MosaicManager):
             logger.info("Skipping %s: fused from the stores of this folder.", store.name)
             return None
 
-        axes = md["axes"]
-        shape = dict(zip(axes, zm.data[0].shape))
-        spatial = [ax for ax in axes if ax in "zyx"]
-        scale = dict(zip(spatial, md["scales"][0]))
-        translations = md.get("translations")
-        position = translations[0] if translations else {}
-        units = [normalize_unit(u) for u in (md.get("units") or ()) if u]
-        unit = units[-1] if units else "micrometer"
-        names = list(md.get("channel_names") or [])
-        n_c = shape.get("c", 1)
-        names = names if len(names) == n_c else [f"ch{i}" for i in range(n_c)]
-        stack = store.name[:-len(".ome.zarr")] if store.name.endswith(".ome.zarr") else store.stem
+        return store_tiles(store, zm=zm)
 
-        tiles = []
-        for t in range(shape.get("t", 1)):
-            for c in range(n_c):
-                data = ZarrTileArray(store, datasets[0]["path"], axes,
-                                     t if "t" in axes else None, c if "c" in axes else None,
-                                     (shape.get("z", 1), shape["y"], shape["x"]), zm.data[0].dtype)
-                tiles.append(Tile(
-                    data=data,
-                    origin=tuple(float(position.get(ax, 0.0)) for ax in "zyx"),
-                    voxel_size=tuple(float(scale.get(ax, 1.0)) for ax in "zyx"),
-                    channel=names[c],
-                    timepoint=t,
-                    attrs={"stack": stack, "path": os.path.abspath(store), "store": store.name},
-                    units=unit,
-                ))
-        return tiles, bool(translations)
+
+def store_tiles(store: str | Path, *, zm=None) -> Tuple[List[Tile], bool]:
+    """``(tiles, has a position)`` of one OME-Zarr store: one tile per timepoint and channel.
+
+    Each tile reads level 0 lazily (:class:`ZarrTileArray`) and sits at the store's NGFF
+    ``translation`` with its level-0 voxel size; the second value is ``False`` when the
+    store has no translation (the tiles are then placed at the origin). Unlike
+    :class:`ZarrMosaicManager`, which leaves label stores out, any store is read, so label
+    tiles (e.g. a segmentation run tile by tile) can be fused with ``blend="none"`` and
+    ``data_type="label"``, if need be through :class:`RelabeledArray`. ``zm`` is the
+    store, already opened as a ``ZarrManager``.
+    """
+    from ..microscope_manager.zarr_manager import ZarrManager
+
+    store = Path(store)
+    if zm is None:
+        zm = ZarrManager(str(store), mode="r")
+    datasets = zm._get_multiscales(zm.root)[0]["datasets"]
+    md = zm.metadata
+    axes = md["axes"]
+    shape = dict(zip(axes, zm.data[0].shape))
+    spatial = [ax for ax in axes if ax in "zyx"]
+    scale = dict(zip(spatial, md["scales"][0]))
+    translations = md.get("translations")
+    position = translations[0] if translations else {}
+    units = [normalize_unit(u) for u in (md.get("units") or ()) if u]
+    unit = units[-1] if units else "micrometer"
+    names = list(md.get("channel_names") or [])
+    n_c = shape.get("c", 1)
+    names = names if len(names) == n_c else [f"ch{i}" for i in range(n_c)]
+    stack = store.name[:-len(".ome.zarr")] if store.name.endswith(".ome.zarr") else store.stem
+
+    tiles = []
+    for t in range(shape.get("t", 1)):
+        for c in range(n_c):
+            data = ZarrTileArray(store, datasets[0]["path"], axes,
+                                 t if "t" in axes else None, c if "c" in axes else None,
+                                 (shape.get("z", 1), shape["y"], shape["x"]), zm.data[0].dtype)
+            tiles.append(Tile(
+                data=data,
+                origin=tuple(float(position.get(ax, 0.0)) for ax in "zyx"),
+                voxel_size=tuple(float(scale.get(ax, 1.0)) for ax in "zyx"),
+                channel=names[c],
+                timepoint=t,
+                attrs={"stack": stack, "path": os.path.abspath(store), "store": store.name},
+                units=unit,
+            ))
+    return tiles, bool(translations)
