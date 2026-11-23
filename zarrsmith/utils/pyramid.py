@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import dask.array as da
 
@@ -45,7 +45,7 @@ def build_pyramid(
     num_levels: int = 3,
     downscale_factor: SpatialFactor = 2,
     start_level: int = 0,
-    method: str = "nearest",
+    method: Optional[str] = None,
 ) -> Tuple[List[da.Array], Dict[str, Any]]:
     """
     Generate a multiscale pyramid and updated metadata for NGFF-compatible
@@ -58,11 +58,14 @@ def build_pyramid(
     - 2, meaning downsample Z, Y and X by 2
     - (1, 2, 2), meaning keep Z unchanged and downsample only YX
 
-    ``method`` is ``"nearest"`` (default), ``"mean"`` or ``"mode"`` (see
-    :func:`zarrsmith.utils.downsampling.downsample_numpy`). When
-    ``metadata['translations']`` is set, the origin of every new level follows
-    the method, by the NGFF 0.6 convention (see
-    :func:`zarrsmith.utils.translation.pyramid_translations`).
+    ``method`` is ``"mean"``, ``"nearest"`` or ``"mode"`` (see
+    :func:`zarrsmith.utils.downsampling.downsample_numpy`); ``None`` (default)
+    uses ``"mean"`` for intensity data and ``"nearest"`` for labels, as
+    :func:`zarrsmith.utils.populate_pyramid.populate_pyramid` does. The
+    origin of every new level follows the method, by the NGFF 0.6 convention (see
+    :func:`zarrsmith.utils.translation.pyramid_translations`), and the method is
+    kept in ``metadata['downsampling_method']``, which the writer records in the
+    ``multiscales`` ``type`` so that region writes refresh the levels the same way.
     """
     from .downsampling import resolve_downsampling_method
 
@@ -131,6 +134,7 @@ def build_pyramid(
     metadata["translations"] = pyramid_translations(
         source_translation, source_scale, new_scales, axes, method
     )
+    metadata["downsampling_method"] = method
     metadata["size"] = [tuple(level.shape) for level in pyramid]
     metadata["chunksize"] = [tuple(level.chunksize) for level in pyramid]
     return pyramid, metadata

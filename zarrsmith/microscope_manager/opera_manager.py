@@ -111,11 +111,17 @@ class OperaManager(MicroscopeManager):
 
         self.metadata["scales"] = scales
         self.metadata["size"] = sizes
-        # Harmony (Acapella) averages 2x2 blocks in Y/X and keeps Z, so its levels follow the
-        # NGFF 0.6 convention for binned levels: each axis moves by half its pixel growth,
-        # (s_k - s0) / 2. The scales come from the shape ratios, so Z (factor 1) does not move.
+        # Harmony (Acapella) bins its pyramid levels: each pixel is the mean of a 2x2 block in
+        # Y/X (rounded half up), Z is kept. So they follow the NGFF 0.6 convention for averaged
+        # levels: each axis moves by half its pixel growth, (s_k - s0) / 2, from an origin of 0
+        # when the position is unknown. The scales come from the shape ratios, so Z (factor 1)
+        # does not move.
         translations = self.metadata.get("translations")
-        self.metadata["translations"] = pyramid_translations(
-            translations[0] if translations else None, scales[0], scales, self.metadata["axes"], "mean"
-        ) if translations else None
+        if len(scales) > 1:
+            self.metadata["translations"] = pyramid_translations(
+                translations[0] if translations else None, scales[0], scales, self.metadata["axes"], "mean"
+            )
+            self.metadata["downsampling_method"] = "mean"
+        elif translations:
+            self.metadata["translations"] = [dict(translations[0])]
         return data_levels

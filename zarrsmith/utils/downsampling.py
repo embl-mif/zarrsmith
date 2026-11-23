@@ -237,6 +237,50 @@ def downsample_nearest(arr, factors: Sequence[int], spatial_axes: Sequence[int])
 DOWNSAMPLING_METHODS: tuple[str, ...] = ("mean", "nearest", "mode")
 
 
+def downsampling_record(method: str, factors: Sequence[int | float] | None = None) -> dict[str, Any]:
+    """The ``multiscales`` ``type`` and ``metadata`` entries naming how a pyramid was built.
+
+    NGFF 0.4-0.6: ``type`` SHOULD name the downscaling method and ``metadata`` SHOULD
+    describe it. ``factors`` (spatial, between consecutive levels) is left out when
+    unknown. :func:`recorded_downsampling_method` reads it back.
+    """
+    from .. import __version__
+
+    kwargs: dict[str, Any] = {"method": method}
+    blocks = "blocks"
+    if factors:
+        kwargs["factors"] = [int(f) if float(f).is_integer() else float(f) for f in factors]
+        blocks = f"{'x'.join(map(str, kwargs['factors']))} blocks"
+    return {
+        "type": method,
+        "metadata": {
+            "description": f"Each level is the {method} of {blocks} of the level above it.",
+            "method": "zarrsmith.utils.downsampling.downsample_numpy",
+            "version": __version__,
+            "kwargs": kwargs,
+        },
+    }
+
+
+def recorded_downsampling_method(multiscales: dict[str, Any] | None) -> str | None:
+    """The downsampling method a ``multiscales`` block records, or ``None``.
+
+    Read from ``type`` (see :func:`downsampling_record`), else from the
+    ``metadata`` ``kwargs`` that zarrsmith writes next to it.
+    """
+    if not multiscales:
+        return None
+    ms_type = multiscales.get("type")
+    if isinstance(ms_type, str) and ms_type.lower() in DOWNSAMPLING_METHODS:
+        return ms_type.lower()
+    meta = multiscales.get("metadata")
+    kwargs = meta.get("kwargs") if isinstance(meta, dict) else None
+    method = kwargs.get("method") if isinstance(kwargs, dict) else None
+    if isinstance(method, str) and method.lower() in DOWNSAMPLING_METHODS:
+        return method.lower()
+    return None
+
+
 def default_downsampling_method(data_type: str | None) -> str:
     """``"nearest"`` for label data, ``"mean"`` for intensity (and probability) data."""
     from .axes import normalize_data_type

@@ -159,19 +159,24 @@ class MicroscopeManager(ABC):
                       num_levels: Optional[int] = 3, 
                       downscale_factor: int | Sequence[int] | None = 2,
                       start_level: Optional[int] = 0,
+                      method: Optional[str] = None,
                       ) -> None:
         """Build additional pyramid levels from the current base-resolution data.
 
         The resulting data and scale metadata replace ``self.data`` and
         ``self.metadata`` in-place. This is mainly useful for managers that
         initially expose only one resolution level.
+
+        ``method`` is ``"mean"``, ``"nearest"`` or ``"mode"``; ``None`` (default)
+        uses ``"mean"`` for intensity data and ``"nearest"`` for labels.
         """
         from ..utils.pyramid import build_pyramid as _build_pyramid
         self.data, self.metadata = _build_pyramid(
-            self.data, self.metadata, 
-            num_levels=num_levels, 
+            self.data, self.metadata,
+            num_levels=num_levels,
             downscale_factor=2 if downscale_factor is None else downscale_factor,
             start_level = start_level,
+            method=method,
         )
 
     def close(self) -> None:

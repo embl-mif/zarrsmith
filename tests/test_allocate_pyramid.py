@@ -614,3 +614,80 @@ def test_mean_of_16_bit_data_matches_float64():
     got = downsample_numpy(arr, (2, 2, 2), (0, 1, 2), "mean")
     ref = np.rint(arr.reshape(16, 2, 16, 2, 16, 2).astype(np.float64).mean(axis=(1, 3, 5)))
     np.testing.assert_array_equal(got, ref.astype(np.uint16))
+
+
+# ---------------------------------------------------------------------------
+# One downsampling method per store: lazy pyramids, allocate and region writes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
+@pytest.mark.parametrize("data_type,expected", [("intensity", "mean"), ("label", "nearest")])
+def test_lazy_pyramid_defaults_by_data_type_and_records_it(tmp_path, zarr_format, ngff, data_type, expected):
+    from tests.test_ngff_validation import assert_valid_ome_zarr
+    from zarrsmith.microscope_manager import ArrayManager
+
+    data = np.random.default_rng(1).integers(0, 50, size=(8, 32, 32)).astype(np.uint16)
+    metadata = {"axes": "zyx", "scales": [(2.0, 0.5, 0.5)], "units": ("micrometer",) * 3,
+                "translations": [_zyx(10.0, 20.0, 30.0)], "data_type": data_type, "dtype": "uint16"}
+    manager = ArrayManager([da.from_array(data, chunks=(4, 16, 16))], metadata)
+    manager.build_pyramid(num_levels=2)
+    assert manager.metadata["downsampling_method"] == expected
+    np.testing.assert_array_equal(np.asarray(manager.data[1]), downsample_numpy(data, (2, 2, 2), (0, 1, 2), expected))
+
+    out = tmp_path / "img.ome.zarr"
+    manager.to_zarr(str(out), zarr_format=zarr_format, ngff_version=ngff, progress=False)
+    z = ZarrManager(str(out))
+    ms = z._get_multiscales(z.root)[0]
+    assert ms["type"] == expected
+    assert ms["metadata"]["kwargs"] == {"method": expected, "factors": [2, 2, 2]}
+    assert z.metadata["downsampling_method"] == expected
+    assert_valid_ome_zarr(out, ngff)
+
+
+@pytest.mark.parametrize("zarr_format,ngff", FORMATS, ids=FORMAT_IDS)
+def test_region_writes_refresh_levels_with_the_allocated_method(tmp_path, zarr_format, ngff):
+    out = tmp_path / "prob.ome.zarr"
+    allocate_zarr(out, size=(8, 32, 32), axes="zyx", zarr_format=zarr_format, dtype="float32",
+                  num_levels=2, translation=(10.0, 20.0, 30.0))
+    z = ZarrManager(str(out), mode="r+")
+    ms = z._get_multiscales(z.root)[0]
+    assert ms["type"] == "mean"  # what allocate placed the level translations for
+
+    values = np.random.default_rng(2).random((8, 32, 32)).astype(np.float32)
+    z.write_image_region(values)
+    level1 = np.asarray(zarr.open_group(str(out), mode="r")["1"][:])
+    np.testing.assert_allclose(level1, downsample_numpy(values, (2, 2, 2), (0, 1, 2), "mean"), rtol=1e-6)
+
+
+def test_region_writes_keep_nearest_for_stores_without_a_method(tmp_path):
+    out = tmp_path / "old.ome.zarr"
+    allocate_zarr(out, size=(8, 32, 32), axes="zyx", zarr_format=3, dtype="float32", num_levels=2)
+    root = zarr.open_group(str(out), mode="r+")
+    ome = root.attrs["ome"]
+    ome["multiscales"][0].pop("type")
+    ome["multiscales"][0].pop("metadata")
+    root.attrs["ome"] = ome
+
+    z = ZarrManager(str(out), mode="r+")
+    assert z.metadata["downsampling_method"] is None
+    values = np.random.default_rng(3).random((8, 32, 32)).astype(np.float32)
+    z.write_image_region(values)
+    level1 = np.asarray(zarr.open_group(str(out), mode="r")["1"][:])
+    np.testing.assert_array_equal(level1, values[::2, ::2, ::2])
+
+
+@pytest.mark.parametrize("data_type,dtype,level1", [
+    ("intensity", "float32", [0.0, 1.0, 0.25, 0.25]),  # averaged: half a level-0 pixel further
+    ("label", "uint32", None),                          # nearest: no offset, nothing written
+])
+def test_allocate_without_a_position_places_averaged_levels(tmp_path, data_type, dtype, level1):
+    out = tmp_path / "out.ome.zarr"
+    allocate_zarr(out, size=(2, 8, 32, 32), axes="tzyx", scale=(2.0, 0.5, 0.5), zarr_format=3,
+                  dtype=dtype, data_type=data_type, num_levels=2)
+    ms = ZarrManager(str(out))._get_multiscales(zarr.open_group(str(out), mode="r"))[0]
+    transforms = [ds["coordinateTransformations"] for ds in ms["datasets"]]
+    if level1 is None:
+        assert all(len(t) == 1 for t in transforms)
+    else:
+        assert transforms[0][1]["translation"] == [0.0, 0.0, 0.0, 0.0]
+        assert transforms[1][1]["translation"] == pytest.approx(level1)

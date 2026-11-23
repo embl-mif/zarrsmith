@@ -31,7 +31,7 @@ zarrsmith convert --batch datasets.csv
 | `-si`, `--scene_index` | scene of a `.czi` or `.vsi` file | the first scene |
 | `-cn`, `--channel_names` / `-cc`, `--channel_colors` | names and colours (hex or matplotlib names) of the channels | those of the input |
 | `-zf`, `--zarr_format` | 2 (NGFF 0.4) or 3 (NGFF 0.5) | 3 |
-| `-df`, `--downscale_factor` | pyramid factor: one value, or `Z Y X` | 2 on every spatial axis |
+| `-df`, `--downscale_factor` | pyramid factor: one value, or `Z Y X`. Each level averages blocks of the level above (intensity data) or keeps one pixel per block (labels), as `zarrsmith pyramid` does | 2 on every spatial axis |
 | `-nl`, `--num_levels` | number of pyramid levels | until no spatial axis of the coarsest level is over 2048 pixels |
 | `-s`, `--subset` | crop or select before writing, e.g. `"y=10:100:2;x=20:80;c=0,2"` | everything |
 | `-sh`, `--shards` / `-stm`, `--shard_target_mb` / `-sea`, `--shard_exclude_axes` | sharding (see [Advanced writing options](advanced.md)) | `auto`, 1024 MB, `t c` |
@@ -101,7 +101,7 @@ zarrsmith allocate -o new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale
 | `-cs`, `--chunk_size` / `-sh`, `--shards` | level-0 chunks and shards, one value per output axis (`--shards auto` or `none` also work) | the template's; `auto` shards without a template |
 | `-sl`, `--start_level` | level of the template (index or path) that becomes the output's level 0; `--crop` is in its pixels | 0 |
 | `-nl`, `--num_levels` / `-df`, `--downscale_factor` | levels to create, and the factor between them | the template's levels from `--start_level` on; 1 level without a template |
-| `-tr`, `--translation` | without a value: keep the template's origin (moved by `--crop`); with one value per spatial axis: the level-0 origin. An all-zero origin is not written, which NGFF reads the same way | written when the template has one or the crop moves the origin |
+| `-tr`, `--translation` | without a value: keep the template's origin (moved by `--crop`); with one value per spatial axis: the level-0 origin. An all-zero origin is not written, which NGFF reads the same way | written when the template has one, the crop moves the origin, or the coarser levels are averaged (intensity data with more than one level), from an origin of 0 when the template has none |
 | `-zf`, `--zarr_format` | 2 (NGFF 0.4) or 3 (NGFF 0.5) | the template's, else 3 |
 | `-at`, `--attrs` | custom group attributes, as JSON or a `.json` file, e.g. `'{"t_range": [0, 10]}'` | none |
 | `-cp`, `--compressor` / `-cpl`, `--compressor_level` | codec | blosc, level 1 |

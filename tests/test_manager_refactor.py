@@ -308,6 +308,23 @@ def test_opera_pyramid_levels_are_placed_as_binned(tmp_path, monkeypatch):
     assert t1 == pytest.approx({"z": 5.0, "y": 10.0 + 0.29065, "x": 20.0 + 0.29065})
 
 
+def test_opera_manager_places_binned_levels_without_a_position(tmp_path):
+    """Harmony's level 1 is the 2x2 mean of level 0: it sits half a level-0 pixel further,
+    from an origin of 0 when the stitched TIFF has no position."""
+    path = tmp_path / "opera.ome.tiff"
+    data = np.arange(2 * 4 * 8 * 8, dtype=np.uint16).reshape(1, 2, 4, 8, 8)
+    level1 = np.floor(data.reshape(1, 2, 4, 4, 2, 4, 2).mean(axis=(4, 6)) + 0.5).astype(np.uint16)
+    with tifffile.TiffWriter(path, ome=True) as tif:
+        tif.write(data, subifds=1, metadata={"axes": "TCZYX", "PhysicalSizeX": 0.5,
+                                              "PhysicalSizeY": 0.5, "PhysicalSizeZ": 3.0})
+        tif.write(level1, subfiletype=1)
+    o = mm.OperaManager(path)
+    assert [d.shape for d in o.data] == [(1, 2, 4, 8, 8), (1, 2, 4, 4, 4)]
+    assert np.array_equal(o.data[1].compute(), level1)
+    assert o.metadata["translations"] == [{"z": 0.0, "y": 0.0, "x": 0.0}, {"z": 0.0, "y": 0.25, "x": 0.25}]
+    assert o.metadata["downsampling_method"] == "mean"
+
+
 def test_scape_manager(tmp_path):
     (tmp_path / "Metadata").mkdir()
     dims = "".join(

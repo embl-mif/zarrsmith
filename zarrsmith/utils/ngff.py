@@ -26,6 +26,7 @@ from .colors import (  # noqa: F401  (re-exported: historical import location)
 )
 from .units import normalize_unit
 from .translation import has_translation, normalize_translations, translation_vector
+from .downsampling import downsampling_record
 from .axes import (
     DATA_TYPES,
     SPATIAL_AXIS_SET,
@@ -347,6 +348,7 @@ def _write_ngff_metadata(
         name=name,
         **extra,
     )
+    _record_downsampling(group, metadata, ngff_version)
     if data_type == "label":
         add_metadata(
             group,
@@ -354,6 +356,29 @@ def _write_ngff_metadata(
             fmt=fmt,
         )
     _write_extra_attributes(group, metadata.get("extra_attributes"))
+
+
+def _record_downsampling(group: zarr.Group, metadata: dict[str, Any], ngff_version: str) -> None:
+    """Name ``metadata['downsampling_method']`` in the ``multiscales`` of a pyramid.
+
+    ome-zarr-py does not pass ``type`` through, so it is added afterwards (see
+    :func:`zarrsmith.utils.downsampling.downsampling_record`). Region writes read it
+    back to refresh the coarser levels with the same method. A single level, or a
+    pyramid of unknown method, records nothing.
+    """
+    method = metadata.get("downsampling_method")
+    scales = metadata.get("scales") or []
+    if not method or len(scales) < 2:
+        return
+    factors = []
+    for fine, coarse in zip(scales[0], scales[1]):
+        ratio = float(coarse) / float(fine) if float(fine) else 1.0
+        factors.append(int(round(ratio)) if abs(ratio - round(ratio)) < 1e-6 else ratio)
+    multiscales = _get_group_multiscales(group)
+    if not multiscales:
+        return
+    multiscales[0].update(downsampling_record(method, factors))
+    _set_multiscales(group, multiscales, ngff_version)
 
 
 def _resolve_format(cfg: ZarrWriteConfig) -> tuple[str, int]:
