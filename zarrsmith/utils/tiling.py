@@ -19,6 +19,8 @@ import itertools
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+import numpy as np
+
 from .region import physical_to_pixel_bounds, physical_to_pixels
 
 TILED_AXES = ("z", "y", "x")
@@ -199,66 +201,121 @@ def _volume(bounds: Mapping[str, tuple[int, int]]) -> int:
     return n
 
 
+def _ceil_div(a: int, b: int) -> int:
+    return -(-int(a) // int(b))
+
+
+def _axis_option(lo: int, hi: int, extent: int, n: int, overlap: int, halo: int, align: int) -> tuple[int, int, int]:
+    """``(stride, count, load)`` along one axis cut into about ``n`` tiles.
+
+    The stride is the even share of the ROI ``[lo, hi)`` rounded up to a multiple
+    of a power of two (``align`` at most, and at most an eighth of the stride, so
+    rounding wastes little); rounding up can leave fewer tiles than ``n``. ``count``
+    is the number of tiles :func:`_axis_tiles` then makes (a short last tile folded
+    into the one before) and ``load`` the largest length a tile reads, halo included
+    and clipped to the image (``extent`` long). ``count == 1``: the axis is not split.
+    """
+    length = hi - lo
+    whole = min(hi + halo, extent) - max(lo - halo, 0)
+    if n <= 1 or length - overlap <= 1:
+        return length, 1, whole
+    even = _ceil_div(length - overlap, n)
+    unit = 1
+    while unit * 2 <= min(int(align), even // 8):
+        unit *= 2
+    stride = _ceil_div(even, unit) * unit
+    size = stride + overlap
+    if size >= length:
+        return length, 1, whole
+    m = _ceil_div(length - size, stride) + 1
+    last_start = lo + (m - 1) * stride
+    if m > 1 and hi - last_start < max(halo, 2):  # folded into the tile before
+        m -= 1
+    # Tiles k < m - 1 are `size` long, the last one ends at hi; only tiles near the
+    # image borders lose part of their halo, so the longest load is among these.
+    near = _ceil_div(2 * halo + 1, stride) + 1
+    ks = set(range(min(m, near))) | set(range(max(0, m - near), m)) | {m // 2}
+    load = 0
+    for k in ks:
+        start = lo + k * stride
+        end = hi if k == m - 1 else min(start + size, hi)
+        load = max(load, min(end + halo, extent) - max(start - halo, 0))
+    return stride, m, load
+
+
+def _axis_choices(lo: int, hi: int, extent: int, overlap: int, halo: int, align: int) -> list[tuple[int, int, int]]:
+    """Every ``(count, load, stride)`` reachable along one axis (see :func:`_axis_option`),
+    by increasing count, keeping only the counts that read less than all fewer counts."""
+    best: dict[int, tuple[int, int]] = {}
+    span = max(1, hi - lo - overlap)
+    n = 1
+    while n <= span:
+        stride, count, load = _axis_option(lo, hi, extent, n, overlap, halo, align)
+        if count not in best or load < best[count][0]:
+            best[count] = (load, stride)
+        even = _ceil_div(span, n)
+        if even <= 1:
+            break
+        n = _ceil_div(span, even - 1)  # next n with a smaller even share (about 2 * sqrt(span) of them)
+    out, smallest = [], None
+    for count in sorted(best):
+        load, stride = best[count]
+        if smallest is None or load < smallest:
+            out.append((count, load, stride))
+            smallest = load
+    return out
+
+
 def _auto_strides(
-    lengths: dict[str, int],
+    roi: dict[str, tuple[int, int]],
+    extents: dict[str, int],
     overlaps: dict[str, int],
     halos: dict[str, int],
     budget: float,
     align: Mapping[str, int],
-    whole: dict[str, int],
 ) -> dict[str, int]:
-    """Strides along the axes of ``lengths`` (ROI lengths) for tiles of at most
-    ``budget`` loaded voxels (tile plus halo on both sides). ``whole`` is what is
-    read along an axis kept whole (the ROI plus the halo that lies in the image).
+    """Strides along the axes of ``roi`` for tiles of at most ``budget`` loaded voxels
+    (tile plus halo, clipped to the image of ``extents``). Axes left whole (one tile)
+    are left out of the result.
 
-    Every choice of axes kept whole (one tile along them) is tried; the budget
-    left is shared evenly by the axes that are cut. Each stride is the largest
-    multiple of a power of two within that share (``align`` at most, and at most
-    an eighth of the stride, so rounding wastes little), then evened out so
-    the tiles of an axis have about the same size. The choice with the least
-    area cut between tiles wins (what the overlap, the halo and merging the tiles
-    afterwards cost), then the one with the fewest tiles: so tiles are compact,
-    not thin slabs. Axes kept whole are left out of the result.
+    Of the tile counts per axis that fit, the one with the least area cut between
+    tiles wins (what the overlap, the halo and merging the tiles afterwards cost),
+    then the one with the fewest tiles: so tiles are compact, not thin slabs. Tiles
+    are a grid, so the largest load is the product of the largest load along each
+    axis (:func:`_axis_choices`). Every combination of counts is considered: depth
+    first, dropping a branch as soon as its cut area exceeds the best found, and
+    taking along the last axis the fewest tiles that fit.
     """
-    axes = list(lengths)
-    best = None
-    error = None
-    for keep in itertools.chain.from_iterable(itertools.combinations(axes, k) for k in range(len(axes))):
-        cut = [ax for ax in axes if ax not in keep]
-        left = float(budget)
-        for ax in keep:
-            left /= whole[ax]
-        share = left ** (1.0 / len(cut))
-        strides, counts = {}, {}
-        for ax in cut:
-            room = int(share) - 2 * halos[ax] - overlaps[ax]  # largest stride that fits
-            if room < 1:
-                error = (f"max_tile_voxels is too small: along {ax!r} a tile of about {int(share)} pixels "
-                         f"cannot hold the overlap ({overlaps[ax]}) and twice the halo ({halos[ax]}).")
-                break
-            unit = 1
-            while unit * 2 <= min(int(align.get(ax, 1)), room // 8):
-                unit *= 2
-            stride = room - room % unit
-            n = max(1, -(-(lengths[ax] - overlaps[ax]) // stride))  # tiles needed at that stride
-            even = -(-(lengths[ax] - overlaps[ax]) // n)  # same count, tiles of equal size
-            strides[ax] = min(-(-even // unit) * unit, stride)
-            counts[ax] = n
-        else:
-            count, area = 1, 0
-            for ax in axes:
-                count *= counts.get(ax, 1)
-                face = 1
-                for other in axes:
-                    if other != ax:
-                        face *= lengths[other]
-                area += (counts.get(ax, 1) - 1) * face  # cut planes across the ROI
-            key = (area, count)
-            if best is None or key < best[0]:
-                best = (key, strides)
-    if best is None:
-        raise ValueError(error)
-    return best[1]
+    axes = list(roi)
+    lengths = {ax: hi - lo for ax, (lo, hi) in roi.items()}
+    faces = {ax: int(np.prod([lengths[o] for o in axes if o != ax])) for ax in axes}
+    choices = {ax: _axis_choices(*roi[ax], extents[ax], overlaps[ax], halos[ax], align.get(ax, 1)) for ax in axes}
+    best: list = [None]  # ((area, count), {axis: choice})
+
+    def search(i: int, area: int, count: int, load: int, chosen: dict) -> None:
+        ax = axes[i]
+        if i == len(axes) - 1:  # loads fall as counts rise: the first that fits is the fewest tiles
+            for c in choices[ax]:
+                if load * c[1] <= budget:
+                    key = (area + (c[0] - 1) * faces[ax], count * c[0])
+                    if best[0] is None or key < best[0][0]:
+                        best[0] = (key, {**chosen, ax: c})
+                    return
+            return
+        for c in choices[ax]:
+            a = area + (c[0] - 1) * faces[ax]
+            if best[0] is not None and a > best[0][0][0]:
+                break  # more tiles along this axis only add area
+            search(i + 1, a, count * c[0], load * c[1], {**chosen, ax: c})
+
+    search(0, 0, 1, 1, {})
+    if best[0] is None:
+        smallest = int(np.prod([choices[ax][-1][1] for ax in axes]))
+        raise ValueError(
+            f"max_tile_voxels is too small: even the smallest tiles read {smallest} voxels "
+            f"(overlap {overlaps} and twice the halo {halos} included), more than {budget:.0f}."
+        )
+    return {ax: c[2] for ax, c in best[0][1].items() if c[0] > 1}
 
 
 def _divisor_at_most(n: int, limit: int) -> int:
@@ -328,12 +385,14 @@ def plan_tiles(
     max_tile_voxels
         Most voxels one job may read for a tile, halo included (e.g. what fits in
         GPU memory). Axes without a ``tile_size`` are cut only when a tile would
-        exceed it: the ROI stays one tile if it fits. Otherwise there are as few
-        tiles as fit, of about equal size: an axis shorter than an even share of
-        the budget stays whole (usually z), the others are cut evenly, with strides
-        that are multiples of the default inner chunk (16 along z, 256 along y and
-        x) when the budget allows, so the output's write blocks stay aligned to
-        it. ``tile_size`` given for an axis is kept and counts towards the budget.
+        exceed it: the ROI stays one tile if it fits. Otherwise every number of
+        tiles along every axis is considered, and of those that fit, the one with
+        the least area cut between tiles wins, then the one with the fewest tiles
+        (so a short axis, usually z, stays whole, and tiles are compact). Tiles of
+        an axis have about equal size, with strides that are multiples of the
+        default inner chunk (16 along z, 256 along y and x) when the budget allows,
+        so the output's write blocks stay aligned to it. ``tile_size`` given for an
+        axis is kept and counts towards the budget.
         It applies to one timepoint and channel: untiled axes are not counted.
     resize
         Linear factor by which the tool enlarges each tile before processing, so
@@ -438,15 +497,10 @@ def plan_tiles(
     for ax in axes:
         if ax in sizes:
             fixed *= min(sizes[ax], roi_px[ax][1] - roi_px[ax][0]) + 2 * halos.get(ax, 0)
-    lengths = {ax: roi_px[ax][1] - roi_px[ax][0] for ax in free}
     ov = {ax: overlaps.get(ax, 0) for ax in free}
-    hl = {ax: halos.get(ax, 0) for ax in free}
-    whole = {ax: min(roi_px[ax][1] + hl[ax], shape[ax]) - max(roi_px[ax][0] - hl[ax], 0) for ax in free}
-    budget = limit / fixed
-    for _ in range(50):  # rounding, folded last tiles: shrink until every tile fits
-        strides = _auto_strides(lengths, ov, hl, budget, DEFAULT_INNER_CHUNK, whole)
-        plan = build({**sizes, **{ax: s + ov[ax] for ax, s in strides.items()}})
-        if plan.max_load_voxels <= limit:
-            return plan
-        budget *= 0.9
-    raise ValueError(f"Could not fit tiles within max_tile_voxels={max_tile_voxels}.")
+    strides = _auto_strides({ax: roi_px[ax] for ax in free}, {ax: shape[ax] for ax in free}, ov,
+                            {ax: halos.get(ax, 0) for ax in free}, limit / fixed, DEFAULT_INNER_CHUNK)
+    plan = build({**sizes, **{ax: s + ov[ax] for ax, s in strides.items()}})
+    if plan.max_load_voxels > limit:  # the search computes the loads exactly: should not happen
+        raise RuntimeError(f"Tiles read {plan.max_load_voxels} voxels, more than the limit {limit:.0f}.")
+    return plan

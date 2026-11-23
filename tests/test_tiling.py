@@ -1,6 +1,8 @@
 """Tile plans (zarrsmith.utils.tiling) and writing tiles into an output laid out from one."""
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -176,12 +178,51 @@ def test_an_image_that_fits_stays_one_tile():
 def test_a_large_volume_is_cut_in_yx_into_few_aligned_tiles():
     shape = {"t": 3, "z": 96, "y": 6000, "x": 5000}
     plan = plan_tiles(shape, overlap=32, halo=16, max_tile_voxels=400_000_000)
-    assert plan.counts == {"z": 1, "y": 4, "x": 3}  # z short: kept whole
+    assert plan.counts == {"z": 1, "y": 3, "x": 3}  # z short: kept whole
     assert plan.stride["y"] % 128 == 0 and plan.stride["x"] % 128 == 0  # inner chunks of 128 fit
-    assert plan.max_load_voxels <= 400_000_000  # 4 x 3 even tiles: about 265 M voxels each
+    assert plan.max_load_voxels <= 400_000_000  # 3 x 3 even tiles: about 350 M voxels each
     assert _core_volume(plan) == 96 * 6000 * 5000  # cores still cover the image once
     # the budget is per timepoint: t is not tiled
     assert all(set(t.bounds) == {"z", "y", "x"} for t in plan.tiles)
+
+
+def test_rounding_does_not_cost_a_row_of_tiles():
+    """A 301 x 1880 x 2566 stack, ~300 M voxels per job: 2 x 4 tiles fit (about 234 M
+    voxels each), with less area cut than 3 x 3; rounding an even share of the budget
+    down used to give 3 x 4."""
+    shape = {"t": 1, "c": 4, "z": 301, "y": 1880, "x": 2566}
+    plan = plan_tiles(shape, overlap=64, halo=20, max_tile_voxels=300_000_000)
+    assert plan.counts == {"z": 1, "y": 2, "x": 4}
+    assert plan.max_load_voxels <= 300_000_000
+    assert _core_volume(plan) == 301 * 1880 * 2566
+
+
+def _key(counts, lengths):
+    area = sum((counts[ax] - 1) * np.prod([lengths[o] for o in lengths if o != ax]) for ax in lengths)
+    return area, int(np.prod(list(counts.values())))
+
+
+@pytest.mark.parametrize("shape, overlap, halo, budget", [
+    ({"y": 37, "x": 53}, 3, 2, 300),
+    ({"y": 60, "x": 41}, 0, 5, 500),
+    ({"y": 45, "x": 45}, 6, 1, 900),
+    ({"z": 9, "y": 23, "x": 31}, 2, 1, 700),
+    ({"z": 14, "y": 17, "x": 12}, 1, 2, 1200),
+])
+def test_the_search_finds_the_best_counts(shape, overlap, halo, budget):
+    """Same answer as trying every tile count along every axis."""
+    from zarrsmith.utils import tiling
+
+    plan = plan_tiles(shape, overlap=overlap, halo=halo, max_tile_voxels=budget)
+    assert plan.max_load_voxels <= budget
+    best = None
+    for counts in itertools.product(*(range(1, n - overlap + 1) for n in shape.values())):
+        opts = [tiling._axis_option(0, n, n, c, overlap, halo, tiling.DEFAULT_INNER_CHUNK[ax])
+                for (ax, n), c in zip(shape.items(), counts)]
+        if np.prod([o[2] for o in opts]) <= budget:
+            key = _key({ax: o[1] for ax, o in zip(shape, opts)}, shape)
+            best = key if best is None or key < best else best
+    assert _key(plan.counts, shape) == best
 
 
 def test_resize_shrinks_the_tiles():
@@ -194,7 +235,7 @@ def test_resize_shrinks_the_tiles():
 
 def test_a_long_axis_is_cut_too():
     plan = plan_tiles({"z": 4000, "y": 512, "x": 512}, max_tile_voxels=256 * 512 * 512)
-    assert plan.counts["z"] > 1 and plan.counts["y"] == plan.counts["x"] == 1
+    assert plan.counts["z"] > 1 and len(plan.tiles) == 16  # 16 tiles of 256 x 512 x 512 voxels' worth
     assert plan.max_load_voxels <= 256 * 512 * 512
 
 
