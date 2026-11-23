@@ -193,7 +193,7 @@ z.populate_pyramid(num_levels=4, method="mode")  # also group="labels/nuclei"
 z.populate_pyramid(num_levels=6, start_level=2)   # keep levels 0-2, rebuild 3-5 from level 2
 ```
 
-`method` is `"mean"`, `"nearest"` or `"mode"`; by default `"nearest"` for labels and `"mean"` otherwise. The lazy `build_pyramid` (what `zarrsmith convert`, `fuse` and the napari widgets use) takes `method` too, with the same default. Every pyramid zarrsmith writes, and every image `allocate_zarr` creates, records its method in the `multiscales` `type` and `metadata` fields, as the NGFF spec recommends, and `write_image_region` / `write_label_region` refresh the coarser levels with that method, so data and level translations stay consistent. A store that records no method is refreshed with `"nearest"`, as before.
+`method` is `"mean"`, `"nearest"` or `"mode"`; by default `"nearest"` for labels and `"mean"` otherwise. The lazy `build_pyramid` (what `zarrsmith convert` and the napari Convert widget use; `-me/--method` and *Downsampling* there) takes `method` too, with the same default, as does `fuse_tiles` (`pyramid_method`, which fills the levels in place like `populate_pyramid`). Every pyramid zarrsmith writes, and every image `allocate_zarr` creates, records its method in the `multiscales` `type` and `metadata` fields, as the NGFF spec recommends, and `write_image_region` / `write_label_region` refresh the coarser levels with that method, so data and level translations stay consistent. A store that records no method is refreshed with `"nearest"`, as before.
 
 A sharded level is built one inner chunk at a time, so each task holds one output shard plus one chunk's source window; the number of threads is limited to what fits in memory, sharded or not.
 

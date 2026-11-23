@@ -213,7 +213,7 @@ def mosaic_dock(app, monkeypatch, warned, tmp_path):
     monkeypatch.setattr(sys, "stderr", sys.stderr)
     runs = []
 
-    def worker(tiles, out, kwargs):
+    def worker(mosaic, tiles, out, kwargs, **options):  # options: register, transforms_only, plan_kwargs
         runs.append((out, kwargs))
         return MagicMock()
 

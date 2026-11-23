@@ -196,12 +196,19 @@ def test_fusion_keeps_a_plain_folder(tmp_path):
     assert (folder / "keep.txt").exists()
 
 
-def test_fusion_temp_dir_cannot_be_inside_a_replaced_output(tmp_path):
+def test_fusion_replaces_an_output_only_at_the_end(tmp_path):
     out = tmp_path / "fused.zarr"
     fuse_tiles([_tile()], out, progress=False)
-    with pytest.raises(FileExistsError):
-        fuse_tiles([_tile()], out, overwrite=True, temp_dir=out / "tmp", progress=False)
+    with pytest.warns(UserWarning, match="Replacing"):
+        fuse_tiles([_tile()], out, overwrite=True, progress=False)
     assert _value(out) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fused.transforms.json", "fused.zarr"]  # no partial store
+
+
+def test_fusion_temp_dir_is_deprecated_and_ignored(tmp_path):
+    with pytest.warns(DeprecationWarning, match="temp_dir"):
+        fuse_tiles([_tile()], tmp_path / "fused.zarr", temp_dir=tmp_path / "tmp", progress=False)
+    assert not (tmp_path / "tmp").exists()
 
 
 # --- command line ---

@@ -15,7 +15,7 @@ from zarrsmith.napari._convert_widget import _compact_advanced_rows, _make_secti
 
 ADVANCED = [
     "chunk_x", "chunk_y", "chunk_z", "n_levels", "downscale_z", "downscale_y",
-    "downscale_x", "zarr_format", "shards", "shard_target_mb", "shard_exclude_axes",
+    "downscale_x", "zarr_format", "method", "shards", "shard_target_mb", "shard_exclude_axes",
     "drop_singleton", "num_workers",
 ]
 
@@ -36,6 +36,7 @@ def form(app):
         downscale_y={"min": 1, "value": 2},
         downscale_x={"min": 1, "value": 2},
         zarr_format={"choices": [2, 3], "value": 3},
+        method={"choices": ["auto", "mean", "nearest", "mode"], "value": "auto"},
         shards={"choices": ["none", "auto"], "value": "none"},
         shard_target_mb={"min": 1, "max": 99999, "value": 64},
         shard_exclude_axes={"choices": ["t", "c", "z"], "widget_type": "Select",
@@ -44,7 +45,7 @@ def form(app):
         num_workers={"min": 0, "max": 256, "value": 0},
     )
     def f(chunk_x=512, chunk_y=512, chunk_z=16, n_levels=5, downscale_z=2,
-          downscale_y=2, downscale_x=2, zarr_format=3, shards="none",
+          downscale_y=2, downscale_x=2, zarr_format=3, method="auto", shards="none",
           shard_target_mb=64, shard_exclude_axes=("t", "c"),
           drop_singleton=True, num_workers=0):
         pass

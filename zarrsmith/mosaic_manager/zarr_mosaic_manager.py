@@ -153,24 +153,45 @@ class ZarrMosaicManager(MosaicManager):
     * ``timepoint``: the ``t`` index of the store;
     * ``attrs``: ``stack`` (the store name without ``.ome.zarr``), ``path`` and ``store``.
 
-    Left out, with a message: label stores (their values are ids, which a fusion would
-    blend), stores fused from the stores of the same folder (a previous fusion of this
-    mosaic, found by its ``zarrsmith_sources`` attribute) and stores
+    Label stores (a segmentation, tile by tile) are read when the folder holds nothing
+    else, or with ``data_type="label"``: their tiles are marked as label data
+    (``attrs["data_type"]``), so a fusion writes a label image without blending them (see
+    :func:`~zarrsmith.mosaic_manager.fusion.tile_data_type`). In a folder that mixes
+    images and labels, the images are read and the labels left out, unless
+    ``data_type="label"`` (``"intensity"`` always reads the images).
+
+    Also left out, with a message: stores fused from the stores of the same folder (a
+    previous fusion of this mosaic, found by its ``zarrsmith_sources`` attribute) and stores
     that cannot be read. A store without a translation is placed at the origin, with a
     warning. All stores must share the voxel size and units to be fused together.
     """
+
+    def __init__(self, path: str | Path, data_type: Optional[str] = None):
+        if data_type not in (None, "intensity", "label"):
+            raise ValueError(f"data_type must be None, 'intensity' or 'label', got {data_type!r}.")
+        self.data_type = data_type
+        super().__init__(path)
 
     def _scan(self) -> List[Tile]:
         if not self.path.is_dir():
             raise FileNotFoundError(f"{self.path} is not a folder of OME-Zarr stores.")
         stores = [self.path] if is_zarr_store(self.path) else zarr_stores(self.path)
+        found = {}
+        for store in stores:
+            result = self._store_tiles(store)
+            if result is not None:
+                found[store] = result
+        kinds = {store: "label" if any(t.attrs.get("data_type") == "label" for t in ts) else "intensity"
+                 for store, (ts, _) in found.items()}
+        wanted = self.data_type or ("intensity" if "intensity" in kinds.values() else "label")
+        if self.data_type is None and wanted == "label" and found:
+            logger.info("Only label stores in %s: reading them as label tiles.", self.path.name)
         tiles: List[Tile] = []
         unplaced = []
-        for store in stores:
-            found = self._store_tiles(store)
-            if found is None:
+        for store, (store_tiles, placed) in found.items():
+            if kinds[store] != wanted:
+                logger.info("Skipping %s: %s data (read with data_type=%r).", store.name, kinds[store], kinds[store])
                 continue
-            store_tiles, placed = found
             tiles.extend(store_tiles)
             if not placed:
                 unplaced.append(store.name)
@@ -194,10 +215,6 @@ class ZarrMosaicManager(MosaicManager):
         except Exception as e:  # noqa: BLE001 - one unreadable store must not stop the mosaic
             logger.warning("Skipping %s: %s", store.name, e)
             return None
-        md = zm.metadata
-        if md.get("data_type") == "label":
-            logger.info("Skipping %s: label data (ids cannot be fused).", store.name)
-            return None
         sources = zm.root.attrs.asdict().get(SOURCES_KEY) or []
         if store != self.path and sources and all(_same_folder(Path(s).parent, self.path) for s in sources):
             logger.info("Skipping %s: fused from the stores of this folder.", store.name)
@@ -211,11 +228,11 @@ def store_tiles(store: str | Path, *, zm=None) -> Tuple[List[Tile], bool]:
 
     Each tile reads level 0 lazily (:class:`ZarrTileArray`) and sits at the store's NGFF
     ``translation`` with its level-0 voxel size; the second value is ``False`` when the
-    store has no translation (the tiles are then placed at the origin). Unlike
-    :class:`ZarrMosaicManager`, which leaves label stores out, any store is read, so label
-    tiles (e.g. a segmentation run tile by tile) can be fused with ``blend="none"`` and
-    ``data_type="label"``, if need be through :class:`RelabeledArray`. ``zm`` is the
-    store, already opened as a ``ZarrManager``.
+    store has no translation (the tiles are then placed at the origin). The tiles of a
+    label store (e.g. a segmentation run tile by tile) are marked as label data
+    (``attrs["data_type"] = "label"``), so :func:`~zarrsmith.mosaic_manager.fuse_tiles`
+    writes a label image without blending them, if need be through
+    :class:`RelabeledArray`. ``zm`` is the store, already opened as a ``ZarrManager``.
     """
     from ..microscope_manager.zarr_manager import ZarrManager
 
@@ -249,7 +266,8 @@ def store_tiles(store: str | Path, *, zm=None) -> Tuple[List[Tile], bool]:
                 voxel_size=tuple(float(scale.get(ax, 1.0)) for ax in "zyx"),
                 channel=names[c],
                 timepoint=t,
-                attrs={"stack": stack, "path": os.path.abspath(store), "store": store.name},
+                attrs={"stack": stack, "path": os.path.abspath(store), "store": store.name,
+                       **({"data_type": "label"} if md.get("data_type") == "label" else {})},
                 units=unit,
             ))
     return tiles, bool(translations)

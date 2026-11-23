@@ -133,7 +133,8 @@ mosaic.fuse("slide.ome.zarr", field="field0", ds=(1, 4, 4))
 ```
 
 - **Tiles.** Every store gives one tile per timepoint and channel, from its full-resolution level, with its voxel size. Stores with the same channel names are fused channel by channel (`ch0`, `ch1`, ... without names). A 2D store is a tile one plane deep.
-- **Left out**, with a message: label stores (a fusion would blend their ids), and a store fused from the stores of the same folder, i.e. an earlier fusion of this mosaic written into it (the widget's default output). Fused images record the files or folders of their tiles in the root attribute `zarrsmith_sources`. A fused field moved to another folder is an ordinary tile there.
+- **Label stores** (a segmentation run tile by tile) are read when the folder holds only label stores, or with `ZarrMosaicManager(folder, data_type="label")` (`zarrsmith fuse -dt label`). Their tiles are marked as label data, so they are fused into a label image without blending: no `data_type` or `blend` to give. In a folder that also holds images, the images are read and the label stores left out, with a message.
+- **Left out**, with a message: a store fused from the stores of the same folder, i.e. an earlier fusion of this mosaic written into it (the widget's default output). Fused images record the files or folders of their tiles in the root attribute `zarrsmith_sources`. A fused field moved to another folder is an ordinary tile there.
 - **Without a position**, a store is placed at the origin, with a warning: convert it with a reader that finds the position, or set one with `update_metadata({"translations": ...})`.
 - **Fusion** needs one voxel size and unit for all the stores of a field. Stores that do not touch stay in separate fields, so for separately imaged positions (e.g. the files of a slide scanned one region at a time) the mosaic is mostly a way to see them side by side.
 
@@ -238,17 +239,18 @@ The fused image records where it is: its NGFF `translation` (`zm.metadata["trans
 | `tiles` | tiles or tile ids | `MosaicManager.fuse` only: the only tiles to fuse, the output fits them |
 | `skip` | tiles or tile ids | tiles to leave blank, see below |
 | `levels`, `downscale_factor` | integer, integer or `(z, y, x)` | pyramid levels (default 1) and factor between them (default 2) |
+| `pyramid_method` | `"mean"`, `"nearest"`, `"mode"` | downsampling of the pyramid levels (default: `"mean"`, `"nearest"` for labels) |
 | `workers` | integer | tiles read in parallel (default 1) |
 | `out_dtype` | dtype | default: input dtype, `float32` for `sum` |
-| `data_type` | `"intensity"`, `"label"` | write a label image (default `"intensity"`); needs `blend="none"` and an integer dtype |
+| `data_type` | `"intensity"`, `"label"` | write a label image; needs `blend="none"` (the default for labels) and an integer dtype. Default: `"label"` when every tile is label data (tiles of label stores), else `"intensity"` |
 | `midline_axis` | `"x"`, `"y"`, `"z"` | axis along which `sigmoid` and `midline` separate the groups or cameras (default: `z` for several cameras in 3D, `x` otherwise) |
 | `transforms_path` | path, `True`, `False` | where the [transforms file](#transforms-file) is written before fusing (default `True`: next to the output) |
 | `timepoints` | list of timepoints | timepoints to fuse (default: all), see [Timepoints](#timepoints) |
 | `reference_timepoint` | timepoint or `"all"` | timepoint whose tiles set the geometry of every timepoint (default: the first); `"all"` places every timepoint at [its own positions](#own-positions-per-timepoint) |
 | `overwrite` | bool | replace an existing output, once the fusion has succeeded (see [Existing outputs](advanced.md#existing-outputs)) |
-| `temp_dir` | path | where the temporary fused level 0 goes (default: next to the output) |
+| `temp_dir` | path | deprecated and ignored: level 0 is fused directly into the output |
 
-Every other option of `to_zarr` is passed through unchanged, exactly as for `zarrsmith convert`: `chunks` (in output axis order, `c, z, y, x` or `c, y, x`, after a leading `t` for several timepoints), `shards`, `shard_target_mb`, `shard_exclude_axes`, `zarr_format`, `ngff_version`, `compressor`, `compressor_level`, `drop_singleton`, `num_workers` (write threads) and `storage_options`. See [Advanced writing options](advanced.md). As with `zarrsmith convert`, a single fused channel is written without its channel axis unless `drop_singleton=False`.
+These `to_zarr` options set the output layout, as for `zarrsmith convert`: `chunks` (in output axis order, `c, z, y, x` or `c, y, x`, after a leading `t` for several timepoints), `shards`, `shard_target_mb`, `shard_exclude_axes`, `zarr_format`, `ngff_version`, `compressor`, `compressor_level`, `drop_singleton` and `num_workers` (pyramid threads). See [Advanced writing options](advanced.md). Chunks and shards must be 1 along `t` and `c`. As with `zarrsmith convert`, a single fused channel is written without its channel axis unless `drop_singleton=False`.
 
 ```python
 mosaic.fuse(
@@ -258,7 +260,7 @@ mosaic.fuse(
     crop={"z": slice(100, 400), "y": slice(0, 1500)},
     levels=4, downscale_factor=(1, 2, 2),
     chunks=(1, 32, 512, 512), shards="auto", shard_target_mb=512, zarr_format=3,
-    workers=4, num_workers=8, temp_dir="D:/scratch",
+    workers=4, num_workers=8,
 )
 ```
 
@@ -270,13 +272,13 @@ mosaic.fuse("acq_MIP.ome.zarr", projection="max", ds=(1, 8, 8), skip=["1-x00-y00
 
 Blend modes:
 
-- **`sigmoid`** (default): a smooth transition across every overlap, so no seam is visible. Each voxel is a weighted mean of the tiles that cover it, with a weight that falls to 0 at the tile's border. Across an overlap of two tiles, the share of one tile follows a sigmoid: 0 at its border, 1/2 in the middle of the overlap, 1 at the other tile's border, whatever the overlap width. The tiles of each group are fused this way first; then, where two groups overlap (for example the left and right illumination sides), the image moves from one group to the other with the same sigmoid, centred where `midline` would cut. `sigmoid_steepness` sets how sharp the transition is: the share of a tile goes from 10% to 90% over the central 50% of the overlap for 2, 27% for the default 4 and 14% for 8.
+- **`sigmoid`** (default for images): a smooth transition across every overlap, so no seam is visible. Each voxel is a weighted mean of the tiles that cover it, with a weight that falls to 0 at the tile's border. Across an overlap of two tiles, the share of one tile follows a sigmoid: 0 at its border, 1/2 in the middle of the overlap, 1 at the other tile's border, whatever the overlap width. The tiles of each group are fused this way first; then, where two groups overlap (for example the left and right illumination sides), the image moves from one group to the other with the same sigmoid, centred where `midline` would cut. `sigmoid_steepness` sets how sharp the transition is: the share of a tile goes from 10% to 90% over the central 50% of the overlap for 2, 27% for the default 4 and 14% for 8.
 - **`max`**: keeps the brighter value.
 - **`sum`**: adds the values, so overlaps show up as brighter bands.
 - **`midline`**: uses `max` within each tile group. Where two groups overlap (for example the left and right illumination sides), the image switches sharply from one group to the other at the middle of their overlap, along `midline_axis`. Each side is then shown where its light sheet is sharpest.
-- **`none`**: no blending. Every voxel is copied unchanged from exactly one tile: the one whose border is farthest from it, so two tiles of the same size meet in the middle of their overlap (on a tie the earlier tile wins). Values keep the tile dtype, and `ds` keeps one voxel per block instead of the mean, so no value is ever mixed or rounded. Groups and cameras switch sharply as with `midline`. Use it for label images, with `data_type="label"`.
+- **`none`** (default for labels): no blending. Every voxel is copied unchanged from exactly one tile: the one whose border is farthest from it, so two tiles of the same size meet in the middle of their overlap (on a tie the earlier tile wins). Values keep the tile dtype, and `ds` keeps one voxel per block instead of the mean, so no value is ever mixed or rounded. Groups and cameras switch sharply as with `midline`. Use it for label images, with `data_type="label"`.
 
-Fusing labels: tiles of a segmentation whose label IDs already agree across tiles (for example after the labels of neighbouring tiles have been matched) are fused with `blend="none", data_type="label"`. The output is a label image, its pyramid levels sample voxels instead of averaging them, and no display window is written. Labels with any other blend are refused, since mixing IDs gives meaningless values.
+Fusing labels: tiles of a segmentation whose label IDs already agree across tiles (for example after the labels of neighbouring tiles have been matched) are fused with `blend="none", data_type="label"`; tiles of label stores (see [OME-Zarr stores](#ome-zarr-stores-any-microscope)) are marked as labels, so both are then the defaults. The output is a label image, its pyramid levels sample voxels instead of averaging them, and no display window is written. Labels with any other blend are refused, since mixing IDs gives meaningless values.
 
 ```python
 fuse_tiles(label_tiles, "labels.ome.zarr", blend="none", data_type="label", levels=4)
@@ -345,12 +347,15 @@ The fused output stores a **display window** for every channel (OMERO `window` m
 
 ## How fusion works
 
-1. **Level 0** is fused one region at a time (256 × 256 output voxels in y/x for 3D, 1024 × 1024 for projections, over the full z range), at every timepoint, into a temporary zarr. For each region, only the tile voxels that fall inside it are read, downsampled and merged. Memory stays bounded and every full-resolution voxel is read once.
-2. The fused level 0, which is already downsampled and therefore small compared with the raw tiles, is written to the output with ZarrSmith's standard `to_zarr`. Pyramid levels, chunks, shards, compression and singleton axes therefore behave exactly as for any other conversion. The temporary store is then deleted.
+1. The output is created empty, with every pyramid level and its metadata, as [`zarrsmith allocate`](cli.md) does. Its geometry is the plan's (`plan_fusion`): the tile positions, flips and any camera registration or transforms file applied to the tiles.
+2. **Level 0** is fused straight into it, one shard at a time (one or more whole chunks without shards), at every timepoint. Workers never write the same file, so no locks are needed. A shard is merged in pieces (256 × 256 output voxels in y/x for 3D, or more to cover whole source chunks, and 1024 × 1024 for projections, over the full z range), then written in one go. For each piece, only the tile voxels that fall inside it are read, downsampled and merged. Every full-resolution voxel is read once and level 0 is written once; a worker holds one shard (in the output dtype) plus the canvases of one piece.
+3. The coarser levels are built in place from level 0 on disk, as [`zarrsmith pyramid`](cli.md) does, with `pyramid_method` (mean for images, nearest for labels by default).
 
-With `workers > 1`, the tiles of a region are read in **worker processes** when the tiles allow it (as Luxendo and Opera tiles do). h5py serialises reads within one process, so threads would not speed up reading HDF5 files. Merging and writing stay in the calling process. If worker processes cannot be started, fusion falls back to threads with a warning.
+An existing output (with `overwrite=True`) is fused next to it, in a hidden `.NAME.partial.zarr`, and replaces it only once the fusion has succeeded.
 
-Raw tiles usually have no pyramid, so every fusion reads the full-resolution data, whatever `ds` is. On a network drive the read speed sets the run time. Put `temp_dir` on a local disk when the output is on a network share.
+With `workers > 1`, shards are fused in **worker processes** when the tiles allow it (as Luxendo and Opera tiles do). h5py serialises reads within one process, so threads would not speed up reading HDF5 files. If worker processes cannot be started, fusion falls back to threads with a warning. One shard is one task, so an output that fits in a few shards (about 1 GB each by default) is fused with little parallelism; lower `shard_target_mb` to split it into more tasks.
+
+Raw tiles usually have no pyramid, so every fusion reads the full-resolution data, whatever `ds` is. On a network drive the read speed sets the run time.
 
 ## Command line
 

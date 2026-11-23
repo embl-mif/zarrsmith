@@ -156,6 +156,7 @@ def zarr_convert(
     zarr_format : Optional[int] = 3,
     downscale_factor: Optional[int] = 2,
     num_levels: Optional[int] = None,
+    method: Optional[str] = None,
     subset: Optional[dict] = None,
     shards: Optional[Any] = "auto",
     shard_target_mb: Optional[float] = None,
@@ -205,6 +206,10 @@ def zarr_convert(
             Number of pyramid levels.\n
             Example: \"-nl 3\")\n
             Default: None
+        method : Optional[str]
+            Downsampling method of the pyramid levels: "mean", "nearest" or "mode".\n
+            Example: \"-me nearest\"\n
+            Default: None (mean for intensity data, nearest for labels)
         subset : Optional[dict]
             Axis subset to apply before chunk selection and pyramid generation.\n
             Example: "--subset y=10:100:2;x=20:80"\n
@@ -307,10 +312,12 @@ def zarr_convert(
     if num_levels is None:
         num_levels = default_num_levels(dataset.metadata, downscale_factor)
     print(f"Number of levels: {num_levels}.")
+    print(f"Downsampling method: {method or 'default (mean for intensity, nearest for labels)'}.")
 
     dataset.build_pyramid(
         num_levels=num_levels, 
-        downscale_factor=downscale_factor
+        downscale_factor=downscale_factor,
+        method=method,
     )
 
     # --- Modify metadata according to optional parameters ---
@@ -417,6 +424,9 @@ def _batch_row_kwargs(v, columns) -> Dict[str, Any]:
     if "num_levels" in columns and _present(v.get("num_levels")):
         kwargs["num_levels"] = int(v["num_levels"])
 
+    if "method" in columns and _present(v.get("method")):
+        kwargs["method"] = str(v["method"]).strip().lower()
+
     for key in ("subset", "shards", "shard_exclude_axes"):
         if key in columns and _present(v.get(key)):
             kwargs[key] = v[key]
@@ -493,6 +503,7 @@ def convert_single(args):
         f'--scene_index {args.scene_index} --channel_names {args.channel_names} '
         f'--channel_colors {args.channel_colors} --zarr_format {args.zarr_format} '
         f'--num_levels {args.num_levels} --downscale_factor {args.downscale_factor} '
+        f'--method {args.method} '
         f'--chunk_size {args.chunk_size} --subset {args.subset} '
         f'--shards {args.shards} --shard_target_mb {args.shard_target_mb} '
         f'--shard_exclude_axes {args.shard_exclude_axes} '
@@ -600,6 +611,7 @@ def mosaic_convert(
     zarr_format: Optional[int] = 3,
     downscale_factor: Optional[Any] = 2,
     num_levels: Optional[int] = None,
+    method: Optional[str] = None,
     subset: Optional[Any] = None,
     shards: Optional[Any] = "auto",
     shard_target_mb: Optional[float] = None,
@@ -610,7 +622,7 @@ def mosaic_convert(
     num_workers: Optional[int] = None,
     read_downsample: Optional[Any] = None,
     projection: Optional[str] = "none",
-    blend: str = "sigmoid",
+    blend: Optional[str] = None,
     sigmoid_steepness: Optional[float] = None,
     channels: Optional[List[str]] = None,
     groups: Optional[List[str]] = None,
@@ -622,7 +634,7 @@ def mosaic_convert(
     reference_timepoint: Union[int, str, None] = None,
     midline_axis: Optional[str] = None,
     out_dtype: Optional[str] = None,
-    data_type: str = "intensity",
+    data_type: Optional[str] = None,
     read_workers: int = 4,
     temp_dir: Optional[str] = None,
     overwrite: bool = False,
@@ -635,7 +647,7 @@ def mosaic_convert(
 ):
     """Fuse a mosaic into an OME-Zarr image (CLI helper for ``zarrsmith fuse``).
 
-    The ``convert`` options (``max_size`` ... ``num_workers``) have the same meaning as in
+    The ``convert`` options (``max_size`` ... ``num_workers``, ``method``) have the same meaning as in
     :func:`zarr_convert`, applied to the fused output; ``subset`` crops it (z/y/x in
     output voxels) and selects channels (c). ``tiles`` lists the only tiles to fuse
     (ids as for ``skip_tiles``); the output then fits them. ``fields`` keeps only the
@@ -671,7 +683,7 @@ def mosaic_convert(
     print(f"\n--->Using mosaic manager: {reader.__name__} ({resolved})")
     if scene_index is not None and resolved != "zeiss":
         print(f"\tscene_index={scene_index} is ignored for {resolved} mosaics.")
-    options = reader_options(reader, flatfield=flatfield, scene_index=scene_index)
+    options = reader_options(reader, flatfield=flatfield, scene_index=scene_index, data_type=data_type)
     if not flatfield and "flatfield" not in options:
         print(f"\t--no_flatfield is ignored for {resolved} mosaics (no flat-field correction).")
     mosaic = reader(input_path, **options)
@@ -729,8 +741,8 @@ def mosaic_convert(
     crop, selected = _subset_to_crop(subset, channels or list(dict.fromkeys(t.channel for t in use)))
     plan = plan_fusion(use, ds=ds, projection=projection, blend=blend, channels=selected,
                        crop=crop, skip=skip, out_dtype=out_dtype, midline_axis=midline_axis,
-                       timepoints=timepoints, reference_timepoint=reference_timepoint)
-    print(f"\n--->Output: {plan.summary()}")
+                       timepoints=timepoints, reference_timepoint=reference_timepoint, data_type=data_type)
+    print(f"\n--->Output: {plan.summary()} ({plan.data_type} data, blend {plan.blend})")
     if plan.error:
         print(f"ERROR: {plan.error}")
         return False
@@ -770,7 +782,8 @@ def mosaic_convert(
         if shard_exclude_axes is not None:
             write_kwargs["shard_exclude_axes"] = shard_exclude_axes
 
-    print(f"PYRAMID LEVELS: {num_levels}, DOWNSCALE FACTOR: {factor}.")
+    print(f"PYRAMID LEVELS: {num_levels}, DOWNSCALE FACTOR: {factor}, "
+          f"METHOD: {method or 'default (mean for intensity, nearest for labels)'}.")
     print(f"WRITE OPTIONS: {write_kwargs}")
     print("\n--->Fusing to zarr")
     fuse_tiles(
@@ -786,6 +799,7 @@ def mosaic_convert(
         skip=skip,
         levels=int(num_levels),
         downscale_factor=factor,
+        pyramid_method=method,
         workers=int(read_workers),
         out_dtype=out_dtype,
         data_type=data_type,

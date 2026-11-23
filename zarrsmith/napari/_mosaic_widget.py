@@ -671,9 +671,13 @@ def mosaic_widget():
             w.fields.value = fields[:1]  # tiles of separate fields are not fused together
         show_widget.channels.value = channels[:1]  # one channel keeps napari responsive
         fuse_widget.channels.value = channels
-        fuse_widget.blend.value = "sigmoid"  # smooth between tiles and between groups
+        labels = all(mos.fusion.tile_data_type(t) == "label" for t in mosaic.tiles)
+        # smooth between tiles and between groups; label ids are copied, never blended
+        fuse_widget.blend.value = "none" if labels else "sigmoid"
         lo, hi = mosaic.bounding_box()
         print(f"{len(mosaic.tiles)} tiles, channels {channels}, groups {groups}, fields {fields}")
+        if labels:
+            print("Label tiles: they are fused into a label image, without blending (blend none).")
         if cameras:
             print(f"{len(cameras)} cameras {cameras}: fused into one image, blended along z (the right view "
                   "mirrored back); pick cameras to fuse only some of them. Tick 'Register cameras' to align "

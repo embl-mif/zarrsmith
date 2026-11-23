@@ -53,6 +53,8 @@ def test_registered_and_detected(stores):
 def test_scan_places_the_stores(stores):
     m = ZarrMosaicManager(stores)
     assert len(m.tiles) == 6  # 3 intensity stores x 2 channels; the label store is left out
+    labels = ZarrMosaicManager(stores, data_type="label")  # or read only the label store
+    assert [t.attrs["stack"] for t in labels.tiles] == ["seg"] and labels.tiles[0].attrs["data_type"] == "label"
     assert m.channels == ["DAPI", "GFP"]
     assert len(m.fields) == 2  # a + b touch, c is apart
     b = m.select(channel="GFP")[1]

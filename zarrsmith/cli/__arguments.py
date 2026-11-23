@@ -296,6 +296,12 @@ def _add_zarr_arguments(parser):
         help='Number of pyramidal levels.',
     )
     parser.add_argument(
+        '-me', '--method',
+        required=False,
+        choices=['mean', 'nearest', 'mode'],
+        help='Downsampling method of the pyramid levels. Default: mean for intensity data, nearest for labels.',
+    )
+    parser.add_argument(
         '-s', '--subset',
         required=False,
         type=str,
@@ -374,17 +380,19 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
         help='"none" writes a 3D volume; "max"/"sum" write a 2D projection along z.',
     )
     parser.add_argument(
-        '-b', '--blend', choices=['sigmoid', 'max', 'sum', 'midline', 'none'], default='sigmoid',
-        help='How overlapping tiles are merged: sigmoid (default: smooth transition across every overlap, '
+        '-b', '--blend', choices=['sigmoid', 'max', 'sum', 'midline', 'none'], default=None,
+        help='How overlapping tiles are merged: sigmoid (default for images: smooth transition across every overlap, '
              'between tiles and between tile groups), max, sum (overlaps brighter), midline (each tile group, '
              'e.g. illumination side, up to the middle of the overlap, with a sharp switch there), or none '
              '(no blending: every voxel is copied unchanged from one tile, cut in the middle of each overlap; '
-             'required for --data_type label).',
+             'the default and the only choice for label data).',
     )
     parser.add_argument(
-        '-dt', '--data_type', choices=['intensity', 'label'], default='intensity',
-        help='Write the output as an intensity image (default) or as a label image (tiles of label IDs that '
-             'already agree across tiles; needs --blend none and an integer dtype).',
+        '-dt', '--data_type', choices=['intensity', 'label'], default=None,
+        help='Write the output as an intensity image or as a label image (tiles of label IDs that '
+             'already agree across tiles; needs --blend none, the default for labels, and an integer dtype). '
+             'Default: label when every tile is label data (a folder of label stores), else intensity. '
+             'For a folder of OME-Zarr stores, it also chooses which stores are read.',
     )
     parser.add_argument('-ss', '--sigmoid_steepness', type=float,
                         help='Steepness of the blend=sigmoid transition: higher is sharper. Default: 4 '
@@ -498,7 +506,7 @@ CONVERT_HELP = """\
 
     The --batch CSV file has the columns input | microscope | output, plus any of
     chunk_size | max_size(MB) | scene_index | zarr_format | downscale_factor | subset | channel_colors |
-    channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | compressor | compressor_level |
+    channel_names | num_levels | method | shards | shard_target_mb | shard_exclude_axes | compressor | compressor_level |
     drop_singleton | num_workers | overwrite
     with the same meaning as the options below, e.g.
       input            | microscope | output          | chunk_size    | zarr_format | downscale_factor | subset             | num_levels | shards
@@ -510,6 +518,7 @@ CONVERT_HELP = """\
     ("none" lets every axis merge). compressor: "blosc" (default when empty), "gzip" (zarr_format 2 only) or
     "none", in lowercase; compressor_level goes from 0 to 9 (default 1).
     drop_singleton (true/false, default true) removes singleton t/c/z axes.
+    method: "mean", "nearest" or "mode" (default when empty: mean for intensity data, nearest for labels).
     num_workers is the number of write threads (default: half of the available cores, capped at 8).
     overwrite (true/false, default false) replaces an existing output; a row whose output is in the way is
     skipped with a warning, and the other rows still run.
@@ -550,7 +559,7 @@ FUSE_HELP = """\
 
     The --batch CSV file has the columns input | microscope | output, plus any of the output columns of
     `zarrsmith convert --batch` (chunk_size | max_size(MB) | zarr_format | downscale_factor | subset | channel_colors |
-    channel_names | num_levels | shards | shard_target_mb | shard_exclude_axes | compressor | compressor_level |
+    channel_names | num_levels | method | shards | shard_target_mb | shard_exclude_axes | compressor | compressor_level |
     drop_singleton | num_workers | overwrite)
     and of the fusion columns
     downsample | projection | blend | sigmoid_steepness | channels | groups | cameras | fields | tiles | skip_tiles | timepoints |

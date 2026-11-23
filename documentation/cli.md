@@ -33,6 +33,7 @@ zarrsmith convert --batch datasets.csv
 | `-zf`, `--zarr_format` | 2 (NGFF 0.4) or 3 (NGFF 0.5) | 3 |
 | `-df`, `--downscale_factor` | pyramid factor: one value, or `Z Y X`. Each level averages blocks of the level above (intensity data) or keeps one pixel per block (labels), as `zarrsmith pyramid` does | 2 on every spatial axis |
 | `-nl`, `--num_levels` | number of pyramid levels | until no spatial axis of the coarsest level is over 2048 pixels |
+| `-me`, `--method` | downsampling of the pyramid levels: `mean`, `nearest` or `mode` (`mean` is refused for labels); batch column `method` | `mean` for intensity data, `nearest` for labels |
 | `-s`, `--subset` | crop or select before writing, e.g. `"y=10:100:2;x=20:80;c=0,2"` | everything |
 | `-sh`, `--shards` / `-stm`, `--shard_target_mb` / `-sea`, `--shard_exclude_axes` | sharding (see [Advanced writing options](advanced.md)) | `auto`, 1024 MB, `t c` |
 | `-cp`, `--compressor` | `blosc`, `gzip` (zarr v2 only) or `none`; see [Compression](advanced.md#compression) | `blosc` |
@@ -165,9 +166,9 @@ The fusion options:
 | `-rm`, `--register_model` | `rigid` (translation and rotation; the right view is resampled) or `translation` (only moved) | `rigid` |
 | `-rch`, `--register_channel` | reference channel of `--register_cameras` (e.g. a nuclear stain): the transform is measured on it and applied to every channel; `all` registers every channel on its own images. Timepoints follow `-rtp`: measured at the reference timepoint and applied to all, or at every timepoint with `-rtp all` | the first channel |
 | `-od`, `--out_dtype` | output dtype | the input dtype (`float32` with `-b sum`) |
-| `-dt`, `--data_type` | `intensity` or `label` (a label image; needs `-b none` and an integer dtype) | `intensity` |
+| `-dt`, `--data_type` | `intensity` or `label` (a label image; needs `-b none`, the default for labels, and an integer dtype). For a folder of OME-Zarr stores it also picks which stores are read | `label` when every tile is label data (a folder of label stores), else `intensity` |
 | `-rw`, `--read_workers` | tiles read in parallel processes; not to be confused with `-nw` (write threads) | 4 |
-| `-td`, `--temp_dir` | folder for the temporary fused level 0 (a local disk is faster) | next to the output |
+| `-td`, `--temp_dir` | deprecated and ignored: level 0 is fused directly into the output | |
 | `-ow`, `--overwrite` | replace an existing output, once the fusion has succeeded | off |
 
 Every output option of `convert` is available too, applied to the fused output, with the same defaults. Two read differently for a mosaic: `-cs` is given in `C Z Y X` order (`C Y X` for projections, after `T` for several timepoints), and `-s/--subset` crops the fused output (`z`/`y`/`x` in output voxels, after `-rds`) and selects channels (`c`), e.g. `"z=0:100;y=200:900;c=1"`; timepoints are chosen with `-tp`. `-si` loads one scene of a Zeiss mosaic (default: every scene, one field each), ignored for the others.

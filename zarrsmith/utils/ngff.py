@@ -343,8 +343,7 @@ def _write_ngff_metadata(
         group,
         [{"path": str(i), "coordinateTransformations": ct} for i, ct in enumerate(transforms)],
         fmt=fmt,
-        axes=list(axes),
-        axes_units=_axes_units(axes, metadata),
+        axes=_axes_entries(axes, metadata),
         name=name,
         **extra,
     )
@@ -364,12 +363,16 @@ def _record_downsampling(group: zarr.Group, metadata: dict[str, Any], ngff_versi
     ome-zarr-py does not pass ``type`` through, so it is added afterwards (see
     :func:`zarrsmith.utils.downsampling.downsampling_record`). Region writes read it
     back to refresh the coarser levels with the same method. A single level, or a
-    pyramid of unknown method, records nothing.
+    pyramid of unknown method, records nothing. Labels never record ``"mean"``: an
+    image's method carried over to its labels (e.g. metadata copied from the image
+    for a label group) becomes their default, ``"nearest"``.
     """
     method = metadata.get("downsampling_method")
     scales = metadata.get("scales") or []
     if not method or len(scales) < 2:
         return
+    if method == "mean" and normalize_data_type(metadata.get("data_type")) == "label":
+        method = "nearest"
     factors = []
     for fine, coarse in zip(scales[0], scales[1]):
         ratio = float(coarse) / float(fine) if float(fine) else 1.0
@@ -994,6 +997,26 @@ def _axes_units(axes: Sequence[str], metadata: dict[str, Any]) -> dict[str, str]
     if "t" in axes:
         units["t"] = normalize_unit(metadata.get("time_increment_unit"))
     return {axis: unit for axis, unit in units.items() if unit}
+
+
+#: NGFF ``type`` of every axis zarrsmith writes.
+_AXIS_TYPES = {"t": "time", "c": "channel", "z": "space", "y": "space", "x": "space"}
+
+
+def _axes_entries(axes: Sequence[str], metadata: dict[str, Any]) -> list[dict[str, str]]:
+    """The NGFF ``axes`` entries: ``name``, ``type`` and, where known, ``unit``.
+
+    Built here rather than through ome-zarr-py's ``axes_units`` (0.17+), which older
+    ome-zarr-py versions silently drop.
+    """
+    units = _axes_units(axes, metadata)
+    entries = []
+    for axis in normalize_axes(axes):
+        entry = {"name": axis, "type": _AXIS_TYPES[axis]}
+        if axis in units:
+            entry["unit"] = units[axis]
+        entries.append(entry)
+    return entries
 
 
 def _build_coordinate_transformations(

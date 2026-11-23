@@ -120,6 +120,7 @@ BATCH_CSV_COLUMNS = [
     "channel_colors",
     "channel_names",
     "num_levels",
+    "method",
     "shards",
     "shard_target_mb",
     "shard_exclude_axes",
@@ -250,7 +251,7 @@ def _compact_advanced_rows(widget, insert_after):
     rows = [
         row("Chunks", ("Z", "chunk_z"), ("Y", "chunk_y"), ("X", "chunk_x")),
         row("Downscale", ("Z", "downscale_z"), ("Y", "downscale_y"), ("X", "downscale_x")),
-        row("Output", ("Levels", "n_levels"), ("Zarr", "zarr_format")),
+        row("Output", ("Levels", "n_levels"), ("Method", "method"), ("Zarr", "zarr_format")),
         row("Sharding", (None, "shards"), ("MB", "shard_target_mb")),
         row("Never merge", (None, "shard_exclude_axes")),
         row("Other", (None, "drop_singleton"), ("Threads", "num_workers")),
@@ -284,8 +285,12 @@ def _run_conversion(
     drop_singleton=True,
     num_workers=None,
     overwrite=False,
+    method=None,
     ):
-    """Run the conversion pipeline used by the napari worker thread."""
+    """Run the conversion pipeline used by the napari worker thread.
+
+    ``method`` is the downsampling of the pyramid levels (``None``: mean for intensity
+    data, nearest for labels)."""
     print("Starting conversion in background thread...")
 
     if file_format in ("zeiss", "evident"):
@@ -335,7 +340,7 @@ def _run_conversion(
     print("Requested input chunks:", chunks)
     print("Chunks before pyramid:", [arr.chunksize for arr in dataset.data])
 
-    dataset.build_pyramid(num_levels=n_levels, downscale_factor=downscale_factor)
+    dataset.build_pyramid(num_levels=n_levels, downscale_factor=downscale_factor, method=method)
 
     dataset.data = [
         arr.rechunk(chunks) if arr.ndim == len(chunks) else arr
@@ -704,6 +709,8 @@ def convert_widget():
         downscale_y={"label": "Downscale Y", "min": 1, "max": 64, "step": 1, "value": 2},
         downscale_x={"label": "Downscale X", "min": 1, "max": 64, "step": 1, "value": 2},
         zarr_format={"label": "Zarr format", "choices": [2, 3], "value": 3},
+        method={"label": "Downsampling", "choices": ["auto", "mean", "nearest", "mode"], "value": "auto",
+                "tooltip": "auto: mean for intensity images, nearest for labels"},
 
         shards={"label": "Sharding (zarr v3 only)", "choices": ["none", "auto"], "value": "auto"},
         shard_target_mb={"label": "Shard target (MB)", "min": 1, "max": 100000, "step": 1, "value": 1024},
@@ -750,6 +757,7 @@ def convert_widget():
         downscale_y=2,
         downscale_x=2,
         zarr_format=3,
+        method="auto",
         shards="auto",
         shard_target_mb=1024,
         shard_exclude_axes=("t", "c"),
@@ -793,6 +801,7 @@ def convert_widget():
                 drop_singleton=bool(drop_singleton),
                 num_workers=int(num_workers) if int(num_workers) > 0 else None,
                 overwrite=bool(overwrite),
+                method=None if method == "auto" else method,
             )
         
         _set_convert_enabled(False)
@@ -909,6 +918,7 @@ def convert_widget():
             "channel_colors": " ".join(selected_colors),
             "channel_names": " ".join(normalized_channel_names),
             "num_levels": str(make_convert_widget.n_levels.value),
+            "method": "" if make_convert_widget.method.value == "auto" else str(make_convert_widget.method.value),
             # A blank cell means "auto" in the CLI, so disabling must be explicit.
             "shards": "none" if shards_selected == "none" else str(shards_selected),
             "shard_target_mb": "" if shards_selected == "none" else str(make_convert_widget.shard_target_mb.value),

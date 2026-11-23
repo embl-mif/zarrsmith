@@ -612,7 +612,7 @@ def test_widget_fuses_with_reference_and_keeps_the_output_size(app, monkeypatch,
     class Now:
         """Runs the fusion when started, in this thread."""
 
-        def __init__(self, tiles, out, kwargs):
+        def __init__(self, mosaic, tiles, out, kwargs, register=None, transforms_only=False, plan_kwargs=None):
             self.args = tiles, out, kwargs
             self.returned = self.errored = self
 
@@ -623,7 +623,7 @@ def test_widget_fuses_with_reference_and_keeps_the_output_size(app, monkeypatch,
         def start(self):
             tiles, out, kwargs = self.args
             calls.append(fuse_tiles(tiles, out, progress=False, **kwargs))
-            self.done(calls[-1])
+            self.done((calls[-1], {}))  # (result, camera registrations), as run_fusion returns
 
     monkeypatch.setattr(mw, "_fuse_worker", Now)
     m = _mosaic(_series(3, drift=2.0))

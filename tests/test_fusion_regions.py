@@ -103,8 +103,48 @@ def test_parallel_regions_match_serial(tmp_path, monkeypatch, executor):
     np.testing.assert_array_equal(serial, parallel)
 
 
-def test_uncompressed_temp_gives_same_result(tmp_path):
+@pytest.mark.parametrize("workers", [1, 3])
+def test_shards_merged_in_pieces_match_unsharded(tmp_path, monkeypatch, workers):
+    """A shard is one region, merged a piece at a time: same result as one chunk per region."""
     tiles = _noise_tiles(tmp_path)
-    a = _fused(tmp_path, "a", tiles, chunks=(1, 8, 16, 16), temp_compression=True)
-    b = _fused(tmp_path, "b", tiles, chunks=(1, 8, 16, 16), temp_compression=False)
-    np.testing.assert_array_equal(a, b)
+    monkeypatch.setattr(fusion, "_REGION_3D", (16, 16))
+    monkeypatch.setattr(fusion, "_REGION_MAX", 16)
+    monkeypatch.setattr(fusion, "_REGION_VOXELS", 16 * 16 * 4)
+    kw = dict(chunks=(1, 8, 16, 16), workers=workers, executor="thread")
+    plain = _fused(tmp_path, "plain", tiles, shards=None, **kw)
+    zm = fuse_tiles(tiles, tmp_path / "sharded.zarr", shards=(1, 16, 32, 48), levels=2, progress=False, **kw)
+    assert zm.root["0"].shards == (16, 32, 48)  # the singleton c is dropped
+    np.testing.assert_array_equal(plain, zm.data[0].compute())
+    assert zm.metadata["size"][1] == (10, 36, 36)
+
+
+def test_level0_is_written_once_into_the_output(tmp_path, monkeypatch):
+    """No temporary store, no rewrite: the fused regions go straight into the output's level 0."""
+    from zarrsmith.utils import to_zarr as to_zarr_module
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("fuse_tiles must not go through to_zarr")
+
+    monkeypatch.setattr(to_zarr_module, "to_zarr", refuse)
+    tiles = _noise_tiles(tmp_path)
+    zm = fuse_tiles(tiles, tmp_path / "out.zarr", chunks=(1, 8, 16, 16), levels=3, progress=False)
+    assert len(zm.data) == 3
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
+def test_pyramid_method_of_the_fused_levels(tmp_path):
+    from zarrsmith.utils.downsampling import downsample_numpy
+
+    tiles = _noise_tiles(tmp_path)
+    kw = dict(chunks=(1, 8, 16, 16), levels=2, progress=False)
+    for name, more, method in (("default", {}, "mean"),
+                               ("nearest", {"pyramid_method": "nearest"}, "nearest"),
+                               ("labels", {"blend": "none", "data_type": "label"}, "nearest")):
+        zm = fuse_tiles(tiles, tmp_path / f"{name}.zarr", **kw, **more)  # one channel: axes z, y, x
+        level0, level1 = zm.data[0].compute(), zm.data[1].compute()
+        np.testing.assert_array_equal(level1, downsample_numpy(level0, (2, 2, 2), (0, 1, 2), method))
+        assert zm.metadata["downsampling_method"] == method
+
+    with pytest.raises(ValueError, match="mix label values"):  # refused before anything is fused
+        fuse_tiles(tiles, tmp_path / "bad.zarr", data_type="label", pyramid_method="mean", **kw)
+    assert not (tmp_path / "bad.zarr").exists()

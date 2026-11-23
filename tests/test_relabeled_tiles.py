@@ -90,3 +90,36 @@ def test_tiles_are_fused_into_one_numbering(tmp_path):
     assert (out[..., 26:36] == 2002).all()
     assert (out[..., 36:] == 0).all()
     assert set(np.unique(zm.data[1].compute())) <= {0, 1001, 1002, 2002}
+
+
+def test_label_tiles_are_fused_as_labels_by_default(tmp_path):
+    """Tiles of label stores are marked as labels: no data_type or blend needed."""
+    tiles = [t for store in _two_tiles(tmp_path) for t in store_tiles(store)[0]]
+    assert all(t.attrs["data_type"] == "label" for t in tiles)
+    zm = fuse_tiles(tiles, tmp_path / "labels.ome.zarr", levels=2, progress=False)
+    assert zm.metadata["data_type"] == "label"
+    level0, level1 = zm.data[0].compute(), zm.data[1].compute()
+    assert set(np.unique(level0)) == {0, 1, 2}  # copied, never blended
+    np.testing.assert_array_equal(level1, level0[::2, ::2, ::2])  # nearest levels
+    with pytest.raises(ValueError, match="blend='none'"):
+        fuse_tiles(tiles, tmp_path / "mixed.ome.zarr", blend="sigmoid", progress=False)
+
+
+def test_a_folder_of_label_stores_is_a_label_mosaic(tmp_path, monkeypatch):
+    import sys
+
+    from zarrsmith.cli import zarrsmith as cli
+    from zarrsmith.mosaic_manager import ZarrMosaicManager
+
+    folder = tmp_path / "seg"
+    folder.mkdir()
+    for store in _two_tiles(tmp_path):
+        store.rename(folder / store.name)
+    mosaic = ZarrMosaicManager(folder)
+    assert len(mosaic.tiles) == 2 and all(t.attrs["data_type"] == "label" for t in mosaic.tiles)
+
+    out = tmp_path / "fused.ome.zarr"  # zarrsmith fuse, without --data_type or --blend
+    monkeypatch.setattr(sys, "argv", ["zarrsmith", "fuse", "-i", str(folder), "-z", str(out), "-nl", "2"])
+    cli.main()
+    zm = mm.ZarrManager(str(out))
+    assert zm.metadata["data_type"] == "label" and set(np.unique(zm.data[0].compute())) == {0, 1, 2}

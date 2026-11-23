@@ -63,7 +63,10 @@ def test_fused_labels_are_written_as_a_label_image(tmp_path):
 
 def test_labels_refuse_blending_and_float_dtypes(tmp_path):
     with pytest.raises(ValueError, match="blend='none'"):
-        fuse_tiles(_two_tiles(), tmp_path / "a.zarr", data_type="label", progress=False)
+        fuse_tiles(_two_tiles(), tmp_path / "a.zarr", blend="sigmoid", data_type="label", progress=False)
+    # without a blend, labels get "none": copied, never mixed
+    zm = fuse_tiles(_two_tiles(), tmp_path / "c.zarr", data_type="label", progress=False)
+    assert zm.metadata["data_type"] == "label"
     with pytest.raises(ValueError, match="integer dtype"):
         fuse_tiles(_two_tiles(), tmp_path / "b.zarr", blend="none", data_type="label",
                    out_dtype="float32", progress=False)

@@ -18,7 +18,7 @@ import zarr
 from .axes import normalize_axes, normalize_data_type, spatial_axes_in_order
 from .chunks import default_chunk_size
 from .colors import default_channel_color
-from .downsampling import default_downsampling_method, normalize_spatial_factor_for_axes
+from .downsampling import normalize_spatial_factor_for_axes, resolve_downsampling_method
 from .translation import pyramid_translations
 from .ngff import DEFAULT_COMPRESSOR, DEFAULT_COMPRESSOR_LEVEL
 
@@ -133,6 +133,7 @@ def build_allocation_metadata(
     zarr_format: int | None = None,
     extra_attributes: Mapping[str, Any] | None = None,
     name: str | None = None,
+    method: str | None = None,
 ) -> tuple[dict[str, Any], int, Any]:
     """The metadata, zarr format and shards :func:`allocate_zarr` creates.
 
@@ -263,7 +264,7 @@ def build_allocation_metadata(
     if num_levels < 1:
         raise ValueError("num_levels must be >= 1.")
     factors = dict(zip(spatial, normalize_spatial_factor_for_axes(downscale_factor, axes_out, allow_float=False)))
-    method = default_downsampling_method(out_type)
+    method = resolve_downsampling_method(method, out_type)
     level_sizes, level_chunks = [size0], [chunk0]
     scale0 = tuple(scale_by_axis[ax] for ax in spatial)
     if translation is None or isinstance(translation, bool):
@@ -386,6 +387,11 @@ def allocate_zarr(
         NGFF metadata (outside ``ome`` on zarr v3).
     name
         Name of the multiscales image (default: the template's).
+    method
+        Downsampling method the coarser levels will be filled with (``"mean"``,
+        ``"nearest"`` or ``"mode"``): it sets their translation and is recorded in the
+        store. ``None`` (default): ``"nearest"`` for labels, ``"mean"`` otherwise, as
+        ``zarrsmith pyramid`` picks by default.
     """
     from .create_empty_dataset import create_empty_dataset
     from .ngff import _check_compressor

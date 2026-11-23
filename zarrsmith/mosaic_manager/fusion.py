@@ -2,19 +2,20 @@
 
 Fusion runs in two steps:
 
-1. **Level 0** is computed region by region into a temporary zarr store whose
-   chunks are the regions: for each region only the tile voxels that fall in it
-   are read, downsampled and merged. Regions are sized to cover whole source
-   chunks in ``y``/``x`` (so compressed tile chunks are decoded about once) and cut
-   into ``z`` slabs of bounded size, so memory stays bounded whatever the depth and
-   no dask graph over all tiles is ever built. One whole region (read, merge,
-   write) is the unit of parallel work; regions never share a chunk, so workers
-   write without locks. Sigmoid weights are only evaluated where tiles or groups
-   overlap.
-2. The fused level 0 (already downsampled, so small compared with the raw tiles)
-   is written to the final OME-Zarr with :meth:`MicroscopeManager.to_zarr`, so
-   pyramid levels, chunks, sharding, compression, zarr format and singleton axes
-   behave exactly as for any other ZarrSmith conversion (``zarrsmith convert``).
+1. The output OME-Zarr is allocated empty, with every pyramid level and its
+   metadata, as ``zarrsmith allocate`` does (:mod:`zarrsmith.utils.allocate`): the
+   geometry is the plan's (:func:`plan_fusion`), so it follows the tile positions,
+   flips and registrations.
+2. **Level 0** is fused straight into it, region by region: for each region only
+   the tile voxels that fall in it are read, downsampled and merged. A region is one
+   shard of level 0 (whole chunks without shards), so workers never write the same
+   file and need no locks; it is merged in pieces sized to cover whole source chunks
+   in ``y``/``x`` (so compressed tile chunks are decoded about once) and cut into
+   ``z`` slabs of bounded size, so memory stays bounded whatever the depth and no
+   dask graph over all tiles is ever built. Sigmoid weights are only evaluated where
+   tiles or groups overlap. Level 0 is written once.
+3. The coarser levels are built in place from level 0 on disk, as ``zarrsmith
+   pyramid`` does (:func:`~zarrsmith.utils.populate_pyramid.populate_pyramid`).
 
 Tiles of several timepoints give one output with a ``t`` axis. The geometry (output
 grid, tile offsets, transitions between tiles and groups) comes from the tiles of one
@@ -29,10 +30,12 @@ are computed for each timepoint.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import json
 import logging
 import math
 import shutil
+import warnings
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -40,13 +43,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
-import dask.array as da
 import numpy as np
 import zarr
 
-from ..utils.metadata import ChannelInfo, build_metadata
+from ..utils.allocate import build_allocation_metadata
+from ..utils.create_empty_dataset import create_empty_dataset
+from ..utils.downsampling import resolve_downsampling_method
 from ..utils.ngff import ZarrWriteConfig, _resolve_format
-from ..utils.output_path import output_refusal
+from ..utils.output_path import has_content, has_zarr_name, output_refusal
+from ..utils.populate_pyramid import populate_pyramid
+from ..utils.to_zarr import _drop_axes_from_config_shapes
 from .fields import check_single_field, fields_of, multiple_fields_message
 from .tile import Tile, series_keys
 
@@ -69,10 +75,8 @@ _REGION_3D = (256, 256)
 _REGION_2D = (1024, 1024)
 #: Largest region side (y or x) chosen to match the source chunks, in output voxels.
 _REGION_MAX = 2048
-#: Voxels per 3D region (32 MB per float32 canvas): bounds the memory of each worker.
+#: Voxels per 3D region piece (32 MB per float32 canvas): bounds the memory of each worker.
 _REGION_VOXELS = 2**23
-#: Codec of the temporary level 0 with ``temp_compression=True`` (zarr's default, zstd).
-_TEMP_COMPRESSORS = "auto"
 
 #: Percentiles of the fused values used as the display window written to the output.
 DISPLAY_PERCENTILES = (0.5, 99.9)
@@ -256,6 +260,7 @@ class _Region:
     time_index: Optional[int] = None  # position on the output t axis, None without one
     samples: int = _WINDOW_SAMPLES  # values kept for the display window
     key: str = "group"  # tile attribute naming the groups that are blended: "group" or "camera"
+    piece: Optional[Tuple[int, int, int]] = None  # (z, y, x) size merged at once; None: the whole region
 
 
 def _source_chunks(data) -> Optional[Tuple[int, int, int]]:
@@ -630,13 +635,46 @@ def _merge_views(canvases, sigmoid: bool, shape, projection: str) -> np.ndarray:
 
 
 def _fuse_region(r: _Region, arr, ds, projection, blend, dtype,
-                 steepness: float = SIGMOID_STEEPNESS) -> np.ndarray:
+                 steepness: float = SIGMOID_STEEPNESS, drop: Sequence[int] = ()) -> np.ndarray:
     """Read the tiles of region ``r``, merge them, write the region into ``arr`` and
     return a small sample of its non-zero values (for the display window).
 
-    Runs in the workers: regions are aligned with the chunks of ``arr``, so two
-    regions never write the same chunk and need no lock.
+    Runs in the workers: regions are whole write blocks of ``arr`` (shards, or chunks
+    without shards), so two regions never write the same file and need no lock. A
+    region is merged ``r.piece`` at a time, which bounds the memory of the canvases,
+    and written in one go. ``drop`` are the positions in the ``(t,) c, (z,) y, x``
+    index of the axes ``arr`` does not have (singleton axes left out of the output).
     """
+    flat = projection is not None
+    y0, y1, x0, x1 = r.bounds
+    z0, z1 = r.zrange
+    shape = (y1 - y0, x1 - x0) if flat else (z1 - z0, y1 - y0, x1 - x0)
+    pz, py, px = r.piece or (z1 - z0, y1 - y0, x1 - x0)
+    pz = z1 - z0 if flat else pz  # projections: the whole depth is reduced while reading
+    if pz >= z1 - z0 and py >= y1 - y0 and px >= x1 - x0:
+        block = _merge_region(r, ds, projection, blend, dtype, steepness)
+    else:
+        block = np.zeros(shape, np.dtype(dtype))
+        for a0, b0, c0 in itertools.product(range(z0, z1, pz), range(y0, y1, py), range(x0, x1, px)):
+            bounds, zrange = (b0, min(b0 + py, y1), c0, min(c0 + px, x1)), (a0, min(a0 + pz, z1))
+            inside = [p for p in r.placed if _overlap(p, bounds, zrange) is not None]
+            if not inside:
+                continue  # stays 0
+            local = (slice(bounds[0] - y0, bounds[1] - y0), slice(bounds[2] - x0, bounds[3] - x0))
+            if not flat:
+                local = (slice(zrange[0] - z0, zrange[1] - z0),) + local
+            piece = dataclasses.replace(r, bounds=bounds, zrange=zrange, placed=inside, piece=None)
+            block[local] = _merge_region(piece, ds, projection, blend, dtype, steepness)
+    index = (r.channel_index,) if r.time_index is None else (r.time_index, r.channel_index)
+    key = index + ((slice(y0, y1), slice(x0, x1)) if flat else (slice(z0, z1), slice(y0, y1), slice(x0, x1)))
+    key = tuple(k for i, k in enumerate(key) if i not in drop)
+    arr[key] = block.reshape(tuple(k.stop - k.start for k in key if isinstance(k, slice)))
+    values = block.ravel()[:: max(1, block.size // r.samples)]
+    return values[values != 0]
+
+
+def _merge_region(r: _Region, ds, projection, blend, dtype, steepness: float) -> np.ndarray:
+    """Read the tiles of region ``r`` and merge them into one block of ``dtype``."""
     flat = projection is not None
     y0, y1, x0, x1 = r.bounds
     z0, z1 = r.zrange
@@ -683,24 +721,17 @@ def _fuse_region(r: _Region, arr, ds, projection, blend, dtype,
     else:
         merged = _merge_groups(canvases, r.midline, r.bounds, flat, shape, z0=z0)
     del canvases
-    block = _cast(merged, dtype)
-    index = (r.channel_index,) if r.time_index is None else (r.time_index, r.channel_index)
-    if flat:
-        arr[index + (slice(y0, y1), slice(x0, x1))] = block
-    else:
-        arr[index + (slice(z0, z1), slice(y0, y1), slice(x0, x1))] = block
-    values = block.ravel()[:: max(1, block.size // r.samples)]
-    return values[values != 0]
+    return _cast(merged, dtype)
 
 
 def _fuse_level0(regions, arr, *, ds, projection, blend, dtype, steepness: float,
-                 workers: int, executor: str, progress: bool) -> Dict[int, np.ndarray]:
+                 workers: int, executor: str, progress: bool, drop: Sequence[int] = ()) -> Dict[int, np.ndarray]:
     """Fuse and write every region of level 0; return a sample of values per channel index.
 
     The unit of parallel work is one whole region: a worker reads the tiles that
-    overlap it, merges them and writes the result. Regions match the chunks of
-    ``arr`` exactly, so concurrent writes never touch the same chunk. At most
-    ``2 * workers`` regions are in flight at a time, which bounds memory.
+    overlap it, merges them and writes the result. Regions are whole write blocks of
+    ``arr`` (shards, or chunks), so concurrent writes never touch the same file. At
+    most ``2 * workers`` regions are submitted at a time.
     """
     from tqdm.auto import tqdm
 
@@ -709,7 +740,7 @@ def _fuse_level0(regions, arr, *, ds, projection, blend, dtype, steepness: float
         pool = (ProcessPoolExecutor if executor == "process" else ThreadPoolExecutor)(max_workers=workers)
     window = 2 * workers
     samples: Dict[int, List[np.ndarray]] = {}
-    args = (arr, ds, projection, blend, dtype, steepness)
+    args = (arr, ds, projection, blend, dtype, steepness, tuple(drop))
 
     def collect(r, values):
         samples.setdefault(r.channel_index, []).append(values)
@@ -747,9 +778,11 @@ class _RegionSeries:
     tile to read are left out: they keep the fill value (0).
     """
 
-    def __init__(self, blocks: Union[Sequence[tuple], Callable[[int], Sequence[tuple]]], plan: "FusionPlan"):
+    def __init__(self, blocks: Union[Sequence[tuple], Callable[[int], Sequence[tuple]]], plan: "FusionPlan",
+                 piece: Optional[Tuple[int, int, int]] = None):
         self.blocks = blocks
         self.plan = plan
+        self.piece = piece  # (z, y, x) size each region is merged by (see _Region.piece)
         self.stacked = "t" in plan.axes
         self.samples = max(1, _WINDOW_SAMPLES // len(plan.timepoints))
         self.total = sum(any(plan.frames[tp][b[1]][i] is not None for i in b[6])
@@ -768,7 +801,7 @@ class _RegionSeries:
                 inside = [frame[channel][i] for i in indices if frame[channel][i] is not None]
                 if inside:
                     yield _Region(ci, bounds, inside, midline, transitions, zrange,
-                                  ti if self.stacked else None, self.samples, self.plan.blend_by)
+                                  ti if self.stacked else None, self.samples, self.plan.blend_by, self.piece)
 
 
 def _display_windows(samples: Dict[int, np.ndarray], n_channels: int, dtype) -> List[Tuple[float, float]]:
@@ -879,6 +912,7 @@ class FusionPlan:
     blend_by: str = "group"
     group_order: Dict[Optional[str], float] = dataclasses.field(default_factory=dict)
     midline_axis: str = "x"  # axis along which the groups are blended
+    data_type: str = "intensity"  # "intensity" or "label" (see tile_data_type)
 
     @property
     def cameras(self) -> List[Optional[str]]:
@@ -1026,12 +1060,40 @@ def _build_own_frames(tiles: Sequence[Tile], placed: Sequence[_Placed], names: S
     return layouts, frames, n_skipped, n_missing
 
 
+def tile_data_type(tile: Tile) -> Optional[str]:
+    """``"label"`` for a tile of label data (``attrs["data_type"]``, set by the readers of
+    label stores), ``"intensity"`` for an image tile, ``None`` when the reader does not say."""
+    return tile.attrs.get("data_type")
+
+
+def _select_data_type(tiles: Sequence[Tile], data_type: Optional[str]) -> Tuple[List[Tile], str]:
+    """``(tiles, data type)`` of a fusion.
+
+    ``data_type=None`` is ``"label"`` when every tile is marked as label data, else
+    ``"intensity"``. Tiles marked as the other type are left out (with a message);
+    unmarked tiles are taken as the requested type.
+    """
+    if data_type is not None and data_type not in DATA_TYPES:
+        raise ValueError(f"data_type must be one of {DATA_TYPES}, got {data_type!r}.")
+    kinds = [tile_data_type(t) for t in tiles]
+    if data_type is None:
+        data_type = "label" if kinds and all(k == "label" for k in kinds) else "intensity"
+    keep = [t for t, k in zip(tiles, kinds) if k in (None, data_type)]
+    if len(keep) < len(tiles):
+        other = "label" if data_type == "intensity" else "intensity"
+        logger.info("Leaving out %d %s tile(s): fusing %s data (choose with data_type).",
+                    len(tiles) - len(keep), other, data_type)
+        if not keep:
+            raise ValueError(f"No {data_type} tile to fuse: the tiles are {other} data.")
+    return keep, data_type
+
+
 def plan_fusion(
     tiles: Sequence[Tile],
     *,
     ds: Sequence[int] = (1, 1, 1),
     projection: Optional[str] = None,
-    blend: str = "sigmoid",
+    blend: Optional[str] = None,
     channels: Optional[Sequence[str]] = None,
     crop: Optional[dict] = None,
     skip: Optional[Sequence[Tile]] = None,
@@ -1039,13 +1101,25 @@ def plan_fusion(
     midline_axis: Optional[str] = None,
     timepoints: Optional[Sequence[int]] = None,
     reference_timepoint: Union[int, str, None] = None,
+    data_type: Optional[str] = None,
 ) -> FusionPlan:
-    """Validate fusion arguments and compute the level-0 geometry (see :func:`fuse_tiles`)."""
+    """Validate fusion arguments and compute the level-0 geometry (see :func:`fuse_tiles`).
+
+    The geometry comes from the tiles as they are: ``Tile.origin``, ``voxel_size``,
+    ``shape`` and ``flip``, so it follows a transforms file or a camera registration
+    applied to them beforehand. ``blend=None`` is ``"none"`` for label data and
+    ``"sigmoid"`` otherwise; ``data_type`` as in :func:`fuse_tiles`.
+    """
     tiles = list(tiles)
     if not tiles:
         raise ValueError("No tiles to fuse.")
+    tiles, data_type = _select_data_type(tiles, data_type)
+    if blend is None:
+        blend = "none" if data_type == "label" else "sigmoid"
     if blend not in BLENDS:
         raise ValueError(f"blend must be one of {BLENDS}, got {blend!r}.")
+    if data_type == "label" and blend != "none":
+        raise ValueError(f"Labels must be fused with blend='none' (blend={blend!r} would mix label IDs).")
     if projection not in PROJECTIONS:
         raise ValueError(f"projection must be one of {PROJECTIONS}, got {projection!r}.")
     ds = tuple(int(v) for v in ds)
@@ -1116,6 +1190,8 @@ def plan_fusion(
     if out_dtype is None:
         out_dtype = np.float32 if blend == "sum" else np.result_type(*{t.dtype for t in tiles})
     out_dtype = np.dtype(out_dtype)
+    if data_type == "label" and not np.issubdtype(out_dtype, np.integer):
+        raise ValueError(f"Labels need an integer dtype, got {out_dtype} (set out_dtype).")
 
     spatial = grid[1:] if flat else grid
     leading = (len(selected), len(names)) if len(selected) > 1 else (len(names),)
@@ -1143,6 +1219,7 @@ def plan_fusion(
         blend_by=blend_by,
         group_order=order,
         midline_axis=midline_axis,
+        data_type=data_type,
     )
 
 
@@ -1347,7 +1424,7 @@ def fuse_tiles(
     *,
     ds: Sequence[int] = (1, 1, 1),
     projection: Optional[str] = None,
-    blend: str = "sigmoid",
+    blend: Optional[str] = None,
     channels: Optional[Sequence[str]] = None,
     channel_names: Optional[Sequence[str]] = None,
     channel_colors: Optional[Sequence[str]] = None,
@@ -1355,10 +1432,11 @@ def fuse_tiles(
     skip: Optional[Sequence[Tile]] = None,
     levels: int = 1,
     downscale_factor=2,
+    pyramid_method: Optional[str] = None,
     workers: int = 1,
     executor: str = "auto",
     out_dtype=None,
-    data_type: str = "intensity",
+    data_type: Optional[str] = None,
     midline_axis: Optional[str] = None,
     sigmoid_steepness: float = SIGMOID_STEEPNESS,
     timepoints: Optional[Sequence[int]] = None,
@@ -1389,7 +1467,7 @@ def fuse_tiles(
     blend
         How tiles that overlap are merged:
 
-        * ``"sigmoid"`` (default) -- smooth transition: across an overlap, the
+        * ``"sigmoid"`` (default for intensity data) -- smooth transition: across an overlap, the
           share of each tile follows a sigmoid of the log ratio of the distances
           to the two tile borders, from 0 at a tile's border through 1/2 in the
           middle of the overlap to 1 at the other tile's border, so no seam is
@@ -1401,7 +1479,7 @@ def fuse_tiles(
         * ``"midline"`` -- ``max`` within each tile ``group``; where groups
           overlap, the image switches sharply from one group to the next at the
           middle of their overlap, along ``midline_axis``;
-        * ``"none"`` -- no blending: every voxel is copied unchanged from exactly
+        * ``"none"`` (default for label data) -- no blending: every voxel is copied unchanged from exactly
           one tile, the one whose border is farthest from it (so two tiles of the
           same size meet in the middle of their overlap; on a tie the earlier
           tile wins). Values keep the tile dtype (no float32 round trip) and ``ds``
@@ -1436,6 +1514,10 @@ def fuse_tiles(
         Number of pyramid levels.
     downscale_factor
         Factor between pyramid levels: one integer or ``(z, y, x)``.
+    pyramid_method
+        Downsampling of the pyramid levels: ``"mean"``, ``"nearest"`` or ``"mode"``.
+        ``None`` (default): ``"mean"`` for intensity, ``"nearest"`` for labels
+        (``"mean"`` is refused for labels).
     workers
         Number of regions fused in parallel (threads or processes, see ``executor``).
     executor
@@ -1447,10 +1529,13 @@ def fuse_tiles(
         Output dtype. Default: input dtype for ``sigmoid``/``max``/``midline``/``none``,
         ``float32`` for ``sum``.
     data_type
-        ``"intensity"`` (default) or ``"label"``: write the output as a label image
+        ``"intensity"`` or ``"label"``: write the output as a label image
         (segmentation, e.g. tiles of label IDs that already agree across tiles). Labels
-        need ``blend="none"`` and an integer dtype; their pyramid levels sample voxels
-        instead of averaging them, and no display window is written.
+        need ``blend="none"`` (their default) and an integer dtype; their pyramid levels
+        sample voxels instead of averaging them, and no display window is written.
+        ``None`` (default): ``"label"`` when every tile is label data (tiles of label
+        stores, see :func:`tile_data_type`), else ``"intensity"``. Tiles of the other
+        type are left out.
     midline_axis
         ``"x"``, ``"y"`` or ``"z"``: axis along which groups (or cameras) are separated
         (``midline`` and ``sigmoid``). Default: ``"z"`` for the views of several cameras
@@ -1486,14 +1571,8 @@ def fuse_tiles(
         ``FileExistsError``.
     name
         Image name stored in the metadata.
-    temp_dir
-        Folder for the temporary fused level 0 (deleted at the end). Default:
-        next to ``out``. A local disk is faster when ``out`` is on a network share.
-    temp_compression
-        Compress the temporary level 0. Off by default: skipping compression (and
-        decoding it again for the pyramid) is noticeably faster, but the temporary
-        store then takes the full uncompressed size of level 0 (``plan_fusion(...).nbytes``),
-        so ``temp_dir`` needs room for it. Turn it on when disk space is short.
+    temp_dir, temp_compression
+        Deprecated and ignored (with a warning): level 0 is fused directly into the output.
     transforms_path
         Where to write the transforms of the fusion (JSON, see :func:`transforms_document`):
         the position and flips of every fused tile at every timepoint, before anything
@@ -1509,9 +1588,19 @@ def fuse_tiles(
         Any other :meth:`~zarrsmith.microscope_manager.MicroscopeManager.to_zarr`
         option, as for ``zarrsmith convert``: ``chunks``, ``shards``, ``shard_target_mb``,
         ``shard_exclude_axes``, ``zarr_format``, ``ngff_version``, ``compressor``,
-        ``compressor_level``, ``drop_singleton``, ``num_workers``, ``storage_options``.
-        ``chunks`` is given in the output axis order (``c, z, y, x``, or ``c, y, x``
-        for projections, after a leading ``t`` for several timepoints).
+        ``compressor_level``, ``drop_singleton``, ``num_workers`` (threads building the
+        pyramid). ``chunks`` and ``shards`` are given in the output axis order (``c, z, y, x``,
+        or ``c, y, x`` for projections, after a leading ``t`` for several timepoints),
+        and must be 1 along ``t`` and ``c``.
+
+    The output is allocated first, with every level and its metadata (see
+    :func:`~zarrsmith.utils.allocate.build_allocation_metadata`); level 0 is fused
+    straight into it and the coarser levels are then built from it on disk (see
+    :func:`~zarrsmith.utils.populate_pyramid.populate_pyramid`), so level 0 is written
+    once. Each fused region is one shard of level 0 (one or more whole chunks without
+    shards): a worker holds one shard, in the output dtype, plus the canvases of the
+    piece it is merging, and the number of shards bounds the parallelism. An existing
+    output is replaced at the end: the fusion is written next to it (``.NAME.partial.zarr``).
 
     The display window of every channel (OMERO ``window`` metadata) is set to the
     0.5th-99.9th percentile of the fused values of all timepoints, ignoring blank
@@ -1533,23 +1622,18 @@ def fuse_tiles(
     :class:`~zarrsmith.mosaic_manager.fields.MultipleFieldsError` is raised before
     anything is read or written.
     """
-    from ..microscope_manager.array_manager import ArrayManager
     from ..microscope_manager.zarr_manager import ZarrManager
 
     if executor not in ("auto", "process", "thread"):
         raise ValueError("executor must be 'auto', 'process' or 'thread'.")
     if not sigmoid_steepness > 0:
         raise ValueError(f"sigmoid_steepness must be positive, got {sigmoid_steepness!r}.")
-    if data_type not in DATA_TYPES:
-        raise ValueError(f"data_type must be one of {DATA_TYPES}, got {data_type!r}.")
-    if data_type == "label" and blend != "none":
-        raise ValueError(f"Labels must be fused with blend='none' (blend={blend!r} would mix label IDs).")
     _check_write_options(write_options)
     plan = plan_fusion(tiles, ds=ds, projection=projection, blend=blend, channels=channels,
                        crop=crop, skip=skip, out_dtype=out_dtype, midline_axis=midline_axis,
-                       timepoints=timepoints, reference_timepoint=reference_timepoint)
-    if data_type == "label" and not np.issubdtype(plan.dtype, np.integer):
-        raise ValueError(f"Labels need an integer dtype, got {plan.dtype} (set out_dtype).")
+                       timepoints=timepoints, reference_timepoint=reference_timepoint, data_type=data_type)
+    data_type = plan.data_type
+    resolve_downsampling_method(pyramid_method, data_type)  # before hours of fusion, not after
     check_single_field([p.tile for ps in plan.layout.values() for p in ps])
     blend, out_dtype, names, ds = plan.blend, plan.dtype, plan.channels, plan.ds
     flat = projection is not None
@@ -1567,29 +1651,85 @@ def fuse_tiles(
     chunks = tuple(max(1, min(c, s)) for c, s in zip(chunks, plan.shape))
     logger.info("Fusing %d tiles: %s, blend=%s, projection=%s", len(plan.tiles), plan.summary(), blend, projection)
 
+    if temp_dir or temp_compression:
+        warnings.warn("temp_dir and temp_compression are deprecated and ignored: level 0 is fused "
+                      "directly into the output.", DeprecationWarning, stacklevel=2)
+    cfg = ZarrWriteConfig(**write_options)
+    if cfg.storage_options:
+        raise TypeError("storage_options is not supported by fuse_tiles.")
+    ngff_version, zarr_format = _resolve_format(cfg)
+
+    # Singleton t/c/z axes are left out of the output (drop_singleton), as zarrsmith convert does.
+    drop = [i for i, ax in enumerate(plan.axes) if cfg.drop_singleton and ax in "tcz" and plan.shape[i] == 1]
+    keep = [i for i in range(len(plan.axes)) if i not in drop]
+    out_axes = "".join(plan.axes[i] for i in keep)
+    spatial = [ax for ax in plan.axes if ax in "zyx"]
+    factor = _spatial_factor(downscale_factor, flat or "z" not in out_axes)
+    metadata, _, _ = build_allocation_metadata(
+        size=[plan.shape[i] for i in keep],
+        axes=out_axes,
+        scale=[s for ax, s in zip(spatial, plan.scale) if ax in out_axes],
+        units=plan.tiles[0].units,
+        dtype=str(out_dtype),
+        data_type=data_type,
+        channel_names=list(channel_names or names) if "c" in out_axes else None,
+        channel_colors=channel_colors if "c" in out_axes else None,
+        chunk_size=[chunks[i] for i in keep],
+        num_levels=max(1, int(levels)),
+        downscale_factor=factor,
+        translation={ax: v for ax, v in fused_position(plan).items() if ax in out_axes},
+        zarr_format=zarr_format,
+        name=name or "fused mosaic",
+        method=pyramid_method,
+    )
+    # Without a c axis, the OMERO metadata still names the one channel.
+    metadata["channel_names"] = list(channel_names or names)
+    if channel_colors is not None:
+        metadata["channel_colors"] = list(channel_colors)
+
     out = Path(out)
-    tmp = Path(temp_dir or out.parent) / f".{out.name}.level0.zarr"
-    # An existing output is only replaced at the end, once the fusion has succeeded.
-    refusal = output_refusal(out, overwrite=overwrite, sources=[tmp])
+    refusal = output_refusal(out, overwrite=overwrite)
     if refusal is not None:
         raise FileExistsError(refusal)
-    if tmp.exists():
-        shutil.rmtree(tmp)
+    if not has_zarr_name(out):
+        warnings.warn(f"The output {out} is not named .zarr or .ome.zarr.", UserWarning, stacklevel=2)
+    # An existing output is only replaced at the end, once the fusion has succeeded.
+    replace = has_content(out)
+    target = out.with_name(f".{out.name}.partial.zarr") if replace else out
+    if replace and target.exists():
+        shutil.rmtree(target)
     if transforms_path:  # the transforms first: they are what the fusion applies
         path = default_transforms_path(out) if transforms_path is True else Path(transforms_path)
         write_transforms(path, transforms_document(plan, tile_id=tile_id, source=source))
         logger.info("Transforms written to %s", path)
 
+    done = False
     try:
-        # ----- 1. level 0, region by region, into a plain temporary store -----
+        # ----- 1. the empty OME-Zarr (every level, with its metadata) -----
+        root = zarr.open_group(str(target), mode="w", zarr_format=zarr_format)
+        create_empty_dataset(root, metadata, ngff_version=ngff_version, zarr_format=zarr_format,
+                             compressor=cfg.compressor, compressor_level=cfg.compressor_level,
+                             data_type=data_type,
+                             shards=_drop_axes_from_config_shapes(cfg.shards, keep, len(plan.axes)),
+                             shard_target_mb=cfg.shard_target_mb, shard_exclude_axes=cfg.shard_exclude_axes)
+        level0 = root["0"]
+
+        # ----- 2. level 0, region by region, straight into the output -----
+        # A region is a whole write block (a shard, or whole chunks) of level 0, so workers
+        # never write the same file; it is merged `piece` at a time to bound the memory.
+        block = list(level0.shards or level0.chunks)
+        for i in drop:
+            block.insert(i, 1)
+        n_other = len(plan.axes) - len(plan.scale)
+        if any(b != 1 for b in block[:n_other]):
+            raise ValueError(f"Chunks and shards must be 1 along {plan.axes[:n_other]!r} to fuse, got "
+                             f"{tuple(block)} for axes {plan.axes!r} (see shard_exclude_axes).")
         depth = plan.grid_shape[0]
         cz, cy, cx = _region_shape(plan.tiles, plan.grid_shape, ds, flat)
-        level0 = zarr.create_array(str(tmp), shape=plan.shape, dtype=out_dtype,
-                                   chunks=(1,) * (len(plan.axes) - len(plan.scale)) + (() if flat else (cz,)) + (cy, cx),
-                                   fill_value=0, overwrite=True,
-                                   compressors=_TEMP_COMPRESSORS if temp_compression else None)
+        piece = (depth if flat else cz, cy, cx)
+        spatial_block = (depth,) + tuple(block[-2:]) if flat else tuple(block[-3:])
+        region = tuple(b * max(1, p // b) for b, p in zip(spatial_block, piece))
         axis = "zyx".index(plan.midline_axis)
-        region = (depth if flat else cz, cy, cx)
 
         def layout_blocks(layout: Dict[str, List[_Placed]]) -> List[tuple]:
             return [b for ci, n in enumerate(names)
@@ -1597,16 +1737,16 @@ def fuse_tiles(
                                             plan.blend_by, plan.group_order)]
 
         regions = _RegionSeries((lambda tp: layout_blocks(plan.layouts[tp])) if plan.per_timepoint
-                                else layout_blocks(plan.layout), plan)
-        logger.info("Fusing %d regions of up to %s voxels (z, y, x)", len(regions),
-                    ("-", cy, cx) if flat else (cz, cy, cx))
+                                else layout_blocks(plan.layout), plan, piece)
+        logger.info("Fusing %d regions of up to %s voxels (z, y, x), %s at a time", len(regions),
+                    ("-",) + region[1:] if flat else region, ("-", cy, cx) if flat else piece)
 
         auto = executor == "auto"
         if auto:
             picklable = all(getattr(t.data, "picklable", False) for t in plan.tiles)
             executor = "process" if workers > 1 and picklable else "thread"
         options = dict(ds=ds, projection=projection, blend=blend, dtype=out_dtype,
-                       steepness=float(sigmoid_steepness), workers=workers, progress=progress)
+                       steepness=float(sigmoid_steepness), workers=workers, progress=progress, drop=drop)
         try:
             samples = _fuse_level0(regions, level0, executor=executor, **options)
         except (BrokenProcessPool, RuntimeError) as e:
@@ -1618,34 +1758,24 @@ def fuse_tiles(
             samples = _fuse_level0(regions, level0, executor="thread", **options)
         windows = _display_windows(samples, n_ch, out_dtype)
 
-        # ----- 2. pyramid + OME-Zarr through the standard ZarrSmith writer -----
-        metadata = build_metadata(
-            size=[plan.shape],
-            scales=[plan.scale],
-            units=(plan.tiles[0].units,) * len(plan.scale),
-            translations=fused_position(plan),
-            channels=[ChannelInfo(
-                (channel_names or names)[i],
-                None if channel_colors is None else channel_colors[i],
-            ) for i in range(n_ch)],
-            dtype=str(out_dtype),
-            axes=plan.axes,
-            chunksize=[chunks],
-            name=name or "fused mosaic",
-            data_type=data_type,
-        )
-        dataset = ArrayManager(da.from_zarr(str(tmp)).rechunk(chunks), metadata)
-        dataset.build_pyramid(num_levels=max(1, int(levels)),
-                              downscale_factor=_spatial_factor(downscale_factor, flat))
-        dataset.to_zarr(str(out), overwrite=overwrite, progress=progress, **write_options)
+        # ----- 3. the coarser levels, in place, from level 0 on disk -----
+        if len(metadata["size"]) > 1:
+            populate_pyramid(root, num_levels=len(metadata["size"]), downscale_factor=factor,
+                             method=pyramid_method, num_workers=cfg.num_workers, progress=progress)
         if data_type == "intensity":
             # Sensible display range for viewers (the writer's default is the whole dtype range).
-            _write_display_windows(out, windows)
+            _write_display_windows(target, windows)
             logger.info("Display window per channel: %s", windows)
-        _write_sources(out, plan)
+        _write_sources(target, plan)
         if plan.n_available > 1:
-            _write_provenance(out, plan)
+            _write_provenance(target, plan)
+        done = True
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if not done:
+            shutil.rmtree(target, ignore_errors=True)
 
+    if replace:
+        warnings.warn(f"Replacing the existing Zarr store {out}: its content is deleted.", UserWarning, stacklevel=2)
+        shutil.rmtree(out)
+        target.rename(out)
     return ZarrManager(str(out), mode="r")
