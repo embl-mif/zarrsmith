@@ -433,6 +433,29 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
         help='Only compute the transforms and write them (next to the output, <output>.transforms.json): '
              'nothing is fused. Every fuse writes this file before fusing.',
     )
+    parser.add_argument(
+        '-rc', '--register_cameras', action='store_true',
+        help='MuVi SPIM: register the camera views on the images before fusing. The transform between '
+             'the right and the left view (translation and rotation, see --register_model) is measured '
+             'around the z centre of the stack, where the fusion hands over from one camera to the other, '
+             'and applied to the right view (the detection paths of the two cameras never match exactly, so '
+             'the stage positions alone leave a jump). The transforms file records the registration: reuse '
+             'it with --transforms.',
+    )
+    parser.add_argument(
+        '-rm', '--register_model', choices=['rigid', 'translation'], default='rigid',
+        help='Transform fitted by --register_cameras: rigid (translation and rotation, default; the right '
+             'view is resampled on the left grid) or translation (the right view is only moved).',
+    )
+    parser.add_argument(
+        '-rch', '--register_channel',
+        help='Reference channel of --register_cameras (e.g. a nuclear stain such as DAPI): the transform is '
+             'measured on it and applied to every channel. "all" registers every channel on its own images '
+             '(also corrects a chromatic difference between the cameras; a channel that cannot be registered '
+             'takes the transform of the best registered one). Default: the first channel. Timepoints follow '
+             '--reference_timepoint: measured at the reference timepoint and applied to all, or at every '
+             'timepoint with -rtp all.',
+    )
     parser.add_argument('-od', '--out_dtype', help='Output dtype, e.g. uint16 or float32. Default: input dtype '
                         '(float32 for blend=sum).')
     parser.add_argument('-rw', '--read_workers', type=int, default=4,
@@ -532,12 +555,14 @@ FUSE_HELP = """\
     and of the fusion columns
     downsample | projection | blend | sigmoid_steepness | channels | groups | cameras | fields | tiles | skip_tiles | timepoints |
     reference_timepoint | midline_axis | out_dtype | data_type | read_workers | temp_dir | transforms |
-    transforms_only (true/false) | flatfield (true/false, Opera only, default true), e.g.
+    transforms_only (true/false) | register_cameras (true/false) | register_model | register_channel |
+    flatfield (true/false, Opera only, default true), e.g.
       input                  | microscope | output                 | downsample | projection | blend   | num_levels
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_3D.zarr  | 4 8 8      | none       | sigmoid | 3
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_MIP.zarr | 1 8 8      | max        | midline |
     Leave a cell empty for the default. Lists (channels, groups, fields, tiles, skip_tiles, timepoints, channel_names...) are space
-    separated.
+    separated; put a name that contains spaces in double quotes in channels, groups, cameras, fields, tiles and
+    skip_tiles, e.g. "Alexa 488" Brightfield.
     The napari "Mosaic Fusion" widget writes such files with "Append to batch CSV".
 """
 
