@@ -14,3 +14,4 @@ documentation/Thumbs.db
 *build/
 zarrsmith/_version.py
 documentation/autoapi/
+environment.yml
