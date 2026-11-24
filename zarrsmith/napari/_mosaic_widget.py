@@ -357,13 +357,51 @@ def parse_channel_colors(text: str) -> list[str]:
     return colors
 
 
-def check_channel_options(names: Sequence[str], colors: Sequence[str], n_channels: int) -> Optional[str]:
-    """Why the typed channel names or colours cannot be used for ``n_channels`` fused channels, or ``None``."""
-    for label, values in (("channel names", names), ("channel colors", colors)):
-        if values and len(values) != n_channels:
-            return (f"{len(values)} {label} given for {n_channels} fused channel(s): give one per channel, "
-                    "or leave the field empty for the defaults.")
-    return None
+def channel_option_problems(names_text: str, colors_text: str, channels: Sequence[str]) -> dict:
+    """What is wrong with the channel names and colours typed in the widget for the fused ``channels``.
+
+    Returns ``{"channel_names": [...], "channel_colors": [...]}``, one message per problem (empty
+    lists: both can be used). Names: one per fused channel, all different. Colours: one per fused
+    channel, each a 6-digit hex code or a matplotlib colour name. An empty field (the defaults)
+    is always fine.
+    """
+    from zarrsmith.utils.colors import parse_color
+
+    n = len(channels)
+    fused = f"{n} fused channel{'s' if n != 1 else ''}" + (f" ({', '.join(map(str, channels))})" if n else "")
+
+    def count(values, what):
+        if values and len(values) != n:
+            return [f"{len(values)} {what if len(values) != 1 else what[:-1]} for {fused}: give one per channel, "
+                    "or leave the field empty "
+                    "for the defaults."]
+        return []
+
+    names = parse_channel_names(names_text)
+    name_problems = count(names, "names")
+    repeated = sorted({nm for nm in names if names.count(nm) > 1})
+    if repeated:
+        name_problems.append(f"repeated name{'s' if len(repeated) > 1 else ''} {', '.join(repeated)}: "
+                             "every channel needs its own name.")
+
+    tokens = str(colors_text or "").split()
+    unknown = []
+    for token in tokens:
+        try:
+            parse_color(token)
+        except TypeError:
+            unknown.append(token)
+    color_problems = count(tokens, "colors")
+    if unknown:
+        color_problems.append(f"{', '.join(repr(t) for t in unknown)} not recognized: use 6-digit hex codes "
+                              "(FF00FF) or matplotlib color names (magenta).")
+    return {"channel_names": name_problems, "channel_colors": color_problems}
+
+
+def channel_warning_text(problems: dict) -> str:
+    """The warning shown under the fusion estimate for :func:`channel_option_problems` (empty: none)."""
+    labels = {"channel_names": "Channel names", "channel_colors": "Channel colors"}
+    return "\n".join(f"⚠ {labels[key]}: {message}" for key, messages in problems.items() for message in messages)
 
 
 def register_options(*, register_cameras: bool, register_model: str, register_channel: Optional[str],
@@ -1282,12 +1320,29 @@ def mosaic_widget():
 
     def _channel_options(plan) -> tuple:
         """The typed channel names and colours, checked against the fused channels (``ValueError``)."""
-        names = parse_channel_names(fuse_widget.channel_names.value)
-        colors = parse_channel_colors(fuse_widget.channel_colors.value)
-        problem = check_channel_options(names, colors, len(plan.channels))
-        if problem:
-            raise ValueError(problem)
-        return names, colors
+        problems = channel_option_problems(fuse_widget.channel_names.value, fuse_widget.channel_colors.value,
+                                           plan.channels)
+        if any(problems.values()):
+            raise ValueError(" ".join(channel_warning_text(problems).replace("⚠ ", "").splitlines()))
+        return (parse_channel_names(fuse_widget.channel_names.value),
+                parse_channel_colors(fuse_widget.channel_colors.value))
+
+    def _check_channel_options(*_):
+        """Warn, while typing, about channel names or colours that the fusion would refuse."""
+        problems = channel_option_problems(fuse_widget.channel_names.value, fuse_widget.channel_colors.value,
+                                           list(fuse_widget.channels.value))
+        text = channel_warning_text(problems)
+        channel_warning.setText(text)
+        channel_warning.setVisible(bool(text))
+        for name, messages in problems.items():
+            getattr(fuse_widget, name).native.setStyleSheet(
+                "QLineEdit { border: 1px solid #e8a33d; }" if messages else "")
+        return problems
+
+    channel_warning = QLabel()
+    channel_warning.setWordWrap(True)
+    channel_warning.setStyleSheet("QLabel { color: #e8a33d; }")
+    channel_warning.setVisible(False)
 
     def _zarr_kwargs(plan) -> tuple:
         """``(fuse_tiles options from the additional parameters, zarr layout)``; ``ValueError``
@@ -1405,6 +1460,8 @@ def mosaic_widget():
     fuse_widget.register_cameras.changed.connect(_register_enabled)
     fuse_widget.ngff.changed.connect(_sharding_enabled)
     fuse_widget.shards.changed.connect(_sharding_enabled)
+    for name in ("channel_names", "channel_colors", "channels"):
+        getattr(fuse_widget, name).changed.connect(_check_channel_options)
     if viewer is not None:
         viewer.layers.selection.events.changed.connect(_update_plan)
         viewer.layers.events.removed.connect(_update_plan)
@@ -1530,7 +1587,7 @@ def mosaic_widget():
     layout.addWidget(make_section(make_title("Mosaic loading:"), load_widget.native))
     layout.addWidget(make_section(make_title("Show tiles:"), show_widget.native))
     layout.addWidget(make_section(make_title("Fuse to OME-Zarr:"), fuse_widget.native, plan_label,
-                                  ui["fuse_holder"]))
+                                  channel_warning, ui["fuse_holder"]))
     batch_widget.native.layout().setContentsMargins(0, 0, 0, 0)
     layout.addWidget(make_section(make_title("Batch CSV export:"), batch_widget.native))
     layout.addStretch(1)
@@ -1542,4 +1599,5 @@ def mosaic_widget():
     dock.batch_widget = batch_widget
     dock.plan_label, dock.state, dock.populate = plan_label, state, _populate
     dock.advanced_button, dock.advanced_rows = advanced_button, advanced_rows
+    dock.channel_warning = channel_warning
     return dock
