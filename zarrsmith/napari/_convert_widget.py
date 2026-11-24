@@ -380,6 +380,8 @@ def _run_conversion(
         "drop_singleton": bool(drop_singleton),
         "shards": shards,
         "overwrite": bool(overwrite),
+        # given to the writer too: a ZarrManager writes its source levels, not the rechunked ones
+        "chunks": chunks,
     }
     if num_workers is not None:
         to_zarr_kwargs["num_workers"] = int(num_workers)
