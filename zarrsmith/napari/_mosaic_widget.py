@@ -330,7 +330,8 @@ def layout_summary(axes: str, dtype, layout: dict) -> str:
     text = "chunks {} ({})".format(*shape(layout["chunks"]))
     if layout["shards"] is not None:
         dims, size = shape(layout["shards"])
-        text += f", shards {dims} ({size}, {layout['n_blocks']} shards)"
+        n = layout["n_blocks"]
+        text += f", shards {dims} ({size}, {n} shard{'s' if n != 1 else ''})"
     else:
         text += ", no shards"
     workers = layout["workers"]
