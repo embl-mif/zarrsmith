@@ -57,6 +57,10 @@ _NGFF_ATTRIBUTE_KEYS: frozenset[str] = frozenset(
 # one in its own shard (or unsharded chunk) preserves that access pattern;
 # the spatial axes (z/y/x) get consolidated automatically.
 DEFAULT_SHARD_EXCLUDE_AXES: tuple[str, ...] = ("t", "c")
+# Default target (uncompressed, MB) of a shard with `shards="auto"`, for zarrsmith convert,
+# allocate and the napari convert widget (fusion: FUSION_SHARD_TARGET_MB). A write thread
+# holds one shard twice (raw and encoded), so this sets the memory of every write thread.
+DEFAULT_SHARD_TARGET_MB = 512.0
 
 # Default codec: Blosc with zstd and byte shuffle, the best size/speed compromise
 # measured on uint16 light-sheet, mosaic and organoid data. Higher levels mostly
@@ -117,7 +121,7 @@ class ZarrWriteConfig:
         Zarr v3 sharding configuration, applied per pyramid level. One of:
 
         - ``"auto"`` (default): pick a shard shape per level automatically so each
-          shard is close to ``shard_target_mb`` in (uncompressed) size,
+          shard is as large as fits within ``shard_target_mb`` (uncompressed),
           grouping whole chunks along the axes with the most chunks first.
           Levels that are already small (few chunks, or a chunk already at
           or above the target size) are left unsharded.
@@ -171,7 +175,7 @@ class ZarrWriteConfig:
     data_type: Literal["intensity", "label"] | None = None
     chunks: Sequence[int] | Sequence[Sequence[int]] | None = None
     shards: Literal["auto"] | Sequence[int] | Sequence[Sequence[int]] | None = "auto"
-    shard_target_mb: float = 512.0  # in MB
+    shard_target_mb: float = DEFAULT_SHARD_TARGET_MB  # in MB
     shard_exclude_axes: Sequence[str] = DEFAULT_SHARD_EXCLUDE_AXES
     drop_singleton: bool = True
     num_workers: int | None = None
@@ -600,10 +604,13 @@ def _auto_shard_for_level(
     axes: Sequence[str] | None = None,
     exclude_axes: Sequence[str] = (),
 ) -> tuple[int, ...] | None:
-    """Pick a shard shape for one pyramid level targeting ``target_bytes`` per shard.
+    """Pick a shard shape for one pyramid level of at most ``target_bytes`` per shard.
 
     Whole chunks are grouped into a shard, growing the axes with the most
-    available chunks first (typically the spatial ``z``/``y``/``x`` axes).
+    available chunks first (typically the spatial ``z``/``y``/``x`` axes), one
+    chunk at a time and only while the shard stays within ``target_bytes``: the
+    target is a ceiling, so the memory a write thread or fusion worker holds (one
+    shard) never exceeds what was asked for.
     Axes whose name is in ``exclude_axes`` (requires ``axes`` to be given)
     are never grown, so e.g. timepoints or channels can be kept one-per-shard
     even while z/y/x is merged. Levels with no growable axis holding more
@@ -627,26 +634,22 @@ def _auto_shard_for_level(
     if chunk_bytes <= 0 or chunk_bytes >= target_bytes:
         return None
 
-    want_chunks = max(2, round(target_bytes / chunk_bytes))
+    max_chunks = target_bytes // chunk_bytes  # whole chunks that fit in the target
+    if max_chunks < 2:
+        return None
 
     multiplier = [1] * ndim
     order = sorted(growable, key=lambda a: chunks_per_axis[a], reverse=True)
-
-    def _total() -> int:
-        total = 1
-        for m in multiplier:
-            total *= m
-        return total
-
+    total = 1
     progressed = True
-    while _total() < want_chunks and progressed:
+    while progressed:
         progressed = False
         for axis in order:
-            if multiplier[axis] < chunks_per_axis[axis]:
-                multiplier[axis] += 1
+            m = multiplier[axis]
+            if m < chunks_per_axis[axis] and total // m * (m + 1) <= max_chunks:
+                multiplier[axis] = m + 1
+                total = total // m * (m + 1)
                 progressed = True
-                if _total() >= want_chunks:
-                    break
 
     if all(m == 1 for m in multiplier):
         return None
@@ -836,7 +839,7 @@ def _resolve_creation_shards(
     *,
     zarr_format: int,
     shards: Any = None,
-    shard_target_mb: float = 512.0,
+    shard_target_mb: float = DEFAULT_SHARD_TARGET_MB,
     shard_exclude_axes: Sequence[str] | None = None,
 ) -> list[tuple[int, ...] | None]:
     """Per-level shard shapes for creating empty arrays from metadata.

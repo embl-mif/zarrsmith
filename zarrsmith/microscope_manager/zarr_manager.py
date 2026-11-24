@@ -9,7 +9,7 @@ import dask.array as da
 import zarr
 
 from .microscope_manager import MicroscopeManager
-from ..utils.axes import normalize_axes, normalize_data_type
+from ..utils.axes import UNRECORDED_SCALE_KEY, normalize_axes, normalize_data_type
 from ..utils.downsampling import iter_dataset_transforms, multiscales_axes, recorded_downsampling_method
 from ..utils.ngff import (
     _extra_group_attributes,
@@ -308,6 +308,12 @@ class ZarrManager(MicroscopeManager):
             "chunksize": chunksize,
             "shards": shards,
             "scales": scales,
+            # no scale on level 0 nor on the multiscale: the 1.0 of every axis is a placeholder
+            UNRECORDED_SCALE_KEY: (() if _transform_vectors(datasets[0].get("coordinateTransformations"),
+                                                            len(axis_names))[0] is not None
+                                   or _transform_vectors(multiscales.get("coordinateTransformations"),
+                                                         len(axis_names))[0] is not None
+                                   else tuple(axis_names[i] for i in spatial_idx)) if datasets else (),
             "translations": translations,
             "units": units,
             "time_increment": time_increment,

@@ -78,6 +78,24 @@ def metadata_axis_size(metadata: dict[str, Any], axis: str, default: int = 1) ->
     return int(metadata["size"][0][axes.index(axis)]) if axis in axes else default
 
 
+#: Metadata key listing the spatial axes whose voxel size the file did not record. Their
+#: ``scales`` hold a 1.0 placeholder (OME-Zarr needs a number), :func:`recorded_voxel_size`
+#: gives ``None`` for them.
+UNRECORDED_SCALE_KEY = "unrecorded_scale_axes"
+
+
+def recorded_voxel_size(metadata: dict[str, Any], level: int = 0) -> dict[str, float | None] | None:
+    """Voxel size of every spatial axis at ``level``, ``{"z": 2.0, "y": 0.65, "x": 0.65}``,
+    with ``None`` for an axis whose size the file did not record (see
+    :data:`UNRECORDED_SCALE_KEY`). ``None`` when the metadata has no ``scales``."""
+    scales = metadata.get("scales") or []
+    if len(scales) <= level or scales[level] is None:
+        return None
+    unrecorded = set(metadata.get(UNRECORDED_SCALE_KEY) or ())
+    spatial = spatial_axes_in_order(metadata_axes(metadata))
+    return {ax: (None if ax in unrecorded else float(s)) for ax, s in zip(spatial, scales[level])}
+
+
 def spatial_axes_in_order(axes: str | Sequence[str]) -> tuple[str, ...]:
     """Return the spatial axis labels present in ``axes``, preserving order."""
     labels = normalize_axes(axes)

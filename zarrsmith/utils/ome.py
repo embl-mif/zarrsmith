@@ -45,6 +45,8 @@ class OmePixels:
     dtype: str
     channels: list[ChannelInfo] = field(default_factory=list)
     tiffdata: list[ET.Element] = field(default_factory=list)
+    #: spatial axes ("z", "y", "x") whose PhysicalSize the file does not record (1.0 in scale_zyx)
+    unrecorded_axes: tuple[str, ...] = ()
 
 
 def _ome_channel_color(raw: str | None, color_format: str) -> str | None:
@@ -62,7 +64,8 @@ def parse_ome_xml(xml: str | bytes | ET.Element, color_format: str = "ome") -> O
     """Parse the first ``<Pixels>`` element of an OME-XML document.
 
     Missing physical pixel sizes fall back to ``1.0`` with a warning so that
-    the user knows the voxel size was not recorded in the file.
+    the user knows the voxel size was not recorded in the file; their axes are
+    listed in ``unrecorded_axes``.
 
     Parameters
     ----------
@@ -81,7 +84,7 @@ def parse_ome_xml(xml: str | bytes | ET.Element, color_format: str = "ome") -> O
     if pixels is None:
         raise ValueError("No <Pixels> element found in the OME-XML metadata.")
 
-    scales, units = [], []
+    scales, units, unrecorded = [], [], []
     fallback_unit = pixels.attrib.get("PhysicalSizeXUnit", "µm")
     for axis in "ZYX":
         if f"PhysicalSize{axis}" in pixels.attrib:
@@ -89,6 +92,7 @@ def parse_ome_xml(xml: str | bytes | ET.Element, color_format: str = "ome") -> O
         else:
             warnings.warn(f"OME-XML has no PhysicalSize{axis}; assuming 1.0.", stacklevel=3)
             scales.append(1.0)
+            unrecorded.append(axis.lower())
         units.append(pixels.attrib.get(f"PhysicalSize{axis}Unit", fallback_unit))
 
     channels = [
@@ -112,4 +116,5 @@ def parse_ome_xml(xml: str | bytes | ET.Element, color_format: str = "ome") -> O
         dtype=pixels.attrib.get("Type", "uint16"),
         channels=channels,
         tiffdata=pixels.findall(f"{_NS}TiffData"),
+        unrecorded_axes=tuple(unrecorded),
     )

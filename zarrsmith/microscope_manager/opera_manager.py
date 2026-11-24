@@ -5,7 +5,7 @@ import tifffile
 import zarr
 
 from .microscope_manager import MicroscopeManager
-from ..utils.axes import to_tczyx
+from ..utils.axes import UNRECORDED_SCALE_KEY, to_tczyx
 from ..utils.metadata import build_metadata, scale_for_level
 from ..utils.ome import parse_ome_xml
 from ..utils.translation import pyramid_translations
@@ -54,6 +54,7 @@ class OperaManager(MicroscopeManager):
         return build_metadata(
             size=[(px.size_t, px.size_c, px.size_z, px.size_y, px.size_x)],
             scales=[px.scale_zyx],
+            **{UNRECORDED_SCALE_KEY: px.unrecorded_axes},
             units=px.units_zyx,
             translations=self._stage_position(px.units_zyx),
             channels=px.channels,

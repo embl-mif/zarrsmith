@@ -7,7 +7,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from ..utils.czi import FOCUS_POSITION as _FOCUS
-from ..utils.czi import block_key, czi_distance, read_block_index
+from ..utils.axes import UNRECORDED_SCALE_KEY
+from ..utils.czi import block_key, czi_distance, czi_has_distance, read_block_index
 from .czi_array import CziTileArray
 from .mosaic import MosaicManager
 from .tile import Tile
@@ -104,6 +105,7 @@ class ZeissMosaicManager(MosaicManager):
         names = channel_names(md, sorted({key[3] for key in stacks}))
         scenes = scene_names(md)
         voxel = (czi_distance(md, "Z", default=1.0), czi_distance(md, "Y"), czi_distance(md, "X"))
+        unrecorded = {} if czi_has_distance(md, "Z") else {UNRECORDED_SCALE_KEY: ("z",)}
 
         tiles = []
         missing = 0
@@ -122,7 +124,7 @@ class ZeissMosaicManager(MosaicManager):
                 channel=names[c],
                 timepoint=t,
                 field=field,
-                attrs={"stack": f"{field}-m{m:02d}" if field else f"m{m:02d}", "scene": scene,
+                attrs={**unrecorded, "stack": f"{field}-m{m:02d}" if field else f"m{m:02d}", "scene": scene,
                        "scene_name": scenes.get(scene), "mosaic_index": m, "path": str(self.path)},
             ))
         if missing:

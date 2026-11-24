@@ -9,6 +9,7 @@ from .axes import normalize_axes, normalize_data_type
 from .create_empty_dataset import write_empty_pyramid
 from .ngff import (
     DEFAULT_COMPRESSOR_LEVEL,
+    DEFAULT_SHARD_TARGET_MB,
     ZarrWriteConfig,
     _infer_ngff_version,
     _register_label_on_labels_group,
@@ -65,7 +66,7 @@ def create_empty_group(
     compressor_level: int = DEFAULT_COMPRESSOR_LEVEL,
     data_type: str | None = None,
     shards: Any = None,
-    shard_target_mb: float = 512.0,
+    shard_target_mb: float = DEFAULT_SHARD_TARGET_MB,
     shard_exclude_axes: Any = None,
     overwrite: bool = False,
 ):

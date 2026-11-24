@@ -27,20 +27,21 @@ zarrsmith convert --batch datasets.csv
 | Flag | Meaning | Default |
 |---|---|---|
 | `-cs`, `--chunk_size` | chunk size, one value per axis of the dataset | chosen from `-ms` |
-| `-ms`, `--max_size` | max chunk size in MB, uncompressed (ignored with `-cs`). A chunk is what a reader fetches: t and c are 1, z holds up to 16 planes, y and x grow about square up to the size (16 × 256 × 512 for uint16); the shards group them into files of about 512 MB | about 4 |
+| `-ms`, `--max_size` | max chunk size in MB, uncompressed (ignored with `-cs`). A chunk is what a reader fetches: t and c are 1, and the chunk is about cubic in micrometers, from the voxel size, with at most 32 z planes so that viewing one plane reads at most 32 (32 × 256 × 256 for uint16; 16 × 256 × 512 when the z step is 16 times the pixel size). A voxel size the file does not record counts as unknown: the chunk is then cubic in voxels, up to 32 planes; the shards group them into files of at most 512 MB | about 4 |
 | `-si`, `--scene_index` | scene of a `.czi` or `.vsi` file | the first scene |
 | `-cn`, `--channel_names` / `-cc`, `--channel_colors` | names and colours (hex or matplotlib names) of the channels | those of the input |
 | `-zf`, `--zarr_format` | 2 (NGFF 0.4) or 3 (NGFF 0.5) | 3 |
 | `-df`, `--downscale_factor` | pyramid factor: one value, or `Z Y X`. Each level averages blocks of the level above (intensity data) or keeps one pixel per block (labels), as `zarrsmith pyramid` does | 2 on every spatial axis |
 | `-nl`, `--num_levels` | number of pyramid levels | until no spatial axis of the coarsest level is over 2048 pixels |
 | `-me`, `--method` | downsampling of the pyramid levels: `mean`, `nearest` or `mode` (`mean` is refused for labels); batch column `method` | `mean` for intensity data, `nearest` for labels |
-| `-s`, `--subset` | crop or select before writing, e.g. `"y=10:100:2;x=20:80;c=0,2"` | everything |
+| `-s`, `--subset` | crop or select before writing, e.g. `"y=10:100:2;x=20:80;c=0,2"`; channels also by name, `"c=DAPI,GFP"` (a number is always an index) | everything |
 | `-sh`, `--shards` / `-stm`, `--shard_target_mb` / `-sea`, `--shard_exclude_axes` | sharding (see [Advanced writing options](advanced.md)) | `auto`, 512 MB (256 MB for `fuse`), `t c` |
 | `-cp`, `--compressor` | `blosc`, `gzip` (zarr v2 only) or `none`; see [Compression](advanced.md#compression) | `blosc` |
 | `-cpl`, `--compressor_level` | compression level, 0 to 9 | 1 |
 | `-ds`, `--drop_singleton` | drop size-1 `t`/`c`/`z` axes | true |
 | `-nw`, `--num_workers` | write threads | half the cores, at most 8 |
 | `-ow`, `--overwrite` | replace an existing output (see [Existing outputs](advanced.md#existing-outputs)) | off |
+| `-dr`, `--dry_run` | print the output (axes, size, voxel), its chunks and shards (size and count) and the pyramid levels, the recap the napari converter shows, and stop: nothing is written. With `--batch`, for every row. Also for `fuse`, with the fusion workers (camera registration is skipped) | off |
 
 The batch CSV has the columns `input`, `microscope`, `output`, plus any of `chunk_size`, `max_size(MB)`, `scene_index`, `zarr_format`, `downscale_factor`, `subset`, `channel_colors`, `channel_names`, `num_levels`, `shards`, `shard_target_mb`, `shard_exclude_axes`, `compressor`, `compressor_level`, `drop_singleton`, `num_workers`, `overwrite`. The napari converter writes such rows with *Append to batch CSV*.
 
@@ -169,7 +170,7 @@ The fusion options:
 | `-dt`, `--data_type` | `intensity` or `label` (a label image; needs `-b none`, the default for labels, and an integer dtype). For a folder of OME-Zarr stores it also picks which stores are read | `label` when every tile is label data (a folder of label stores), else `intensity` |
 | `-lo`, `--label_offsets` | label tiles numbered separately (a segmentation run tile by tile): CSV with columns `store` (store name, with or without `.ome.zarr`) and `offset`, added to every non-zero id of that store. Every tile needs one. Implies `-dt label` ([renumbering label tiles](mosaic.md#renumbering-label-tiles)) | |
 | `-lm`, `--label_mapping` | JSON `{"id": new_id}` applied after the offsets, e.g. the objects a tile edge cut in two, merged by a label solver; ids not listed are kept. Implies `-dt label` | |
-| `-rw`, `--read_workers` | tiles read in parallel processes; not to be confused with `-nw` (write threads) | 4 |
+| `-rw`, `--read_workers` | regions fused in parallel processes; 0 chooses from the cores (half of them, at most 16), the number of regions and the free memory, as the napari widget does. Not to be confused with `-nw` (write threads) | 0 |
 | `-td`, `--temp_dir` | deprecated and ignored: level 0 is fused directly into the output | |
 | `-ow`, `--overwrite` | replace an existing output, once the fusion has succeeded | off |
 

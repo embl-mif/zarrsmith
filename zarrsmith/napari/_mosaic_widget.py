@@ -1,6 +1,7 @@
 """napari widget to inspect raw mosaic tiles and fuse them into an OME-Zarr image."""
 
 import re
+import warnings
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -15,9 +16,15 @@ from zarrsmith import mosaic_manager as mos
 from zarrsmith.mosaic_manager.fusion import ALL_TIMEPOINTS
 from zarrsmith.mosaic_manager.tile import series_keys
 from ._batch_csv import append_batch_csv
-from ._layout import compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_section, make_title
+from ._layout import (compact_row, compose_dock, enable_drag_and_drop, make_button_holder, make_collapsible_toggle,
+                      make_log_pane, make_section, make_title)
 from ._log import EmittingStream, make_log_appender
 from ._output_check import output_allowed
+from ._zarr_options import (  # noqa: F401  (re-exported: part of this module's helpers)
+    DEFAULT_CHUNK_MB, DEFAULT_SHARD_MB, FUSION_SHARD_MB, NGFF_FORMATS, PYRAMID_METHODS, auto_channel_names, auto_chunks,
+    block_count, channel_error, channel_option_problems, channel_warning_text, chunk_shard_layout,
+    follow_auto_value, layout_summary, manual_chunks, parse_channel_colors, parse_channel_names,
+)
 
 #: Mosaic readers offered in the widget.
 MOSAIC_READERS = mos.MOSAIC_READERS
@@ -51,10 +58,13 @@ MOSAIC_BATCH_COLUMNS = [
     "downsample", "projection", "blend", "channels", "groups", "cameras", "fields", "tiles", "skip_tiles",
     "timepoints", "reference_timepoint", "midline_axis", "out_dtype", "read_workers", "temp_dir", "overwrite", "flatfield",
     "transforms", "transforms_only", "register_cameras", "register_model", "register_channel",
-    "chunk_size", "max_size(MB)", "scene_index", "zarr_format", "downscale_factor", "subset",
+    "chunk_size", "max_size(MB)", "scene_index", "zarr_format", "downscale_factor", "method", "subset",
     "channel_colors", "channel_names", "num_levels", "shards", "shard_target_mb", "shard_exclude_axes",
     "drop_singleton", "num_workers",
 ]
+
+#: Axes that shards never merge: the fusion writes one channel of one timepoint at a time.
+_ALWAYS_UNMERGED = ("t", "c")
 
 # ---------------------------------------------------------------------------
 # helpers (no Qt, unit tested)
@@ -153,9 +163,21 @@ def fuse_kwargs(
     levels: int,
     workers: int,
     overwrite: bool,
+    downscale_factor: Optional[Sequence[int]] = None,
+    pyramid_method: Optional[str] = None,
+    channel_names: Optional[Sequence[str]] = None,
+    channel_colors: Optional[Sequence[str]] = None,
+    write_options: Optional[dict] = None,
 ) -> dict:
-    """Map the fusion widget values onto :func:`~zarrsmith.mosaic_manager.fuse_tiles` arguments."""
-    return {
+    """Map the fusion widget values onto :func:`~zarrsmith.mosaic_manager.fuse_tiles` arguments.
+
+    ``downscale_factor`` is the pyramid ``(z, y, x)`` factor, ``pyramid_method`` a
+    :data:`PYRAMID_METHODS` value (``"auto"``: the default of the data type),
+    ``channel_names``/``channel_colors`` the output channels (``None`` or empty: the tile
+    names and the default palette) and ``write_options`` those of :func:`write_options`.
+    Options left at ``None`` are not passed, so ``fuse_tiles`` uses its defaults.
+    """
+    kwargs = {
         "channels": list(channels),
         "projection": _PROJECTIONS[projection],
         "blend": blend,
@@ -164,6 +186,68 @@ def fuse_kwargs(
         "workers": int(workers),
         "overwrite": bool(overwrite),
     }
+    if downscale_factor is not None:
+        kwargs["downscale_factor"] = tuple(int(v) for v in downscale_factor)
+    if pyramid_method is not None and pyramid_method != "auto":
+        kwargs["pyramid_method"] = pyramid_method
+    if channel_names:
+        kwargs["channel_names"] = list(channel_names)
+    if channel_colors:
+        kwargs["channel_colors"] = list(channel_colors)
+    kwargs.update(write_options or {})
+    return kwargs
+
+
+def zarr_layout(plan, *, chunk_auto: bool = True, chunk_mb: float = DEFAULT_CHUNK_MB,
+                chunk_zyx: Sequence[int] = (32, 256, 256), zarr_format: int = 3, shards: str = "auto",
+                shard_mb: float = FUSION_SHARD_MB, shard_exclude_axes: Sequence[str] = (), workers: int = 0,
+                cores: Optional[int] = None, free_mb: Optional[float] = None) -> dict:
+    """Level-0 chunks, shards and fusion workers of the output of ``plan`` (a
+    :class:`~zarrsmith.mosaic_manager.fusion.FusionPlan`), with the same functions as
+    ``zarrsmith fuse`` and :func:`~zarrsmith.mosaic_manager.fuse_tiles`.
+
+    Returns ``chunks`` (auto: :func:`auto_chunks` of ``chunk_mb`` and the plan's voxel size;
+    else ``chunk_zyx``), ``shards`` (the shard shape that ``shards="auto"`` writes for level 0,
+    ``None`` without shards: ``shards="none"`` or zarr v2), ``exclude`` (axes shards never
+    merge: always ``t`` and ``c``, plus ``shard_exclude_axes``), ``block_bytes`` and
+    ``n_blocks`` (size and number of the write blocks), ``workers``
+    (:func:`~zarrsmith.mosaic_manager.fusion.fusion_workers` of ``workers``, 0: automatic)
+    and ``auto_workers``.
+    """
+    from zarrsmith.mosaic_manager.fusion import fusion_workers
+
+    layout = chunk_shard_layout(plan.axes, plan.shape, plan.dtype, chunk_auto=chunk_auto, chunk_mb=chunk_mb,
+                                chunk_zyx=chunk_zyx, zarr_format=zarr_format, shards=shards, shard_mb=shard_mb,
+                                shard_exclude_axes=_ALWAYS_UNMERGED + tuple(shard_exclude_axes),
+                                voxel_size=plan.voxel_size)
+    block = layout["shards"] or layout["chunks"]
+    with warnings.catch_warnings():  # the estimate shows the number; fuse_tiles warns when it fuses
+        warnings.simplefilter("ignore")
+        layout["workers"] = fusion_workers(plan, block, int(workers), cores=cores, free_mb=free_mb)
+    layout["auto_workers"] = int(workers) <= 0
+    return layout
+
+
+def write_options(layout: dict, *, zarr_format: int = 3, shard_mb: float = FUSION_SHARD_MB,
+                  drop_singleton: bool = True, num_workers: int = 0) -> dict:
+    """OME-Zarr ``**write_options`` of :func:`~zarrsmith.mosaic_manager.fuse_tiles` for a
+    :func:`zarr_layout`: its chunks; ``shards="auto"`` with ``shard_mb`` (every pyramid
+    level gets its own shards) or no shards; ``num_workers`` threads to build the pyramid
+    (0: automatic, from the cores and the shard size that fits in memory)."""
+    zarr_format = int(zarr_format)
+    options = {
+        "chunks": tuple(int(c) for c in layout["chunks"]),
+        "zarr_format": zarr_format,
+        "ngff_version": "0.5" if zarr_format == 3 else "0.4",
+        "drop_singleton": bool(drop_singleton),
+        "shards": "auto" if layout["shards"] is not None else None,
+    }
+    if layout["shards"] is not None:
+        options["shard_target_mb"] = float(shard_mb)
+        options["shard_exclude_axes"] = tuple(layout["exclude"])
+    if int(num_workers) > 0:
+        options["num_workers"] = int(num_workers)
+    return options
 
 
 def register_options(*, register_cameras: bool, register_model: str, register_channel: Optional[str],
@@ -434,6 +518,13 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
     ``transforms_only`` are the transforms options. ``register_cameras``, ``register_model``
     and ``register_channel`` give the camera registration columns (empty when the cameras
     are not registered; the timepoints follow the ``reference_timepoint`` column).
+
+    The OME-Zarr columns come from the additional parameters, each left empty (the
+    ``zarrsmith fuse`` default) when its value is missing: ``pyramid_z/y/x``
+    (``downscale_factor``), ``pyramid_method`` (``method``, empty for ``"auto"``), ``ngff``
+    (``zarr_format``), ``drop_singleton``, ``num_workers`` (empty for 0, automatic),
+    ``channel_names``/``channel_colors`` (lists), and ``layout``, a :func:`zarr_layout`
+    with ``shard_mb``: its chunks (``chunk_size``, in output axis order) and shards.
     """
     groups = list(values["groups"])
     fields = list(values.get("fields") or ())
@@ -444,7 +535,29 @@ def batch_row(*, input_path, microscope: str, output, values: dict, all_groups: 
     register = register_options(register_cameras=bool(values.get("register_cameras")),
                                 register_model=values.get("register_model") or "rigid",
                                 register_channel=values.get("register_channel"))
+    layout = values.get("layout")
+    pyramid = [values.get(f"pyramid_{ax}") for ax in "zyx"]
+    method = values.get("pyramid_method")
+    num_workers = int(values.get("num_workers") or 0)
+    zarr_columns = {
+        "downscale_factor": " ".join(str(int(v)) for v in pyramid) if None not in pyramid else "",
+        "method": "" if method in (None, "auto") else method,
+        "zarr_format": str(NGFF_FORMATS[values["ngff"]]) if values.get("ngff") else "",
+        "drop_singleton": "" if values.get("drop_singleton") is None else str(bool(values["drop_singleton"])).lower(),
+        "num_workers": str(num_workers) if num_workers > 0 else "",
+        "channel_names": _join_names(values.get("channel_names") or ()),
+        "channel_colors": " ".join(values.get("channel_colors") or ()),
+    }
+    if layout is not None:
+        sharded = layout["shards"] is not None
+        zarr_columns.update({
+            "chunk_size": " ".join(str(int(c)) for c in layout["chunks"]),
+            "shards": "auto" if sharded else "none",
+            "shard_target_mb": str(values.get("shard_mb", FUSION_SHARD_MB)) if sharded else "",
+            "shard_exclude_axes": " ".join(layout["exclude"]) if sharded else "",
+        })
     return {
+        **zarr_columns,
         "input": str(Path(input_path)),
         "microscope": microscope,
         "output": str(Path(output)),
@@ -671,6 +784,7 @@ def mosaic_widget():
             w.fields.value = fields[:1]  # tiles of separate fields are not fused together
         show_widget.channels.value = channels[:1]  # one channel keeps napari responsive
         fuse_widget.channels.value = channels
+        _follow_channel_names(reset=True)  # this mosaic's channel names, not the previous one's
         labels = all(mos.fusion.tile_data_type(t) == "label" for t in mosaic.tiles)
         # smooth between tiles and between groups; label ids are copied, never blended
         fuse_widget.blend.value = "none" if labels else "sigmoid"
@@ -792,11 +906,56 @@ def mosaic_widget():
                            "tooltip": "Leave a skipped tile's position blank in every channel."},
         projection={"choices": list(_PROJECTIONS), "value": "none (3D)"},
         blend={"choices": list(mos.fusion.BLENDS), "value": "sigmoid"},
-        ds_z={"label": "Downsample Z", "min": 1, "max": 256, "value": 4},
-        ds_y={"label": "Downsample Y", "min": 1, "max": 256, "value": 8},
-        ds_x={"label": "Downsample X", "min": 1, "max": 256, "value": 8},
-        levels={"label": "Resolution levels", "min": 1, "max": 10, "value": 3},
-        workers={"label": "Workers", "min": 1, "max": 64, "value": 4},
+        ds_z={"label": "Downsample Z", "min": 1, "max": 256, "value": 1,
+              "tooltip": "Downsampling of the tiles while they are read (each output voxel is the mean of a block)."},
+        ds_y={"label": "Downsample Y", "min": 1, "max": 256, "value": 1},
+        ds_x={"label": "Downsample X", "min": 1, "max": 256, "value": 1},
+        levels={"label": "Resolution levels", "min": 1, "max": 10, "value": 3,
+                "tooltip": "Number of pyramid levels of the output. Filled in as zarrsmith fuse chooses: "
+                           "until no axis of the coarsest level is above 2048 voxels."},
+        pyramid_method={"label": "Method", "choices": list(PYRAMID_METHODS), "value": "auto",
+                        "tooltip": "Downsampling of the pyramid levels. auto: mean for intensity images, "
+                                   "nearest for labels (mean is refused for labels)."},
+        pyramid_z={"label": "Pyramid Z", "min": 1, "max": 16, "value": 2,
+                   "tooltip": "Factor between two pyramid levels (z is ignored for projections)."},
+        pyramid_y={"label": "Pyramid Y", "min": 1, "max": 16, "value": 2},
+        pyramid_x={"label": "Pyramid X", "min": 1, "max": 16, "value": 2},
+        ngff={"label": "NGFF", "choices": list(NGFF_FORMATS), "value": "0.5 (zarr v3)",
+              "tooltip": "OME-Zarr version: 0.5 (zarr v3, with shards) or 0.4 (zarr v2, no shards)."},
+        drop_singleton={"label": "Drop singleton axes", "widget_type": "CheckBox", "value": True,
+                        "tooltip": "Leave t, c and z axes of size 1 out of the output."},
+        chunk_auto={"label": "auto", "widget_type": "CheckBox", "value": True,
+                    "tooltip": "Choose the chunk shape from the output: about the given size (uncompressed), "
+                               "1 along t and c, about cubic in micrometers, at most 32 z planes. "
+                               "Untick to type it."},
+        chunk_mb={"label": "Chunk MB", "widget_type": "FloatSpinBox", "min": 0.25, "max": 1024, "step": 0.25,
+                  "value": DEFAULT_CHUNK_MB, "tooltip": "Target uncompressed size of a chunk (auto chunks)."},
+        chunk_z={"label": "Chunk Z", "min": 1, "max": 2**16, "value": 32,
+                 "tooltip": "Chunk shape (ignored along z for projections); filled in when auto is ticked."},
+        chunk_y={"label": "Chunk Y", "min": 1, "max": 2**16, "value": 256},
+        chunk_x={"label": "Chunk X", "min": 1, "max": 2**16, "value": 256},
+        shards={"label": "Sharding", "choices": ["auto", "none"], "value": "auto",
+                "tooltip": "auto: group whole chunks into shard files of at most the given size (zarr v3 only; "
+                           "every pyramid level gets its own). none: one file per chunk."},
+        shard_mb={"label": "Shard MB", "min": 1, "max": 100000, "value": FUSION_SHARD_MB,
+                  "tooltip": "Target uncompressed size of a shard. A fusion worker holds one shard at a time."},
+        shard_exclude_axes={"label": "Never merge", "widget_type": "Select", "choices": ["z", "y", "x"],
+                            "allow_multiple": True, "value": [],
+                            "tooltip": "Axes along which shards never group chunks (t and c never are: "
+                                       "the fusion writes one channel of one timepoint at a time)."},
+        workers={"label": "Fusion workers (0 = auto)", "min": 0, "max": 128, "value": 0,
+                 "tooltip": "Regions (shards) fused in parallel. 0: half of the cores (at most 16), as many "
+                            "as fit in half of the free RAM, one shard each."},
+        num_workers={"label": "Write threads (0 = auto)", "min": 0, "max": 256, "value": 0,
+                     "tooltip": "Threads building the pyramid levels. 0: half of the cores (at most 8), "
+                                "reduced so the shards being written fit in half of the free RAM."},
+        channel_names={"label": "Channel names", "widget_type": "LineEdit", "value": "",
+                       "tooltip": "Names of the output channels, separated by spaces, one per fused channel. "
+                                  "Filled in with the selected tile channels (spaces replaced by "
+                                  "underscores) until you type names of your own."},
+        channel_colors={"label": "Channel colors", "widget_type": "LineEdit", "value": "",
+                        "tooltip": "Colours of the output channels (hex codes such as FF00FF or names such as "
+                                   "magenta), separated by spaces, one per fused channel. Empty: the default palette."},
         overwrite={"label": "Overwrite output", "widget_type": "CheckBox", "value": False},
         transforms_file={"widget_type": "FileEdit", "mode": "r", "label": "Transforms (optional)",
                          "filter": "*.json",
@@ -823,11 +982,28 @@ def mosaic_widget():
         skip_all_channels=False,
         projection="none (3D)",
         blend="sigmoid",
-        ds_z=4,
-        ds_y=8,
-        ds_x=8,
+        ds_z=1,
+        ds_y=1,
+        ds_x=1,
         levels=3,
-        workers=4,
+        pyramid_method="auto",
+        pyramid_z=2,
+        pyramid_y=2,
+        pyramid_x=2,
+        ngff="0.5 (zarr v3)",
+        drop_singleton=True,
+        chunk_auto=True,
+        chunk_mb=DEFAULT_CHUNK_MB,
+        chunk_z=32,
+        chunk_y=256,
+        chunk_x=256,
+        shards="auto",
+        shard_mb=FUSION_SHARD_MB,
+        shard_exclude_axes=(),
+        workers=0,
+        num_workers=0,
+        channel_names="",
+        channel_colors="",
         overwrite=False,
         transforms_file: Path = Path(),
         transforms_only=False,
@@ -859,6 +1035,16 @@ def mosaic_widget():
             print(f"ERROR: {plan.error}")
             _release()
             return
+        try:
+            zarr_kwargs, layout = _zarr_kwargs(plan)
+            kwargs.update(zarr_kwargs)
+            kwargs["workers"] = layout["workers"]
+        except ValueError as e:
+            if not transforms_only:  # only the transforms are written: the zarr options do not matter
+                _capture()
+                print(f"Cannot fuse: {e}")
+                _release()
+                return
         out = Path(output_path)
         _capture()
         register = register_options(register_cameras=register_cameras and _register_shown(),
@@ -894,6 +1080,7 @@ def mosaic_widget():
             print(f"Writing the transforms of {len(plan.tiles)} tiles (nothing fused).")
         else:
             print(f"Fusing {len(plan.tiles)} tiles into {out}: {plan.summary()}")
+            print(f"OME-Zarr {fuse_widget.ngff.value}: {layout_summary(plan.axes, plan.dtype, layout)}")
         plan_kwargs = {k: kwargs[k] for k in ("channels", "projection", "blend", "ds", "skip")}
         plan_kwargs.update(_time_options())
         # all the tiles, not plan.tiles: skipped tiles and the reference timepoint set the geometry
@@ -970,6 +1157,114 @@ def mosaic_widget():
             state["transforms"] = choice
             print(f"Tiles placed with {choice.name} ({doc.get('method')}, {len(doc['tiles'])} tile(s)).")
 
+    def _zarr_format() -> int:
+        return NGFF_FORMATS[fuse_widget.ngff.value]
+
+    def _zarr_layout(plan) -> dict:
+        """Chunks, shards and fusion workers of the output of ``plan`` (see :func:`zarr_layout`)."""
+        w = fuse_widget
+        return zarr_layout(plan, chunk_auto=w.chunk_auto.value,
+                           chunk_mb=w.chunk_mb.value, chunk_zyx=(w.chunk_z.value, w.chunk_y.value, w.chunk_x.value),
+                           zarr_format=_zarr_format(), shards=w.shards.value, shard_mb=w.shard_mb.value,
+                           shard_exclude_axes=tuple(w.shard_exclude_axes.value), workers=w.workers.value)
+
+    def _channel_options(plan) -> tuple:
+        """The typed channel names and colours, checked against the fused channels (``ValueError``)."""
+        error = channel_error(channel_option_problems(fuse_widget.channel_names.value,
+                                                      fuse_widget.channel_colors.value, plan.channels))
+        if error:
+            raise ValueError(error)
+        return (parse_channel_names(fuse_widget.channel_names.value),
+                parse_channel_colors(fuse_widget.channel_colors.value))
+
+    def _follow_channel_names(*_, reset=False):
+        """Fill in the names of the selected channels (spaces -> underscores) until the user types
+        names of their own; ``reset`` (a new mosaic) replaces whatever is there."""
+        if reset:
+            fuse_widget.channel_names.value = ""
+        follow_auto_value(fuse_widget.channel_names, auto_channel_names(fuse_widget.channels.value),
+                          state, "auto_channel_names")
+
+    def _check_channel_options(*_):
+        """Warn, while typing, about channel names or colours that the fusion would refuse."""
+        problems = channel_option_problems(fuse_widget.channel_names.value, fuse_widget.channel_colors.value,
+                                           list(fuse_widget.channels.value))
+        text = channel_warning_text(problems)
+        channel_warning.setText(text)
+        channel_warning.setVisible(bool(text))
+        for name, messages in problems.items():
+            getattr(fuse_widget, name).native.setStyleSheet(
+                "QLineEdit { border: 1px solid #e8a33d; }" if messages else "")
+        return problems
+
+    channel_warning = QLabel()
+    channel_warning.setWordWrap(True)
+    channel_warning.setStyleSheet("QLabel { color: #e8a33d; }")
+    channel_warning.setVisible(False)
+
+    def _zarr_kwargs(plan) -> tuple:
+        """``(fuse_tiles options from the additional parameters, zarr layout)``; ``ValueError``
+        for channel names or colours that cannot be used, or a pyramid method refused for the data."""
+        from zarrsmith.utils.downsampling import resolve_downsampling_method
+
+        w = fuse_widget
+        names, colors = _channel_options(plan)
+        method = None if w.pyramid_method.value == "auto" else w.pyramid_method.value
+        resolve_downsampling_method(method, plan.data_type)  # e.g. mean for labels: refused before fusing
+        layout = _zarr_layout(plan)
+        options = write_options(layout, zarr_format=_zarr_format(), shard_mb=w.shard_mb.value,
+                                drop_singleton=w.drop_singleton.value, num_workers=w.num_workers.value)
+        kwargs = {"downscale_factor": (w.pyramid_z.value, w.pyramid_y.value, w.pyramid_x.value), **options}
+        if method is not None:
+            kwargs["pyramid_method"] = method
+        if names:
+            kwargs["channel_names"] = names
+        if colors:
+            kwargs["channel_colors"] = colors
+        return kwargs, layout
+
+    def _show_chunks(plan, layout) -> None:
+        """Fill in the chunk shape chosen automatically, and lock what does not apply."""
+        w = fuse_widget
+        auto = bool(w.chunk_auto.value)
+        flat = "z" not in plan.axes
+        if auto:
+            state["syncing_chunks"] = True
+            try:
+                sizes = dict(zip(plan.axes, layout["chunks"]))
+                for ax in "yx" if flat else "zyx":
+                    getattr(w, f"chunk_{ax}").value = sizes[ax]
+            finally:
+                state["syncing_chunks"] = False
+        w.chunk_mb.enabled = auto
+        w.chunk_y.enabled = w.chunk_x.enabled = not auto
+        w.chunk_z.enabled = not auto and not flat
+        w.pyramid_z.enabled = not flat
+
+    def _show_levels(plan) -> None:
+        """Fill in the number of pyramid levels zarrsmith fuse would choose, unless the user typed one
+        (the field then no longer holds the value filled in last)."""
+        from zarrsmith.mosaic_manager.fusion import default_fusion_levels
+
+        w = fuse_widget
+        if state.get("auto_levels") not in (None, w.levels.value):
+            return
+        levels = min(w.levels.max, default_fusion_levels(plan, (w.pyramid_z.value, w.pyramid_y.value,
+                                                                 w.pyramid_x.value)))
+        state["syncing_chunks"] = True  # filled in here: no new plan
+        try:
+            w.levels.value = levels
+        finally:
+            state["syncing_chunks"] = False
+        state["auto_levels"] = levels
+
+    def _sharding_enabled(*_):
+        """Shards are a zarr v3 (NGFF 0.5) feature."""
+        w = fuse_widget
+        v3 = _zarr_format() == 3
+        w.shards.enabled = v3
+        w.shard_mb.enabled = w.shard_exclude_axes.enabled = v3 and w.shards.value == "auto"
+
     def _time_options() -> dict:
         """Timepoint options of the fusion (none for a mosaic with a single timepoint)."""
         if len(state["mosaic"].timepoints) < 2:
@@ -989,6 +1284,8 @@ def mosaic_widget():
         return state["mosaic"].tiles_by_ids(ids) if ids else []
 
     def _update_plan(*_):
+        if state.get("syncing_chunks"):  # the chunk shape being filled in by this function
+            return
         try:
             plan = _current_plan()
         except (ValueError, KeyError, OSError) as e:
@@ -999,7 +1296,16 @@ def mosaic_widget():
             if _register_shown() and fuse_widget.register_cameras.value and len(fuse_widget.cameras.value) > 1:
                 note = (f"; camera views registered on the images first ({fuse_widget.register_model.value}, "
                         "about a minute per stack)")
-            plan_label.setText(f"Output: {plan.summary()}{note}")
+            text = f"Output: {plan.summary()}{note}"
+            if not plan.error:
+                try:
+                    layout = _zarr_layout(plan)
+                    _show_chunks(plan, layout)
+                    _show_levels(plan)
+                    text += f"\nZarr: {layout_summary(plan.axes, plan.dtype, layout)}"
+                except (ValueError, KeyError) as e:  # the estimate must never break the widget
+                    text += f"\nZarr: cannot estimate ({e})"
+            plan_label.setText(text)
 
     def _register_shown() -> bool:
         """The registration options are offered (the mosaic has several cameras)."""
@@ -1024,9 +1330,15 @@ def mosaic_widget():
 
     for name in ("channels", "groups", "cameras", "fields", "timepoints", "reference_timepoint", "tiles_to_fuse",
                  "skip_all_channels", "projection", "blend", "ds_z", "ds_y", "ds_x", "transforms_file",
-                 "register_cameras", "register_model"):
+                 "register_cameras", "register_model", "ngff", "chunk_auto", "chunk_mb", "chunk_z", "chunk_y",
+                 "chunk_x", "shards", "shard_mb", "shard_exclude_axes", "workers"):
         getattr(fuse_widget, name).changed.connect(_update_plan)
     fuse_widget.register_cameras.changed.connect(_register_enabled)
+    fuse_widget.ngff.changed.connect(_sharding_enabled)
+    fuse_widget.shards.changed.connect(_sharding_enabled)
+    fuse_widget.channels.changed.connect(_follow_channel_names)
+    for name in ("channel_names", "channel_colors", "channels"):
+        getattr(fuse_widget, name).changed.connect(_check_channel_options)
     if viewer is not None:
         viewer.layers.selection.events.changed.connect(_update_plan)
         viewer.layers.events.removed.connect(_update_plan)
@@ -1041,7 +1353,8 @@ def mosaic_widget():
         mosaic = state["mosaic"]
         values = {name: getattr(fuse_widget, name).value for name in
                   ("channels", "groups", "cameras", "fields", "projection", "blend", "ds_z", "ds_y", "ds_x",
-                   "levels", "workers", "overwrite", "transforms_only")}
+                   "levels", "workers", "overwrite", "transforms_only", "pyramid_method", "pyramid_z",
+                   "pyramid_y", "pyramid_x", "ngff", "drop_singleton", "shard_mb", "num_workers")}
         values["transforms"] = fuse_widget.transforms_file.value
         if _register_shown():  # only for a mosaic with several cameras
             values.update({name: getattr(fuse_widget, name).value
@@ -1056,6 +1369,18 @@ def mosaic_widget():
             print(f"ERROR: {plan.error} The row is not appended.")
             _release()
             return
+        if plan is not None:
+            try:
+                _, layout = _zarr_kwargs(plan)
+                values["channel_names"], values["channel_colors"] = _channel_options(plan)
+            except ValueError as e:
+                _capture()
+                print(f"ERROR: {e} The row is not appended.")
+                _release()
+                return
+            # the chunks the fusion would use now; the workers stay as typed (0: zarrsmith fuse
+            # chooses them with the same rule, on the machine that runs the batch)
+            values["layout"] = layout
         skip_ids = _skip_ids()
         row = batch_row(input_path=state["input_path"], microscope=state["microscope"],
                         output=fuse_widget.output_path.value, values=values,
@@ -1100,6 +1425,33 @@ def mosaic_widget():
     fuse_widget.timepoints.native.setMaximumHeight(48)
     fuse_widget.timepoints.visible = fuse_widget.reference_timepoint.visible = False  # until a timelapse is loaded
 
+    # ----- additional parameters: collapsed rows of related controls, under the blend -----
+    fw = fuse_widget
+    advanced_rows = [
+        compact_row(fw, "Downsample", ("Z", "ds_z"), ("Y", "ds_y"), ("X", "ds_x")),
+        compact_row(fw, "Pyramid", ("Levels", "levels"), ("Method", "pyramid_method")),
+        compact_row(fw, "Pyramid factor", ("Z", "pyramid_z"), ("Y", "pyramid_y"), ("X", "pyramid_x")),
+        compact_row(fw, "Format", ("NGFF", "ngff"), (None, "drop_singleton")),
+        compact_row(fw, "Chunks", (None, "chunk_auto"), ("MB", "chunk_mb")),
+        compact_row(fw, "Chunk shape", ("Z", "chunk_z"), ("Y", "chunk_y"), ("X", "chunk_x")),
+        compact_row(fw, "Sharding", (None, "shards"), ("MB", "shard_mb")),
+        compact_row(fw, "Never merge", (None, "shard_exclude_axes")),
+        compact_row(fw, "Threads", ("Fusion", "workers"), ("Write", "num_workers")),
+        compact_row(fw, "Ch. names", (None, "channel_names")),
+        compact_row(fw, "Ch. colors", (None, "channel_colors")),
+    ]
+    fw.shard_exclude_axes.native.setMaximumHeight(56)
+    fw.channel_names.native.setPlaceholderText("tile channel names, e.g. GFP Alexa_488")
+    fw.channel_colors.native.setPlaceholderText("default palette, e.g. magenta 00FF00")
+    advanced_button = make_collapsible_toggle("Additional parameters", advanced_rows)
+    fuse_layout = fw.native.layout()
+    index = fuse_layout.indexOf(fw.blend.native.parent()) + 1
+    for offset, row_widget in enumerate([advanced_button] + advanced_rows):
+        fuse_layout.insertWidget(index + offset, row_widget)
+    for row_widget in advanced_rows:
+        row_widget.setVisible(False)
+    _sharding_enabled()
+
     fuse_button = fuse_widget._call_button.native
     fuse_widget.native.layout().removeWidget(fuse_button)
     ui["fuse_holder"] = make_button_holder(fuse_button)
@@ -1111,7 +1463,7 @@ def mosaic_widget():
     layout.addWidget(make_section(make_title("Mosaic loading:"), load_widget.native))
     layout.addWidget(make_section(make_title("Show tiles:"), show_widget.native))
     layout.addWidget(make_section(make_title("Fuse to OME-Zarr:"), fuse_widget.native, plan_label,
-                                  ui["fuse_holder"]))
+                                  channel_warning, ui["fuse_holder"]))
     batch_widget.native.layout().setContentsMargins(0, 0, 0, 0)
     layout.addWidget(make_section(make_title("Batch CSV export:"), batch_widget.native))
     layout.addStretch(1)
@@ -1122,4 +1474,6 @@ def mosaic_widget():
     dock.load_widget, dock.show_widget, dock.fuse_widget = load_widget, show_widget, fuse_widget
     dock.batch_widget = batch_widget
     dock.plan_label, dock.state, dock.populate = plan_label, state, _populate
+    dock.advanced_button, dock.advanced_rows = advanced_button, advanced_rows
+    dock.channel_warning = channel_warning
     return dock

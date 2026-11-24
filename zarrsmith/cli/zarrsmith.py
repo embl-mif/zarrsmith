@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -9,9 +10,10 @@ import numpy as np
 import pandas as pd
 
 import zarrsmith.microscope_manager as mm
-from zarrsmith.utils.axes import metadata_axes, metadata_axis_size
-from zarrsmith.utils.chunks import default_chunk_size, default_num_levels
-from zarrsmith.utils.ngff import DEFAULT_COMPRESSOR
+from zarrsmith.utils.axes import UNRECORDED_SCALE_KEY, metadata_axes, metadata_axis_size
+from zarrsmith.utils.chunks import (default_chunk_size, default_num_levels, layout_summary, level0_layout,
+                                    output_summary_line)
+from zarrsmith.utils.ngff import DEFAULT_COMPRESSOR, DEFAULT_SHARD_TARGET_MB
 from zarrsmith.utils.output_path import output_refusal
 from zarrsmith.cli.__arguments import (
     _parse_arguments,
@@ -110,6 +112,24 @@ def _normalize_subset(value):
         "subset must be either a dict of axis selections or a compact subset string"
     )
 
+def _channel_indices(selection, names: List[str]):
+    """A ``--subset c=`` selection with channel names replaced by their indices in ``names``
+    (as the napari converter selects channels by name); other selections are returned as they are."""
+    if isinstance(selection, str):
+        selection = [selection]
+    if not isinstance(selection, list) or not any(isinstance(v, str) for v in selection):
+        return selection
+    indices = []
+    for value in selection:
+        if isinstance(value, str):
+            if value not in names:
+                raise ValueError(f"--subset c: no channel named {value!r}; the channels are {list(names)}.")
+            indices.append(list(names).index(value))
+        else:
+            indices.append(int(value))
+    return indices
+
+
 #: How the refusals of the CLI say to allow overwriting.
 _OVERWRITE_HINT = "pass --overwrite (or fill the overwrite column of a --batch CSV)"
 
@@ -119,6 +139,21 @@ def _refuse_output(zarr_path, *, overwrite, input_path=None) -> None:
     refusal = output_refusal(zarr_path, overwrite=bool(overwrite), sources=[input_path], hint=_OVERWRITE_HINT)
     if refusal is not None:
         raise FileExistsError(refusal)
+
+
+def _report_output_path(zarr_path, *, overwrite, input_path=None) -> None:
+    """For a dry run: say whether the real run would be refused at ``zarr_path``, instead of stopping."""
+    refusal = output_refusal(zarr_path, overwrite=bool(overwrite), sources=[input_path], hint=_OVERWRITE_HINT)
+    if refusal is not None:
+        print(f"NOTE (dry run): the real run would stop here: {refusal}")
+
+
+def _print_dry_run(zarr_path, output_line: str, layout_line: str, num_levels, extra: str = "") -> None:
+    """The recap of ``--dry_run``: the lines the napari widgets show; nothing is written."""
+    n = int(num_levels)
+    print(f"\n--->Dry run: nothing written to {zarr_path}")
+    print(f"Output: {output_line}{extra}")
+    print(f"Zarr: {layout_line}, {n} pyramid level{'s' if n != 1 else ''}")
 
 
 def _warn_rows_skipped(skipped: List[str]) -> None:
@@ -166,6 +201,7 @@ def zarr_convert(
     drop_singleton: Optional[bool] = True,
     num_workers: Optional[int] = None,
     overwrite: Optional[bool] = False,
+    dry_run: bool = False,
 ):
     """Helper function for CLI to convert a dataset to zarr given some parameters.
 
@@ -180,7 +216,7 @@ def zarr_convert(
             One of \"luxendo\", \"opera\", \"viventis\", \"zeiss\", \"evident\", \"zarrv04\", \"zarr\".
         max_size : Optional[float]
             Max chunk size in MB. \n
-            Default: None (about 4 MB: up to 16 z planes, y and x about square,
+            Default: None (about 4 MB, about cubic in micrometers, at most 32 z planes,
             see zarrsmith.utils.chunks.default_chunk_size)
         chunk_size : Optional[List[int]]
             Chunk size in TCZYX format, or whatever axes are present in the dataset.
@@ -256,8 +292,16 @@ def zarr_convert(
             non-empty output raises ``FileExistsError``, before anything is read.
 
             Default: False
+        dry_run : bool
+            Print the output, its chunks, shards and pyramid levels (as the napari
+            widget shows them) and return without writing anything.
+
+            Default: False
     """
-    _refuse_output(zarr_path, overwrite=overwrite, input_path=input_path)
+    if dry_run:
+        _report_output_path(zarr_path, overwrite=overwrite, input_path=input_path)
+    else:
+        _refuse_output(zarr_path, overwrite=overwrite, input_path=input_path)
 
     manager, resolved_microscope = _resolve_zarr_manager(input_path, microscope)
     print(f'\n--->Using manager: {manager.__name__} ({resolved_microscope})')
@@ -278,6 +322,8 @@ def zarr_convert(
     print("DATASET SIZE (MB):", _dataset_size_mb(dataset.metadata))
 
     subset_kwargs = _normalize_subset(subset)
+    if subset_kwargs and "C" in subset_kwargs:
+        subset_kwargs["C"] = _channel_indices(subset_kwargs["C"], list(dataset.metadata.get("channel_names") or []))
     if subset_kwargs:
         print(f"\n--->Applying subset: {subset_kwargs}")
         dataset.subset_dataset(**subset_kwargs, rebuild_pyramid=False)
@@ -387,8 +433,19 @@ def zarr_convert(
     print(f"NUM_WORKERS: {num_workers if num_workers is not None else '(zarrsmith default)'}.")
     print(f"SHARDS: {shards}.")
     if shards is not None:
-        print(f"SHARD_TARGET_MB: {to_zarr_kwargs.get('shard_target_mb', '(zarrsmith default: 512)')}.")
+        print(f"SHARD_TARGET_MB: {to_zarr_kwargs.get('shard_target_mb', f'(zarrsmith default: {DEFAULT_SHARD_TARGET_MB:g})')}.")
         print(f"SHARD_EXCLUDE_AXES: {shard_exclude_axes if shard_exclude_axes is not None else '(zarrsmith default: t, c)'}.")
+
+    if dry_run:
+        md = dataset.metadata
+        axes = metadata_axes(md)
+        layout = level0_layout(axes, md["size"][0], md["dtype"], chunk_size, zarr_format=int(zarr_format),
+                               shards=shards, shard_mb=to_zarr_kwargs.get("shard_target_mb"),
+                               shard_exclude_axes=shard_exclude_axes)
+        line = output_summary_line(axes, dict(zip(axes, md["size"][0])), md["dtype"], md["scales"][0],
+                                   md.get("units") or (), drop_singleton=drop_singleton)
+        _print_dry_run(zarr_path, line, layout_summary(axes, md["dtype"], layout), num_levels)
+        return
 
     # --- Write to OME-Zarr format ---
     print("\n--->Writing to zarr")
@@ -482,6 +539,7 @@ def convert_batch(args):
             "zarr_path": output,
             "microscope": microscope,
             **_batch_row_kwargs(v, database.columns),
+            "dry_run": bool(getattr(args, "dry_run", False)),
         }
 
         # An output in the way only stops its own row: the others still run.
@@ -583,7 +641,7 @@ def _subset_to_crop(subset, channel_names: List[str]):
         raise ValueError("Choose the timepoints of a mosaic with --timepoints: remove t from --subset.")
     channels = list(channel_names)
     if "C" in subset:
-        sel = subset["C"]
+        sel = _channel_indices(subset["C"], channels)
         if isinstance(sel, slice):
             channels = channels[sel]
         elif isinstance(sel, list):
@@ -638,7 +696,7 @@ def mosaic_convert(
     data_type: Optional[str] = None,
     label_offsets: Optional[str] = None,
     label_mapping: Optional[str] = None,
-    read_workers: int = 4,
+    read_workers: int = 0,
     temp_dir: Optional[str] = None,
     overwrite: bool = False,
     flatfield: bool = True,
@@ -647,6 +705,7 @@ def mosaic_convert(
     register_cameras: bool = False,
     register_channel: Optional[str] = None,
     register_model: str = "rigid",
+    dry_run: bool = False,
 ):
     """Fuse a mosaic into an OME-Zarr image (CLI helper for ``zarrsmith fuse``).
 
@@ -660,7 +719,7 @@ def mosaic_convert(
     is saved). ``timepoints`` and ``reference_timepoint`` choose the timepoints to fuse and
     the one whose geometry they all use (``"all"``: each at its own positions). The other options are those of
     :func:`zarrsmith.mosaic_manager.fuse_tiles`: ``read_downsample`` is its ``ds`` and
-    ``read_workers`` its ``workers``. ``flatfield`` is passed to readers that correct
+    ``read_workers`` its ``workers`` (0: automatic, see :func:`~zarrsmith.mosaic_manager.fusion.fusion_workers`). ``flatfield`` is passed to readers that correct
     the tiles (Opera); the others ignore it.
 
     ``label_offsets`` (CSV ``store,offset``) and ``label_mapping`` (JSON ``{id: new_id}``)
@@ -677,10 +736,14 @@ def mosaic_convert(
     first; ``"all"``: every channel) at the reference timepoint (every timepoint with
     ``reference_timepoint="all"``) and applied to the others, see :meth:`MosaicManager.register_cameras
     <zarrsmith.mosaic_manager.MosaicManager.register_cameras>`.
+
+    ``dry_run`` prints the output, its chunks, shards, pyramid levels and fusion workers (as
+    the napari widget shows them) and returns ``True`` without writing anything (camera
+    registration, which reads the images, is skipped).
     """
     from zarrsmith.mosaic_manager import (default_transforms_path, fuse_tiles, plan_fusion, reader_options,
                                           transforms_document, write_transforms)
-    from zarrsmith.mosaic_manager.fusion import SIGMOID_STEEPNESS
+    from zarrsmith.mosaic_manager.fusion import SIGMOID_STEEPNESS, default_fusion_levels
 
     transforms_only = bool(parse_bool(transforms_only)) if transforms_only is not None else False
     relabel = _present(label_offsets) or _present(label_mapping)
@@ -692,7 +755,9 @@ def mosaic_convert(
         if data_type not in (None, "label"):
             raise ValueError("--label_offsets/--label_mapping renumber label tiles: they need --data_type label.")
         data_type = "label"
-    if not transforms_only:
+    if dry_run:
+        _report_output_path(zarr_path, overwrite=overwrite, input_path=input_path)
+    elif not transforms_only:
         _refuse_output(zarr_path, overwrite=overwrite, input_path=input_path)
 
     reader, resolved = _resolve_mosaic_manager(input_path, microscope)
@@ -740,7 +805,9 @@ def mosaic_convert(
         _relabel_tiles(use, label_offsets if _present(label_offsets) else None,
                        label_mapping if _present(label_mapping) else None, out_dtype or "uint32")
 
-    if register_cameras and parse_bool(register_cameras):
+    if register_cameras and parse_bool(register_cameras) and dry_run:
+        print("--register_cameras: skipped in a dry run (it reads the images); the output may move a little.")
+    elif register_cameras and parse_bool(register_cameras):
         if len({t.camera for t in use}) < 2:
             print("--register_cameras: the fused tiles come from one camera, nothing to register.")
         else:
@@ -766,12 +833,13 @@ def mosaic_convert(
         print(f"ERROR: {plan.error}")
         return False
     transforms_path = default_transforms_path(zarr_path)
-    if transforms_only:
+    if transforms_only and not dry_run:
         write_transforms(transforms_path, transforms_document(plan, tile_id=mosaic.tile_id, source=str(input_path)))
         print(f"Transforms written to {transforms_path} (nothing fused: --transforms_only)")
         return True
 
-    plan_md = {"axes": plan.axes, "size": [plan.shape], "dtype": str(plan.dtype)}
+    plan_md = {"axes": plan.axes, "size": [plan.shape], "dtype": str(plan.dtype), "scales": [plan.scale],
+               UNRECORDED_SCALE_KEY: tuple(ax for ax, v in plan.voxel_size.items() if v is None)}
     if chunk_size is not None:
         chunks = tuple(int(c) for c in chunk_size)
         print(f"\tUsing user-provided chunk size: {chunks}")
@@ -782,7 +850,7 @@ def mosaic_convert(
 
     factor = _normalize_downscale_factor(downscale_factor)
     if num_levels is None:
-        num_levels = default_num_levels(plan_md, factor[1:] if projection else factor)
+        num_levels = default_fusion_levels(plan, factor)  # as fuse_tiles and the napari widget
 
     shards = _normalize_shards(shards)
     shard_exclude_axes = _normalize_shard_exclude_axes(shard_exclude_axes)
@@ -801,6 +869,20 @@ def mosaic_convert(
             write_kwargs["shard_target_mb"] = float(shard_target_mb)
         if shard_exclude_axes is not None:
             write_kwargs["shard_exclude_axes"] = shard_exclude_axes
+
+    if dry_run:
+        from zarrsmith.mosaic_manager.fusion import FUSION_SHARD_TARGET_MB, fusion_workers
+
+        target = write_kwargs.get("shard_target_mb", FUSION_SHARD_TARGET_MB)
+        layout = level0_layout(plan.axes, plan.shape, plan.dtype, chunks, zarr_format=int(zarr_format),
+                               shards=shards, shard_mb=target, shard_exclude_axes=shard_exclude_axes)
+        with warnings.catch_warnings():  # the number is shown; the real run warns
+            warnings.simplefilter("ignore")
+            layout["workers"] = fusion_workers(plan, layout["shards"] or layout["chunks"], int(read_workers))
+        layout["auto_workers"] = int(read_workers) <= 0
+        _print_dry_run(zarr_path, plan.summary(), layout_summary(plan.axes, plan.dtype, layout), num_levels,
+                       f" ({plan.data_type} data, blend {plan.blend})")
+        return True
 
     print(f"PYRAMID LEVELS: {num_levels}, DOWNSCALE FACTOR: {factor}, "
           f"METHOD: {method or 'default (mean for intensity, nearest for labels)'}.")
@@ -958,6 +1040,7 @@ def convert_mosaic_batch(args):
             kwargs["sigmoid_steepness"] = float(v["sigmoid_steepness"])
         if "flatfield" in columns and _present(v.get("flatfield")):
             kwargs["flatfield"] = parse_bool(v["flatfield"])
+        kwargs["dry_run"] = bool(getattr(args, "dry_run", False))
         try:
             if not mosaic_convert(**kwargs):
                 not_fused.append(str(v["output"]))

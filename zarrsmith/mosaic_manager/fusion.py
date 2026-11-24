@@ -47,6 +47,7 @@ import numpy as np
 import zarr
 
 from ..utils.allocate import build_allocation_metadata
+from ..utils.chunks import auto_chunk_shape
 from ..utils.create_empty_dataset import create_empty_dataset
 from ..utils.downsampling import resolve_downsampling_method
 from ..utils.ngff import ZarrWriteConfig, _resolve_format
@@ -744,29 +745,94 @@ def _worker_bytes(region, piece, dtype, flat: bool) -> int:
     return 2 * block + canvases
 
 
-def _workers_that_fit(workers: int, region, piece, dtype, flat: bool) -> int:
+def _workers_that_fit(workers: int, region, piece, dtype, flat: bool, free_mb: Optional[float] = None,
+                      warn: bool = True) -> int:
     """``workers``, lowered (with a warning) to as many as fit in the memory budget.
 
     Each worker holds one whole region, a shard of level 0 (about ``shard_target_mb``
     with ``shards="auto"``), so ``workers`` x the shard size must fit: the same budget as
-    the OME-Zarr writer (half of the free memory, see
+    the OME-Zarr writer (half of the free memory ``free_mb``, measured when ``None``, see
     :func:`zarrsmith.utils.ngff._resolve_num_workers`).
     """
     from ..utils.ngff import DEFAULT_MEMORY_FRACTION, _available_memory_mb
 
     workers = max(1, int(workers))
     per_worker = _worker_bytes(region, piece, dtype, flat)
-    budget = _available_memory_mb() * DEFAULT_MEMORY_FRACTION * 1024 * 1024
+    free_mb = _available_memory_mb() if free_mb is None else float(free_mb)
+    budget = free_mb * DEFAULT_MEMORY_FRACTION * 1024 * 1024
     fit = max(1, int(budget // per_worker))
     if fit < workers:
-        warnings.warn(
-            f"Each fusion worker holds a {per_worker / 1024**2:.0f} MB region (a shard of level 0 and "
-            f"its canvases): {fit} of the {workers} workers fit in memory. Use smaller shards "
-            "(shard_target_mb or shards) to fuse with more workers.",
-            UserWarning, stacklevel=3,
-        )
+        if warn:
+            warnings.warn(
+                f"Each fusion worker holds a {per_worker / 1024**2:.0f} MB region (a shard of level 0 and "
+                f"its canvases): {fit} of the {workers} workers fit in memory. Use smaller shards "
+                "(shard_target_mb or shards) to fuse with more workers.",
+                UserWarning, stacklevel=3,
+            )
         return fit
     return workers
+
+
+#: Most fusion workers chosen automatically (``workers=0``): half of the cores, at most this many.
+MAX_AUTO_WORKERS = 16
+
+
+def default_fusion_levels(plan: "FusionPlan", downscale_factor=2) -> int:
+    """Default number of pyramid levels of the output of ``plan`` (``levels=None``): the rule
+    of ``zarrsmith convert`` (:func:`~zarrsmith.utils.chunks.default_num_levels`), used by
+    :func:`fuse_tiles`, ``zarrsmith fuse`` and the napari fusion widget."""
+    from ..utils.chunks import default_num_levels
+
+    factor = downscale_factor
+    if "z" not in plan.axes and not isinstance(factor, (int, np.integer)) and len(tuple(factor)) == 3:
+        factor = tuple(factor)[1:]  # projections: the y and x factors
+    return default_num_levels({"axes": plan.axes, "size": [plan.shape], "dtype": str(plan.dtype)}, factor)
+
+
+def fusion_regions(plan: "FusionPlan", block: Sequence[int]) -> Tuple[tuple, tuple, int]:
+    """``(region, piece, n_regions)`` of fusing ``plan`` into write blocks of shape ``block``
+    (a level-0 shard, or chunk without shards, in ``plan.axes`` order).
+
+    A region is what one worker fuses and writes at once: whole blocks covering at least
+    one ``piece`` (the part merged at a time, see :func:`_region_shape`); ``n_regions`` is
+    their number over every timepoint and channel (an upper bound: empty regions are skipped).
+    """
+    flat = "z" not in plan.axes
+    depth = plan.grid_shape[0]
+    cz, cy, cx = _region_shape(plan.tiles, plan.grid_shape, plan.ds, flat)
+    piece = (depth if flat else cz, cy, cx)
+    spatial_block = (depth,) + tuple(block[-2:]) if flat else tuple(block[-3:])
+    region = tuple(int(b) * max(1, int(p) // int(b)) for b, p in zip(spatial_block, piece))
+    n_spatial = 2 if flat else 3
+    spatial_shape = plan.shape[-n_spatial:]
+    n_other = math.prod(int(s) for s in plan.shape[:-n_spatial])
+    n_regions = n_other * math.prod(-(-int(s) // int(r)) for s, r in zip(spatial_shape, region[-n_spatial:]))
+    return region, piece, n_regions
+
+
+def fusion_workers(plan: "FusionPlan", block: Sequence[int], workers: int = 0, *,
+                   n_regions: Optional[int] = None, cores: Optional[int] = None,
+                   free_mb: Optional[float] = None) -> int:
+    """Number of regions of ``plan`` fused in parallel with write blocks ``block`` (see
+    :func:`fusion_regions`): the one rule of :func:`fuse_tiles`, ``zarrsmith fuse`` and the
+    napari fusion widget.
+
+    ``workers=0`` chooses automatically: half of the ``cores`` (at most
+    :data:`MAX_AUTO_WORKERS`), no more than there are regions, and as many as fit in half of
+    the free memory (``free_mb``). A ``workers`` given is lowered, with a warning, to what
+    fits in memory.
+    """
+    region, piece, estimate = fusion_regions(plan, block)
+    n_regions = estimate if n_regions is None else int(n_regions)
+    flat = "z" not in plan.axes
+    if int(workers) > 0:
+        return _workers_that_fit(int(workers), region, piece, plan.dtype, flat, free_mb)
+    if cores is None:
+        import os
+        cores = os.cpu_count() or 1
+    by_cores = min(max(1, int(cores) // 2), MAX_AUTO_WORKERS)
+    wanted = max(1, min(by_cores, max(1, n_regions)))
+    return _workers_that_fit(wanted, region, piece, plan.dtype, flat, free_mb, warn=False)
 
 
 def _fuse_level0(regions, arr, *, ds, projection, blend, dtype, steepness: float,
@@ -963,6 +1029,16 @@ class FusionPlan:
     def cameras(self) -> List[Optional[str]]:
         """Cameras of the fused tiles, in order of first appearance."""
         return list(dict.fromkeys(t.camera for t in self.tiles))
+
+    @property
+    def voxel_size(self) -> Dict[str, Optional[float]]:
+        """Level-0 voxel size of every spatial axis, ``None`` where a tile's file did not record
+        it (``Tile.attrs[UNRECORDED_SCALE_KEY]``; ``scale`` then holds a 1.0 placeholder)."""
+        from ..utils.axes import UNRECORDED_SCALE_KEY
+
+        unrecorded = {ax for t in self.tiles for ax in (t.attrs.get(UNRECORDED_SCALE_KEY) or ())}
+        spatial = [ax for ax in self.axes if ax in "zyx"]
+        return {ax: (None if ax in unrecorded else float(s)) for ax, s in zip(spatial, self.scale)}
 
     @property
     def per_timepoint(self) -> bool:
@@ -1475,7 +1551,7 @@ def fuse_tiles(
     channel_colors: Optional[Sequence[str]] = None,
     crop: Optional[dict] = None,
     skip: Optional[Sequence[Tile]] = None,
-    levels: int = 1,
+    levels: Optional[int] = 1,
     downscale_factor=2,
     pyramid_method: Optional[str] = None,
     workers: int = 1,
@@ -1556,7 +1632,8 @@ def fuse_tiles(
         covers it). With ``blend="midline"``/``"sigmoid"`` they still count for
         the position of the switch between groups.
     levels
-        Number of pyramid levels.
+        Number of pyramid levels. ``None``: as many as ``zarrsmith convert`` makes, until no
+        axis of the coarsest level is above 2048 voxels (:func:`default_fusion_levels`).
     downscale_factor
         Factor between pyramid levels: one integer or ``(z, y, x)``.
     pyramid_method
@@ -1564,7 +1641,9 @@ def fuse_tiles(
         ``None`` (default): ``"mean"`` for intensity, ``"nearest"`` for labels
         (``"mean"`` is refused for labels).
     workers
-        Number of regions fused in parallel (threads or processes, see ``executor``).
+        Number of regions fused in parallel (threads or processes, see ``executor``);
+        ``0`` chooses automatically from the cores, the regions and the free memory
+        (:func:`fusion_workers`, the choice of ``zarrsmith fuse`` and of the napari widget).
         Each worker holds one region, a whole shard of level 0 (about ``shard_target_mb``,
         256 MB by default), twice over while it is written: memory is about
         ``workers x 2 x shard size``. Fewer workers are used, with a warning, when they
@@ -1640,7 +1719,9 @@ def fuse_tiles(
         ``compressor_level``, ``drop_singleton``, ``num_workers`` (threads building the
         pyramid). ``chunks`` and ``shards`` are given in the output axis order (``c, z, y, x``,
         or ``c, y, x`` for projections, after a leading ``t`` for several timepoints),
-        and must be 1 along ``t`` and ``c``. ``shard_target_mb`` defaults to
+        and must be 1 along ``t`` and ``c``. ``chunks`` defaults to the chunks of ``convert``
+        (:func:`~zarrsmith.utils.chunks.auto_chunk_shape`: about 4 MB, from the output voxel
+        size). ``shard_target_mb`` defaults to
         :data:`FUSION_SHARD_TARGET_MB` (256 MB) instead of ``convert``'s 512 MB: smaller
         shards keep each worker's memory low and give more of them work.
 
@@ -1694,8 +1775,8 @@ def fuse_tiles(
             raise ValueError(f"{label} has {len(values)} entries but {n_ch} channels are fused ({names}).")
 
     chunks = write_options.get("chunks")
-    if chunks is None:
-        chunks = ((1,) if "t" in plan.axes else ()) + ((1, 512, 512) if flat else (1, 64, 256, 256))
+    if chunks is None:  # the default chunks of zarrsmith convert, from the output's voxel size
+        chunks = auto_chunk_shape(plan.axes, plan.shape, out_dtype, voxel_size=plan.voxel_size)
     chunks = tuple(int(c) for c in chunks)
     if len(chunks) != len(plan.axes):
         raise ValueError(f"chunks must have {len(plan.axes)} values for axes {plan.axes!r}, got {chunks}.")
@@ -1727,7 +1808,7 @@ def fuse_tiles(
         channel_names=list(channel_names or names) if "c" in out_axes else None,
         channel_colors=channel_colors if "c" in out_axes else None,
         chunk_size=[chunks[i] for i in keep],
-        num_levels=max(1, int(levels)),
+        num_levels=max(1, int(default_fusion_levels(plan, downscale_factor) if levels is None else levels)),
         downscale_factor=factor,
         translation={ax: v for ax, v in fused_position(plan).items() if ax in out_axes},
         zarr_format=zarr_format,
@@ -1777,10 +1858,8 @@ def fuse_tiles(
             raise ValueError(f"Chunks and shards must be 1 along {plan.axes[:n_other]!r} to fuse, got "
                              f"{tuple(block)} for axes {plan.axes!r} (see shard_exclude_axes).")
         depth = plan.grid_shape[0]
-        cz, cy, cx = _region_shape(plan.tiles, plan.grid_shape, ds, flat)
-        piece = (depth if flat else cz, cy, cx)
-        spatial_block = (depth,) + tuple(block[-2:]) if flat else tuple(block[-3:])
-        region = tuple(b * max(1, p // b) for b, p in zip(spatial_block, piece))
+        region, piece, _ = fusion_regions(plan, block)
+        cy, cx = piece[1:]
         axis = "zyx".index(plan.midline_axis)
 
         def layout_blocks(layout: Dict[str, List[_Placed]]) -> List[tuple]:
@@ -1792,7 +1871,7 @@ def fuse_tiles(
                                 else layout_blocks(plan.layout), plan, piece)
         logger.info("Fusing %d regions of up to %s voxels (z, y, x), %s at a time", len(regions),
                     ("-",) + region[1:] if flat else region, ("-", cy, cx) if flat else piece)
-        workers = _workers_that_fit(workers, region, piece, out_dtype, flat)
+        workers = fusion_workers(plan, block, workers, n_regions=len(regions))
 
         auto = executor == "auto"
         if auto:

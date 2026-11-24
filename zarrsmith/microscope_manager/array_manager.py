@@ -8,7 +8,8 @@ import numpy as np
 
 from .microscope_manager import MicroscopeManager
 from ..utils.ngff import parse_channel_color
-from ..utils.axes import normalize_axes, infer_axes_from_ndim, spatial_axes_in_order, normalize_data_type
+from ..utils.axes import (UNRECORDED_SCALE_KEY, normalize_axes, infer_axes_from_ndim, spatial_axes_in_order,
+                          normalize_data_type)
 from ..utils.translation import normalize_translations
 
 
@@ -111,6 +112,9 @@ class ArrayManager(MicroscopeManager):
             base_scale = tuple(user_scales[0]) if user_scales else tuple(1.0 for _ in spatial_axes)
             if len(base_scale) != len(spatial_axes):
                 base_scale = tuple(1.0 for _ in spatial_axes)
+                user_scales = []
+            if not user_scales:  # 1.0 placeholders: no voxel size was given
+                metadata.setdefault(UNRECORDED_SCALE_KEY, tuple(spatial_axes))
             scales = [tuple(float(s) * (2**i) for s in base_scale) for i in range(len(self.data))]
         metadata["scales"] = scales
         metadata["translations"] = normalize_translations(metadata.get("translations"), axes, len(self.data))

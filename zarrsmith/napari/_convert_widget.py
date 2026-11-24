@@ -12,9 +12,10 @@ from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton
 
 from zarrsmith.microscope_manager.readers import READERS
-from zarrsmith.utils.chunks import default_chunk_size, default_num_levels
+from zarrsmith.utils.axes import recorded_voxel_size
+from zarrsmith.utils.chunks import default_num_levels, output_summary_line
 from ._batch_csv import append_batch_csv
-from ._layout import compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_title
+from ._layout import compact_row, compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_title
 from ._layout import make_section as _make_section
 from ._dataset_helpers import axis_index as _axis_index
 from ._dataset_helpers import axis_size as _axis_size
@@ -23,6 +24,9 @@ from ._dataset_helpers import scale_for_axes as _scale_for_axes
 from ._dataset_helpers import points_projection_kwargs
 from ._dataset_helpers import units_kwargs as _units_kwargs
 from ._output_check import output_allowed
+from ._zarr_options import (DEFAULT_CHUNK_MB, DEFAULT_SHARD_MB, NGFF_FORMATS, PYRAMID_METHODS, auto_channel_names,
+                            channel_error, channel_option_problems, channel_warning_text, chunk_shard_layout,
+                            follow_auto_value, layout_summary, parse_channel_colors, parse_channel_names)
 
 def conservative_compute_multiscale_level(
     requested_shape,
@@ -179,6 +183,32 @@ def _channel_colors_from_metadata(dataset, selected_channel_names):
     return [str(lookup[name]) for name in selected_channel_names if name in lookup]
 
 
+def output_sizes(dataset, *, t_range, z_range, y_range, x_range, channels) -> dict:
+    """``{axis: size}`` of the converted level 0 (every dataset axis, singletons included),
+    following the selected ranges and channels."""
+    ranges = {"t": t_range, "z": z_range, "y": y_range, "x": x_range}
+    sizes = {}
+    for ax in _dataset_axes(dataset):
+        if ax == "c":
+            names = dataset.metadata.get("channel_names", [])
+            selected = [ch for ch in channels if ch in names]
+            sizes[ax] = len(selected) if selected else _axis_size(dataset, "c")
+        else:
+            start, end = _present_range(dataset, ax, ranges[ax])
+            sizes[ax] = abs(end - start) + 1
+    return sizes
+
+
+def output_channels(dataset, channels) -> list:
+    """Names of the converted channels: the selected ones, all of them when none is selected,
+    and none for a dataset without a channel axis."""
+    if "c" not in _dataset_axes(dataset):
+        return []
+    names = list(dataset.metadata.get("channel_names", []))
+    selected = [ch for ch in channels if ch in names]  # in the order _run_conversion subsets them
+    return selected or names
+
+
 def output_summary(dataset, *, t_range, z_range, y_range, x_range, channels, drop_singleton=True):
     """Level-0 recap of the converted dataset, in the format of the mosaic fusion plan.
 
@@ -187,31 +217,12 @@ def output_summary(dataset, *, t_range, z_range, y_range, x_range, channels, dro
     channels and, with ``drop_singleton``, the t/c/z axes dropped on write.
     """
     axes = _dataset_axes(dataset)
-    ranges = {"t": t_range, "z": z_range, "y": y_range, "x": x_range}
-    sizes = {}
-    for ax in axes:
-        if ax == "c":
-            names = dataset.metadata.get("channel_names", [])
-            selected = [ch for ch in channels if ch in names]
-            sizes[ax] = len(selected) if selected else _axis_size(dataset, "c")
-        else:
-            start, end = _present_range(dataset, ax, ranges[ax])
-            sizes[ax] = abs(end - start) + 1
-    out_axes = "".join(ax for ax in axes if not (drop_singleton and ax in "tcz" and sizes[ax] == 1))
-
-    labels = {"t": "t", "c": "ch"}
-    parts = [f"{sizes[ax]} {labels[ax]}" for ax in out_axes if ax in labels]
-    spatial = [ax for ax in out_axes if ax in "zyx"]
-    parts.append(" x ".join(str(sizes[ax]) for ax in spatial) + " px")
-    dims = " x ".join(parts)
-
-    nbytes = int(np.prod([sizes[ax] for ax in out_axes])) * np.dtype(dataset.data[0].dtype).itemsize
-    size = f"{nbytes / 1e9:.2f} GB" if nbytes >= 1e8 else f"{nbytes / 1e6:.1f} MB"
-
-    vox = " x ".join(f"{v:.3g}" for v in _scale_for_axes(dataset, spatial))
-    units = dict(zip([ax for ax in axes if ax in "zyx"], dataset.metadata.get("units") or ()))
-    unit = " ".join(dict.fromkeys(str(units[ax]) for ax in spatial if units.get(ax)))
-    return f"{dims} ({out_axes}), {size}, voxel {vox} {unit}".rstrip()
+    sizes = output_sizes(dataset, t_range=t_range, z_range=z_range, y_range=y_range, x_range=x_range,
+                         channels=channels)
+    spatial = [ax for ax in axes if ax in "zyx"]
+    # the line zarrsmith convert --dry_run prints
+    return output_summary_line(axes, sizes, dataset.data[0].dtype, _scale_for_axes(dataset, spatial),
+                               dataset.metadata.get("units") or (), drop_singleton=drop_singleton)
 
 
 def _append_batch_csv(csv_path, row):
@@ -225,37 +236,28 @@ def _compact_advanced_rows(widget, insert_after):
     friends keep working (values, ``enabled``, signals). Their original
     one-per-row wrappers are hidden for good.
 
-    Returns the new row widgets; show or hide them together as one group.
+    Returns the new row widgets; show or hide them together as one group. Controls the
+    panel does not have are left out, and so are rows left without any.
     """
     layout = widget.native.layout()
+    present = {w.name for w in widget}
 
     def row(label, *items):
-        row_widget = QWidget()
-        row_layout = QHBoxLayout(row_widget)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(4)
-        title = QLabel(label)
-        title.setMinimumWidth(78)
-        row_layout.addWidget(title)
-        for prefix, name in items:
-            mg = getattr(widget, name)
-            wrapper = mg.native.parent()
-            if prefix:
-                row_layout.addWidget(QLabel(prefix))
-            row_layout.addWidget(mg.native, 1)
-            # A checkbox has no row wrapper (its parent is the whole panel).
-            if wrapper is not widget.native:
-                wrapper.setVisible(False)
-        return row_widget
+        items = [(prefix, name) for prefix, name in items if name in present]
+        return compact_row(widget, label, *items) if items else None
 
     rows = [
-        row("Chunks", ("Z", "chunk_z"), ("Y", "chunk_y"), ("X", "chunk_x")),
+        row("Chunks", (None, "chunk_auto"), ("MB", "chunk_mb")),
+        row("Chunk shape", ("Z", "chunk_z"), ("Y", "chunk_y"), ("X", "chunk_x")),
         row("Downscale", ("Z", "downscale_z"), ("Y", "downscale_y"), ("X", "downscale_x")),
-        row("Output", ("Levels", "n_levels"), ("Method", "method"), ("Zarr", "zarr_format")),
+        row("Output", ("Levels", "n_levels"), ("Method", "method"), ("NGFF", "zarr_format")),
         row("Sharding", (None, "shards"), ("MB", "shard_target_mb")),
         row("Never merge", (None, "shard_exclude_axes")),
         row("Other", (None, "drop_singleton"), ("Threads", "num_workers")),
+        row("Ch. names", (None, "channel_names")),
+        row("Ch. colors", (None, "channel_colors")),
     ]
+    rows = [r for r in rows if r is not None]
     widget.shard_exclude_axes.native.setMaximumHeight(60)
 
     index = layout.indexOf(insert_after) + 1
@@ -286,11 +288,14 @@ def _run_conversion(
     num_workers=None,
     overwrite=False,
     method=None,
+    channel_names=None,
+    channel_colors=None,
     ):
     """Run the conversion pipeline used by the napari worker thread.
 
     ``method`` is the downsampling of the pyramid levels (``None``: mean for intensity
-    data, nearest for labels)."""
+    data, nearest for labels). ``channel_names`` and ``channel_colors`` (one per converted
+    channel, or ``None``/empty to keep the dataset's) are written to the output metadata."""
     print("Starting conversion in background thread...")
 
     if file_format in ("zeiss", "evident"):
@@ -330,6 +335,14 @@ def _run_conversion(
     if subset_kwargs:
         dataset.subset_dataset(**subset_kwargs, rebuild_pyramid=False)
 
+    # after the subset: one name and colour per converted channel
+    if channel_names:
+        dataset.metadata["channel_names"] = list(channel_names)
+        print("Channel names:", list(channel_names))
+    if channel_colors:
+        dataset.metadata["channel_colors"] = list(channel_colors)
+        print("Channel colors:", list(channel_colors))
+
     chunks = _chunk_shape_for_dataset(
         dataset,
         chunk_z=chunks[2] if len(chunks) > 2 else 1,
@@ -357,6 +370,8 @@ def _run_conversion(
         "drop_singleton": bool(drop_singleton),
         "shards": shards,
         "overwrite": bool(overwrite),
+        # given to the writer too: a ZarrManager writes its source levels, not the rechunked ones
+        "chunks": chunks,
     }
     if num_workers is not None:
         to_zarr_kwargs["num_workers"] = int(num_workers)
@@ -700,20 +715,30 @@ def convert_widget():
     @magicgui(
         call_button="Convert to zarr",
 
-        chunk_z={"label": "Chunk Z", "min": 1, "max": 2**16, "step": 1, "value": 16},
-        chunk_y={"label": "Chunk Y", "min": 8, "max": 2**16, "step": 1, "value": 512},
-        chunk_x={"label": "Chunk X", "min": 8, "max": 2**16, "step": 1, "value": 512},
-        
+        chunk_auto={"label": "auto", "widget_type": "CheckBox", "value": True,
+                    "tooltip": "Choose the chunk shape from the output: about the given size (uncompressed), "
+                               "1 along t and c, z 8 times smaller than y and x. Untick to type it."},
+        chunk_mb={"label": "Chunk MB", "widget_type": "FloatSpinBox", "min": 0.25, "max": 1024, "step": 0.25,
+                  "value": DEFAULT_CHUNK_MB, "tooltip": "Target uncompressed size of a chunk (auto chunks)."},
+        chunk_z={"label": "Chunk Z", "min": 1, "max": 2**16, "step": 1, "value": 32,
+                 "tooltip": "Chunk shape; filled in when auto is ticked."},
+        chunk_y={"label": "Chunk Y", "min": 1, "max": 2**16, "step": 1, "value": 256},
+        chunk_x={"label": "Chunk X", "min": 1, "max": 2**16, "step": 1, "value": 256},
+
         n_levels={"label": "Resolution levels", "min": 1, "max": 10, "value": 5},
         downscale_z={"label": "Downscale Z", "min": 1, "max": 64, "step": 1, "value": 2},
         downscale_y={"label": "Downscale Y", "min": 1, "max": 64, "step": 1, "value": 2},
         downscale_x={"label": "Downscale X", "min": 1, "max": 64, "step": 1, "value": 2},
-        zarr_format={"label": "Zarr format", "choices": [2, 3], "value": 3},
-        method={"label": "Downsampling", "choices": ["auto", "mean", "nearest", "mode"], "value": "auto",
+        zarr_format={"label": "NGFF", "choices": list(NGFF_FORMATS), "value": "0.5 (zarr v3)",
+                     "tooltip": "OME-Zarr version: 0.5 (zarr v3, with shards) or 0.4 (zarr v2, no shards)."},
+        method={"label": "Downsampling", "choices": list(PYRAMID_METHODS), "value": "auto",
                 "tooltip": "auto: mean for intensity images, nearest for labels"},
 
-        shards={"label": "Sharding (zarr v3 only)", "choices": ["none", "auto"], "value": "auto"},
-        shard_target_mb={"label": "Shard target (MB)", "min": 1, "max": 100000, "step": 1, "value": 512},
+        shards={"label": "Sharding (zarr v3 only)", "choices": ["none", "auto"], "value": "auto",
+                "tooltip": "auto: group whole chunks into shard files of at most the given size (zarr v3 only; "
+                           "every pyramid level gets its own). none: one file per chunk."},
+        shard_target_mb={"label": "Shard target (MB)", "min": 1, "max": 100000, "step": 1, "value": DEFAULT_SHARD_MB,
+                         "tooltip": "Target uncompressed size of a shard."},
         shard_exclude_axes={
             "label": "Never merge axes",
             "choices": ["t", "c", "z", "y", "x"],
@@ -722,7 +747,17 @@ def convert_widget():
             "value": ("t", "c"),
         },
         drop_singleton={"label": "Drop singleton axes", "widget_type": "CheckBox", "value": True},
-        num_workers={"label": "Write threads (0 = auto)", "min": 0, "max": 256, "step": 1, "value": 0},
+        num_workers={"label": "Write threads (0 = auto)", "min": 0, "max": 256, "step": 1, "value": 0,
+                     "tooltip": "Threads compressing and writing the output. 0: half of the cores (at most 8), "
+                                "reduced so the shards being written fit in half of the free RAM."},
+        channel_names={"label": "Channel names", "widget_type": "LineEdit", "value": "",
+                       "tooltip": "Names of the output channels, separated by spaces, one per converted channel. "
+                                  "Filled in with the selected channels (spaces replaced by underscores) "
+                                  "until you type names of your own."},
+        channel_colors={"label": "Channel colors", "widget_type": "LineEdit", "value": "",
+                        "tooltip": "Colours of the output channels (hex codes such as FF00FF or names such as "
+                                   "magenta), separated by spaces, one per converted channel. Empty: the "
+                                   "colours of the dataset."},
 
         t_range={"label": "T range", "widget_type": "RangeSlider", "min": 0, "max": 2**16, "step": 1, "value": (0, 2**16)},
         single_t = {"label": "Single T frame", "widget_type": "CheckBox", "value": False},
@@ -749,20 +784,24 @@ def convert_widget():
         y_range=(0,1000),
         x_range=(0,1000),
         channels=(),
-        chunk_x=512,
-        chunk_y=512,
-        chunk_z=16,
+        chunk_auto=True,
+        chunk_mb=DEFAULT_CHUNK_MB,
+        chunk_x=256,
+        chunk_y=256,
+        chunk_z=32,
         n_levels=5,
         downscale_z=2,
         downscale_y=2,
         downscale_x=2,
-        zarr_format=3,
+        zarr_format="0.5 (zarr v3)",
         method="auto",
         shards="auto",
-        shard_target_mb=512,
+        shard_target_mb=DEFAULT_SHARD_MB,
         shard_exclude_axes=("t", "c"),
         drop_singleton=True,
         num_workers=0,
+        channel_names="",
+        channel_colors="",
         output_path: FileEdit = None,
         overwrite=False,
     ):
@@ -770,13 +809,20 @@ def convert_widget():
         path = make_visualize_widget.input_path.value
         if not output_allowed(output_path, overwrite=overwrite, sources=[path]):
             return
+        try:
+            names, colors = _channel_options()
+        except ValueError as e:
+            print(f"Cannot convert: {e}")
+            return
 
         reader = dataset_reader(make_visualize_widget.file_format.value)
         scene_index = make_visualize_widget.scene_index.value
         file_format = make_visualize_widget.file_format.value
 
+        chunk_z, chunk_y, chunk_x = _chunk_zyx()
         chunks = (1, 1, chunk_z, chunk_y, chunk_x)
         downscale_factor = (downscale_z, downscale_y, downscale_x)
+        zarr_format = _zarr_format()
 
         shards_value = None if shards == "none" else "auto"
 
@@ -802,6 +848,8 @@ def convert_widget():
                 num_workers=int(num_workers) if int(num_workers) > 0 else None,
                 overwrite=bool(overwrite),
                 method=None if method == "auto" else method,
+                channel_names=names or None,
+                channel_colors=colors or None,
             )
         
         _set_convert_enabled(False)
@@ -828,27 +876,135 @@ def convert_widget():
     output_label.setWordWrap(True)
     output_label.setStyleSheet("QLabel { color: #aaaaaa; }")
 
-    def _update_output_summary(*_):
+    channel_warning = QLabel()
+    channel_warning.setWordWrap(True)
+    channel_warning.setStyleSheet("QLabel { color: #e8a33d; }")
+    channel_warning.setVisible(False)
+
+    def _zarr_format() -> int:
+        return NGFF_FORMATS[make_convert_widget.zarr_format.value]
+
+    def _ranges() -> dict:
+        w = make_convert_widget
+        return {"t_range": w.t_range.value, "z_range": w.z_range.value, "y_range": w.y_range.value,
+                "x_range": w.x_range.value, "channels": w.channels.value}
+
+    def _zarr_layout(dataset) -> tuple:
+        """``(axes, dtype, layout)``: level-0 chunks and shards of the output (see
+        :func:`~zarrsmith.napari._zarr_options.chunk_shard_layout`)."""
+        w = make_convert_widget
+        axes = _dataset_axes(dataset)
+        sizes = output_sizes(dataset, **_ranges())
+        dtype = dataset.data[0].dtype
+        layout = chunk_shard_layout(
+            axes, [sizes[ax] for ax in axes], dtype, chunk_auto=w.chunk_auto.value, chunk_mb=w.chunk_mb.value,
+            chunk_zyx=(w.chunk_z.value, w.chunk_y.value, w.chunk_x.value), zarr_format=_zarr_format(),
+            shards=w.shards.value, shard_mb=w.shard_target_mb.value,
+            shard_exclude_axes=tuple(w.shard_exclude_axes.value),
+            voxel_size=recorded_voxel_size(dataset.metadata))
+        return axes, dtype, layout
+
+    def _chunk_zyx() -> tuple:
+        """The ``(z, y, x)`` chunk to write: the automatic one, or the one typed."""
+        w = make_convert_widget
+        dataset = _state["dataset"]
+        if dataset is None or not w.chunk_auto.value:
+            return w.chunk_z.value, w.chunk_y.value, w.chunk_x.value
+        axes, _, layout = _zarr_layout(dataset)
+        sizes = dict(zip(axes, layout["chunks"]))
+        return tuple(sizes.get(ax, 1) for ax in "zyx")
+
+    def _show_chunks(axes, layout) -> None:
+        """Fill in the chunk shape chosen automatically, and lock what does not apply."""
+        w = make_convert_widget
+        auto = bool(w.chunk_auto.value)
+        if auto:
+            _syncing["chunks"] = True
+            try:
+                for ax, size in zip(axes, layout["chunks"]):
+                    if ax in "zyx":
+                        getattr(w, f"chunk_{ax}").value = int(size)
+            finally:
+                _syncing["chunks"] = False
+        w.chunk_mb.enabled = auto
+        for ax in "zyx":
+            getattr(w, f"chunk_{ax}").enabled = not auto and ax in axes
+
+    def _channel_problems() -> dict:
+        dataset = _state["dataset"]
+        channels = output_channels(dataset, make_convert_widget.channels.value) if dataset is not None else []
+        return channel_option_problems(make_convert_widget.channel_names.value,
+                                       make_convert_widget.channel_colors.value, channels)
+
+    def _channel_options() -> tuple:
+        """The typed channel names and colours, checked against the converted channels (``ValueError``)."""
+        error = channel_error(_channel_problems())
+        if error:
+            raise ValueError(error)
+        return (parse_channel_names(make_convert_widget.channel_names.value),
+                parse_channel_colors(make_convert_widget.channel_colors.value))
+
+    def _check_channel_options(*_):
+        """Warn, while typing, about channel names or colours that the conversion would refuse."""
+        problems = _channel_problems()
+        text = channel_warning_text(problems)
+        channel_warning.setText(text)
+        channel_warning.setVisible(bool(text))
+        for name, messages in problems.items():
+            getattr(make_convert_widget, name).native.setStyleSheet(
+                "QLineEdit { border: 1px solid #e8a33d; }" if messages else "")
+
+    def _follow_channel_names(*_, reset=False):
+        """Fill in the names of the converted channels (spaces -> underscores) until the user types
+        names of their own; ``reset`` (a new dataset) replaces whatever is there."""
         dataset = _state["dataset"]
         if dataset is None:
             return
+        if reset:
+            make_convert_widget.channel_names.value = ""
+        follow_auto_value(make_convert_widget.channel_names,
+                          auto_channel_names(output_channels(dataset, make_convert_widget.channels.value)),
+                          _state, "auto_channel_names")
+
+    def _show_levels(dataset, axes, dtype) -> None:
+        """Fill in the number of pyramid levels zarrsmith convert would choose for the selected
+        output (after the ranges and channels), unless the user typed one: the field then no
+        longer holds the value filled in last."""
+        w = make_convert_widget
+        if _state.get("auto_levels") not in (None, w.n_levels.value):
+            return
+        sizes = output_sizes(dataset, **_ranges())
+        downscale = (w.downscale_z.value, w.downscale_y.value, w.downscale_x.value)
+        levels = min(w.n_levels.max, default_num_levels(
+            {"axes": axes, "size": [[sizes[ax] for ax in axes]], "dtype": str(dtype)}, downscale))
+        w.n_levels.value = levels
+        _state["auto_levels"] = levels
+
+    def _update_output_summary(*_):
+        dataset = _state["dataset"]
+        if dataset is None or _syncing.get("chunks"):
+            return
         w = make_convert_widget
         try:
-            text = output_summary(
-                dataset,
-                t_range=w.t_range.value,
-                z_range=w.z_range.value,
-                y_range=w.y_range.value,
-                x_range=w.x_range.value,
-                channels=w.channels.value,
-                drop_singleton=w.drop_singleton.value,
-            )
+            text = output_summary(dataset, **_ranges(), drop_singleton=w.drop_singleton.value)
         except Exception as e:  # the recap must never break the widget
             text = f"cannot estimate ({e})"
+        try:
+            axes, dtype, layout = _zarr_layout(dataset)
+            _show_chunks(axes, layout)
+            _show_levels(dataset, axes, dtype)
+            text += f"\nZarr: {layout_summary(axes, dtype, layout)}"
+        except Exception as e:  # the recap must never break the widget
+            text += f"\nZarr: cannot estimate ({e})"
         output_label.setText(f"Output: {text}")
 
-    for name in ("t_range", "z_range", "y_range", "x_range", "channels", "drop_singleton"):
+    for name in ("t_range", "z_range", "y_range", "x_range", "channels", "drop_singleton", "chunk_auto",
+                 "chunk_mb", "chunk_z", "chunk_y", "chunk_x", "zarr_format", "shards", "shard_target_mb",
+                 "shard_exclude_axes", "downscale_z", "downscale_y", "downscale_x"):
         getattr(make_convert_widget, name).changed.connect(_update_output_summary)
+    make_convert_widget.channels.changed.connect(_follow_channel_names)
+    for name in ("channel_names", "channel_colors", "channels"):
+        getattr(make_convert_widget, name).changed.connect(_check_channel_options)
 
     def _set_convert_enabled(enabled):
         """Enable or disable the conversion panel *and* its Convert button.
@@ -867,7 +1023,7 @@ def convert_widget():
     @make_convert_widget.zarr_format.changed.connect
     def _update_sharding_availability(zarr_format):
         # Sharding is a zarr v3 / NGFF 0.5 feature only.
-        sharding_available = int(zarr_format) == 3
+        sharding_available = NGFF_FORMATS[zarr_format] == 3
         make_convert_widget.shards.enabled = sharding_available
         make_convert_widget.shard_target_mb.enabled = sharding_available
         make_convert_widget.shard_exclude_axes.enabled = sharding_available
@@ -888,12 +1044,20 @@ def convert_widget():
                               sources=[make_visualize_widget.input_path.value]):
             return
 
+        try:
+            typed_names, typed_colors = _channel_options()
+        except ValueError as e:
+            print(f"ERROR: {e} The row is not appended.")
+            return
+
         csv_path = Path(batch_csv_path) if batch_csv_path else None
         if csv_path is None:
             csv_path = Path(make_visualize_widget.input_path.value).parent / "batch.csv"
 
         selected_channel_names = list(make_convert_widget.channels.value) if "c" in _dataset_axes(dataset) else []
-        normalized_channel_names = [c.replace(" ", "_") for c in selected_channel_names]
+        # zarrsmith convert splits the names on spaces: the dataset's names get underscores
+        normalized_channel_names = typed_names or auto_channel_names(
+            output_channels(dataset, selected_channel_names)).split()
         subset = _subset_string_from_widget(
             dataset,
             make_convert_widget.t_range.value,
@@ -903,16 +1067,19 @@ def convert_widget():
             selected_channel_names,
         )
 
-        selected_colors = _channel_colors_from_metadata(dataset, selected_channel_names)
+        selected_colors = typed_colors or _channel_colors_from_metadata(
+            dataset, output_channels(dataset, selected_channel_names))
         shards_selected = make_convert_widget.shards.value
+        # one value per dataset axis, as zarrsmith convert expects
+        chunk_size = _chunk_shape_for_dataset(dataset, *_chunk_zyx())
         row = {
             "input": str(Path(make_visualize_widget.input_path.value).resolve()),
             "microscope": str(make_visualize_widget.file_format.value),
             "output": str(Path(make_convert_widget.output_path.value)),
-            "chunk_size": " ".join(str(v) for v in (1, 1, make_convert_widget.chunk_z.value, make_convert_widget.chunk_y.value, make_convert_widget.chunk_x.value)),
+            "chunk_size": " ".join(str(v) for v in chunk_size),
             "max_size(MB)": "",
             "scene_index": str(make_visualize_widget.scene_index.value),
-            "zarr_format": str(make_convert_widget.zarr_format.value),
+            "zarr_format": str(_zarr_format()),
             "downscale_factor": " ".join(str(v) for v in (make_convert_widget.downscale_z.value, make_convert_widget.downscale_y.value, make_convert_widget.downscale_x.value)),
             "subset": subset,
             "channel_colors": " ".join(selected_colors),
@@ -1014,24 +1181,18 @@ def convert_widget():
         _set_convert_enabled(True)
 
         axes = _dataset_axes(dataset)
-        chunk_map = dict(zip(axes, default_chunk_size(dataset.metadata)[0]))
         downscale = (make_convert_widget.downscale_z.value, make_convert_widget.downscale_y.value,
                      make_convert_widget.downscale_x.value)
         num_levels = default_num_levels(dataset.metadata, downscale)
 
-        make_convert_widget.chunk_x.max = _axis_size(dataset, "x") + 1
-        make_convert_widget.chunk_x.value = chunk_map.get("x", 1)
-        make_convert_widget.chunk_x.enabled = "x" in axes
-
-        make_convert_widget.chunk_y.max = _axis_size(dataset, "y") + 1
-        make_convert_widget.chunk_y.value = chunk_map.get("y", 1)
-        make_convert_widget.chunk_y.enabled = "y" in axes
-
-        make_convert_widget.chunk_z.max = _axis_size(dataset, "z") + 1
-        make_convert_widget.chunk_z.value = chunk_map.get("z", 1)
-        make_convert_widget.chunk_z.enabled = "z" in axes
+        # the chunk shape itself is filled in with the output summary (auto chunks)
+        for ax in "zyx":
+            chunk = getattr(make_convert_widget, f"chunk_{ax}")
+            chunk.max = _axis_size(dataset, ax) + 1
+            chunk.enabled = ax in axes and not make_convert_widget.chunk_auto.value
 
         make_convert_widget.n_levels.value = num_levels
+        _state["auto_levels"] = num_levels  # follows the ranges from now on (see _show_levels)
         make_convert_widget.downscale_z.enabled = "z" in axes
         make_convert_widget.downscale_y.enabled = "y" in axes
         make_convert_widget.downscale_x.enabled = "x" in axes
@@ -1051,6 +1212,12 @@ def convert_widget():
         make_convert_widget.channels.choices = channel_names
         make_convert_widget.channels.value = tuple(channel_names)
         make_convert_widget.channels.enabled = n_channels > 0
+        # no channel axis: nothing to name (zarrsmith convert refuses names then)
+        make_convert_widget.channel_names.enabled = make_convert_widget.channel_colors.enabled = n_channels > 0
+        if not n_channels:
+            make_convert_widget.channel_colors.value = ""
+        _follow_channel_names(reset=True)  # this dataset's channel names, not the previous one's
+        _check_channel_options()
 
         if follow_output:
             make_convert_widget.output_path.value = default_output
@@ -1168,6 +1335,8 @@ def convert_widget():
     make_convert_widget.native.layout().setSpacing(2)
     make_convert_widget.native.layout().setContentsMargins(0, 0, 0, 0)
     make_convert_widget.channels.native.setMaximumHeight(64)
+    make_convert_widget.channel_names.native.setPlaceholderText("dataset channel names, e.g. DAPI Alexa_488")
+    make_convert_widget.channel_colors.native.setPlaceholderText("dataset colors, e.g. magenta 00FF00")
 
     section_conversion.layout().addWidget(make_convert_widget.native)
     _toggle_conversion(title2_btn.isChecked())
@@ -1205,6 +1374,7 @@ def convert_widget():
     ui["button_holder"] = button_holder  # locked as a whole while converting (see _set_convert_enabled)
     button_holder.setEnabled(make_convert_widget.native.isEnabled())
     section_conversion.layout().addWidget(output_label)  # visible with the parameters collapsed
+    section_conversion.layout().addWidget(channel_warning)  # likewise
     section_conversion.layout().addWidget(button_holder)
 
     # All three boxes (input, conversion, batch) scroll together; the log is a
@@ -1215,4 +1385,5 @@ def convert_widget():
     dock.visualize_widget, dock.convert_widget = make_visualize_widget, make_convert_widget
     dock.batch_csv_widget = make_batch_csv_widget
     dock.output_label = output_label
+    dock.channel_warning = channel_warning
     return dock

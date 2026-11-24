@@ -12,6 +12,12 @@ from numcodecs import Zstd
 from .units import to_micrometers
 
 
+def czi_has_distance(czi_metadata, axis: str) -> bool:
+    """Whether the CZI metadata records the voxel size along ``axis``."""
+    node = czi_metadata.find(f"./Metadata/Scaling/Items/Distance[@Id='{axis}']/Value")
+    return node is not None and bool(node.text)
+
+
 def czi_distance(czi_metadata, axis: str, default: Optional[float] = None) -> float:
     """Voxel size along ``axis`` in micrometers (CZI stores meters)."""
     node = czi_metadata.find(f"./Metadata/Scaling/Items/Distance[@Id='{axis}']/Value")

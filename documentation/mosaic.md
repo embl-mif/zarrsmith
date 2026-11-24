@@ -238,9 +238,9 @@ The fused image records where it is: its NGFF `translation` (`zm.metadata["trans
 | `field` | field name | `MosaicManager.fuse` only: the field to fuse (default: the first one), see [Fields](#fields) |
 | `tiles` | tiles or tile ids | `MosaicManager.fuse` only: the only tiles to fuse, the output fits them |
 | `skip` | tiles or tile ids | tiles to leave blank, see below |
-| `levels`, `downscale_factor` | integer, integer or `(z, y, x)` | pyramid levels (default 1) and factor between them (default 2) |
+| `levels`, `downscale_factor` | integer, integer or `(z, y, x)` | pyramid levels (default 1; `None`: until no axis of the coarsest level is above 2048 voxels, the default of `zarrsmith fuse` and of the napari widget) and factor between them (default 2) |
 | `pyramid_method` | `"mean"`, `"nearest"`, `"mode"` | downsampling of the pyramid levels (default: `"mean"`, `"nearest"` for labels) |
-| `workers` | integer | shards fused in parallel (default 1). Each worker holds one shard of level 0, about twice its size: fewer workers are used, with a warning, when they would not fit in half of the free memory |
+| `workers` | integer | shards fused in parallel (default 1; `0`: half of the cores, at most 16, no more than there are regions, as many as fit in half of the free memory, the default of `zarrsmith fuse` and of the napari widget). Each worker holds one shard of level 0, about twice its size: fewer workers are used, with a warning, when they would not fit in half of the free memory |
 | `out_dtype` | dtype | default: input dtype, `float32` for `sum` |
 | `data_type` | `"intensity"`, `"label"` | write a label image; needs `blend="none"` (the default for labels) and an integer dtype. Default: `"label"` when every tile is label data (tiles of label stores), else `"intensity"` |
 | `midline_axis` | `"x"`, `"y"`, `"z"` | axis along which `sigmoid` and `midline` separate the groups or cameras (default: `z` for several cameras in 3D, `x` otherwise) |

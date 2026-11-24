@@ -16,6 +16,7 @@ from qtpy.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -98,6 +99,57 @@ def make_section(*widgets, margins=(6, 4, 6, 6), spacing=3):
     for w in widgets:
         inner.addWidget(w)
     return frame
+
+
+def compact_row(widget, label: str, *items, label_width: int = 78) -> QWidget:
+    """A row of several controls of the magicgui container ``widget``, under one ``label``.
+
+    ``items`` are ``(prefix, name)`` pairs: the control ``widget.<name>`` is moved into
+    the row, after the small label ``prefix`` (none if ``None``). The magicgui widgets
+    are moved, not copied, so ``widget.<name>`` keeps working (values, ``enabled``,
+    signals); their one-per-row wrappers are hidden for good. The caller inserts the row
+    (e.g. in ``widget.native.layout()``).
+    """
+    row_widget = QWidget()
+    row_layout = QHBoxLayout(row_widget)
+    row_layout.setContentsMargins(0, 0, 0, 0)
+    row_layout.setSpacing(4)
+    title = QLabel(label)
+    title.setMinimumWidth(label_width)
+    row_layout.addWidget(title)
+    for prefix, name in items:
+        mg = getattr(widget, name)
+        wrapper = mg.native.parent()
+        if prefix:
+            row_layout.addWidget(QLabel(prefix))
+        row_layout.addWidget(mg.native, 1)
+        # A checkbox has no row wrapper (its parent is the whole panel).
+        if wrapper is not widget.native:
+            wrapper.setVisible(False)
+    return row_widget
+
+
+def make_collapsible_toggle(text: str, widgets, expanded: bool = False) -> QToolButton:
+    """A ``text ▸`` / ``text ▾`` button that shows or hides ``widgets`` (e.g. rows of
+    :func:`compact_row`), collapsed unless ``expanded``. ``widgets`` may be filled after
+    the button is made: it is read on every click."""
+    button = QToolButton()
+    button.setCheckable(True)
+    button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+
+    def toggle(checked):
+        for w in widgets:
+            w.setVisible(checked)
+        button.setText(f"{text} ▾" if checked else f"{text} ▸")
+        button.setStyleSheet(
+            "QToolButton { font-size: 13px; font-weight: 600; padding: 4px 0px; color: %s; }"
+            " QToolButton:hover { color: white; }" % ("#ffffff" if checked else "#aaaaaa")
+        )
+
+    button.toggled.connect(toggle)
+    button.setChecked(expanded)
+    toggle(expanded)
+    return button
 
 
 def make_button_holder(button: QPushButton) -> QWidget:

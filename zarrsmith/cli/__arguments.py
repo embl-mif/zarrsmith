@@ -7,6 +7,7 @@ import textwrap
 
 from zarrsmith import __version__
 from zarrsmith.utils.colors import parse_color as _parse_color
+from zarrsmith.utils.ngff import DEFAULT_SHARD_TARGET_MB
 
 
 class MultilineDefaultsHelpFormatter(
@@ -158,6 +159,12 @@ def _parse_subset_selection(selection: str, axis: str):
     if text == "" or text.lower() in {"all", "none", "null", "nan", "*"}:
         return slice(None)
 
+    if axis == "c" and ":" not in text:
+        # channels by name (c=DAPI,GFP), or names and indices mixed; numbers stay indices
+        tokens = [part.strip().strip('"').strip("'") for part in text.split(",") if part.strip()]
+        if any(not part.lstrip("-").isdigit() for part in tokens):
+            return [int(part) if part.lstrip("-").isdigit() else part for part in tokens]
+
     if ":" in text:
         parts = [part.strip() for part in text.split(":")]
         if len(parts) > 3:
@@ -210,6 +217,7 @@ def parse_subset_spec(value: str):
     --------
     ``y=10:100:2;x=20:80`` -> ``{"Y": slice(10, 100, 2), "X": slice(20, 80, None)}``
     ``z=0:10;c=0,2`` -> ``{"Z": slice(0, 10, None), "C": [0, 2]}``
+    ``c=DAPI,GFP`` -> ``{"C": ["DAPI", "GFP"]}`` (channel names, resolved against the dataset)
     """
     if value is None:
         return None
@@ -242,6 +250,13 @@ def parse_subset_spec(value: str):
 def _add_zarr_arguments(parser):
     """OME-Zarr output options shared by ``convert`` and ``fuse``."""
     parser.add_argument(
+        '-dr', '--dry_run', action='store_true',
+        help='Print what would be written and stop, writing nothing: the output (axes, size, voxel), '
+             'its chunks and shards (size and count), the pyramid levels and, for fuse, the fusion '
+             'workers; the same recap as the napari widgets. Only metadata is read (fuse: camera '
+             'registration is skipped). With --batch: every row.',
+    )
+    parser.add_argument(
         '-cs', '--chunk_size',
         required= False,
         nargs= '+',
@@ -251,8 +266,8 @@ def _add_zarr_arguments(parser):
     parser.add_argument(
         '-ms', '--max_size',
         required= False,
-        help= 'Max chunk size in MB (uncompressed). Default: about 4 MB, with up to 16 z planes and y and x '
-              'about square. Ignored if --chunk_size is provided.',
+        help= 'Max chunk size in MB (uncompressed). Default: about 4 MB, about cubic in micrometers (from the '
+              'voxel size) with at most 32 z planes. Ignored if --chunk_size is provided.',
         type= float
     )
     parser.add_argument(
@@ -306,7 +321,7 @@ def _add_zarr_arguments(parser):
         '-s', '--subset',
         required=False,
         type=str,
-        help='Subset the input before pyramid generation. Format: axis=selection pairs separated by semicolons, e.g. "y=10:100:2;x=20:80". Use integers, comma-separated indices, or slices like 0:10:2.',
+        help='Subset the input before pyramid generation. Format: axis=selection pairs separated by semicolons, e.g. "y=10:100:2;x=20:80;c=DAPI,GFP". Use integers, comma-separated indices, or slices like 0:10:2; channels (c) also by name.',
     )
     parser.add_argument(
         '-sh', '--shards',
@@ -480,8 +495,10 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
     )
     parser.add_argument('-od', '--out_dtype', help='Output dtype, e.g. uint16 or float32. Default: input dtype '
                         '(float32 for blend=sum).')
-    parser.add_argument('-rw', '--read_workers', type=int, default=4,
-                        help='Tiles read in parallel (worker processes). Not to be confused with -nw (write threads).')
+    parser.add_argument('-rw', '--read_workers', type=int, default=0,
+                        help='Regions fused in parallel (worker processes). Default: 0, chosen from the cores, '
+                             'the regions and the free memory, as in the napari widget. Not to be confused '
+                             'with -nw (write threads).')
     parser.add_argument('-td', '--temp_dir', help='Folder for the temporary fused level 0. Default: next to the output.')
     parser.add_argument('-nff', '--no_flatfield', dest='flatfield', action='store_false',
                         help='Opera: do not apply the flat-field correction stored by Harmony '
@@ -501,7 +518,7 @@ def _adapt_zarr_help_for_mosaic(parser):
         '--scene_index': 'Scene of a Zeiss mosaic to load (default: all of them, one field per scene).',
         '--channel_names': 'Names of the output channels. Example: -cn autofluo cfos',
         '--subset': 'Crop the fused output and/or select channels: axis=selection pairs separated by semicolons, '
-                    'e.g. "z=0:100;y=200:900;c=1". z/y/x are in output voxels (after --downsample); '
+                    'e.g. "z=0:100;y=200:900;c=1" or "c=DAPI,GFP" (channels by index or name). z/y/x are in output voxels (after --downsample); '
                     'slices may not have a step. Timepoints are chosen with --timepoints.',
     }
     for action in parser._actions:
@@ -851,7 +868,7 @@ def _add_allocate_arguments(parser):
     out.add_argument('-sh', '--shards', nargs='+',
                      help='"auto", a shard shape (one per output axis), or "none". Default: the template\'s '
                           '(zarr v3), "auto" without a template. Not available on zarr v2.')
-    out.add_argument('-stm', '--shard_target_mb', type=float, default=512.0,
+    out.add_argument('-stm', '--shard_target_mb', type=float, default=DEFAULT_SHARD_TARGET_MB,
                      help='Target shard size in MB for --shards auto.')
     out.add_argument('-sl', '--start_level', default='0',
                      help="Level of the template (index or path) that becomes the output's level 0; --crop is "

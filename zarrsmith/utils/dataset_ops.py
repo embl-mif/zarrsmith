@@ -17,6 +17,7 @@ import dask.array as da
 
 from .axes import (
     SPATIAL_AXIS_SET,
+    UNRECORDED_SCALE_KEY,
     index_list_from_selection,
     normalize_axes,
     normalize_data_type,
@@ -167,6 +168,8 @@ def apply_metadata_updates(
             continue
         if key == "data_type":
             metadata["is_label"] = value == "label"
+        if key == "scales":  # given by the user: every voxel size is now known
+            metadata.pop(UNRECORDED_SCALE_KEY, None)
         metadata[key] = value
         logger.info("Updated metadata entry '%s' of %s", key, label)
 

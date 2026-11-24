@@ -20,7 +20,7 @@ from .chunks import default_chunk_size
 from .colors import default_channel_color
 from .downsampling import normalize_spatial_factor_for_axes, resolve_downsampling_method
 from .translation import pyramid_translations
-from .ngff import DEFAULT_COMPRESSOR, DEFAULT_COMPRESSOR_LEVEL
+from .ngff import DEFAULT_COMPRESSOR, DEFAULT_COMPRESSOR_LEVEL, DEFAULT_SHARD_TARGET_MB
 
 Crop = Mapping[str, tuple[int | None, int | None] | slice]
 
@@ -237,7 +237,8 @@ def build_allocation_metadata(
     elif chunks is not None:
         chunk0 = tuple(int(chunks.get(ax, 1)) for ax in axes_out)
     else:
-        chunk0 = default_chunk_size({"axes": axes_out, "size": [size0], "dtype": dtype_out})[0]
+        chunk0 = default_chunk_size({"axes": axes_out, "size": [size0], "dtype": dtype_out,
+                                     "scales": [[scale_by_axis[ax] for ax in axes_out if ax in scale_by_axis]]})[0]
     chunk0 = tuple(max(1, min(c, s)) for c, s in zip(chunk0, size0))
 
     out_format = int(zarr_format or info["zarr_format"] or 3)
@@ -330,7 +331,7 @@ def allocate_zarr(
     overwrite: bool = False,
     compressor: str | None = DEFAULT_COMPRESSOR,
     compressor_level: int = DEFAULT_COMPRESSOR_LEVEL,
-    shard_target_mb: float = 512.0,
+    shard_target_mb: float = DEFAULT_SHARD_TARGET_MB,
     **kwargs: Any,
 ) -> zarr.Group:
     """Create an empty OME-Zarr image at ``out``, from a template or explicit geometry.

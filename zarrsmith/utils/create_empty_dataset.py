@@ -8,6 +8,7 @@ import zarr
 from .axes import normalize_axes, normalize_data_type
 from .ngff import (
     DEFAULT_COMPRESSOR_LEVEL,
+    DEFAULT_SHARD_TARGET_MB,
     ZarrWriteConfig,
     _create_level_arrays,
     _resolve_creation_shards,
@@ -25,7 +26,7 @@ def create_empty_dataset(
     compressor_level: int = DEFAULT_COMPRESSOR_LEVEL,
     data_type: str | None = None,
     shards: Any = None,
-    shard_target_mb: float = 512.0,
+    shard_target_mb: float = DEFAULT_SHARD_TARGET_MB,
     shard_exclude_axes: Any = None,
 ):
     """Create an on-disk empty OME-Zarr image pyramid from metadata only.

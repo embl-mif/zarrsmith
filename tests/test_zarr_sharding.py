@@ -370,3 +370,18 @@ def test_resolve_shards_for_levels_auto(shape, chunk, target_mb, expect_none):
         for shard_dim, chunk_dim, shape_dim in zip(result[0], chunk, shape):
             assert shard_dim % chunk_dim == 0
             assert shard_dim <= shape_dim
+
+
+@pytest.mark.parametrize("target_mb", [1, 4, 100, 256, 512, 1024])
+@pytest.mark.parametrize("shape, chunk", [((301, 1880, 2566), (32, 256, 256)), ((2, 301, 1880, 2566), (1, 16, 256, 512)),
+                                          ((4096, 4096), (1024, 2048)), ((50, 3000, 3000), (16, 128, 256))])
+def test_auto_shards_never_exceed_the_target(shape, chunk, target_mb):
+    """The target is a ceiling: a write thread or fusion worker never holds more than was asked."""
+    from zarrsmith.utils.ngff import _auto_shard_for_level
+
+    target = int(target_mb * 1024 * 1024)
+    shard = _auto_shard_for_level(shape, chunk, 2, target, axes="zyx"[-len(shape):] if len(shape) < 4 else "czyx",
+                                  exclude_axes=("t", "c"))
+    if shard is not None:
+        assert int(np.prod(shard)) * 2 <= target
+        assert all(s % c == 0 for s, c in zip(shard, chunk))

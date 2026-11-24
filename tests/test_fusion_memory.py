@@ -68,3 +68,38 @@ def test_fusion_shards_default_to_their_own_target(tmp_path, monkeypatch):
     explicit = shard_mb("explicit.ome.zarr", shard_target_mb=4.0)  # an explicit value wins
     # "auto" shards come close to the target (whole chunks), not exactly
     assert default < 1.5 and 2.5 < explicit < 5 and explicit > 2 * default
+
+
+def _plan(shape=(16, 256, 528), **tile_attrs):
+    tiles = [Tile(np.full(shape, v, np.uint16), (0, 0, x0), (2.0, 0.5, 0.5), "ch", attrs=dict(tile_attrs))
+             for v, x0 in ((10, 0), (20, 128))]
+    return fusion.plan_fusion(tiles)
+
+
+def test_automatic_workers_follow_the_cores_the_regions_and_the_memory():
+    """workers=0: the rule shared by fuse_tiles, zarrsmith fuse and the napari widget."""
+    plan = _plan()
+    block = (1, 16, 64, 64)
+    region, piece, n_regions = fusion.fusion_regions(plan, block)
+    assert n_regions >= 1 and all(r % b == 0 for r, b in zip(region, block[1:]))
+    big = 10**7  # MB: memory is no limit
+    assert fusion.fusion_workers(plan, block, 0, cores=64, free_mb=big) == min(16, n_regions)  # at most 16
+    assert fusion.fusion_workers(plan, block, 0, n_regions=100, cores=8, free_mb=big) == 4  # half of the cores
+    assert fusion.fusion_workers(plan, block, 0, n_regions=2, cores=64, free_mb=big) == 2  # no more than regions
+    assert fusion.fusion_workers(plan, block, 0, n_regions=100, cores=64, free_mb=1e-6) == 1  # memory
+    assert fusion.fusion_workers(plan, block, 3, cores=64, free_mb=big) == 3  # a number given is kept
+
+
+def test_default_fusion_levels_are_those_of_convert():
+    from zarrsmith.utils.chunks import default_num_levels
+
+    plan = _plan()
+    md = {"axes": plan.axes, "size": [plan.shape], "dtype": str(plan.dtype)}
+    assert fusion.default_fusion_levels(plan) == default_num_levels(md, 2)
+
+
+def test_plan_voxel_size_is_none_where_a_tile_did_not_record_it():
+    from zarrsmith.utils.axes import UNRECORDED_SCALE_KEY
+
+    assert _plan().voxel_size == {"z": 2.0, "y": 0.5, "x": 0.5}
+    assert _plan(**{UNRECORDED_SCALE_KEY: ("z",)}).voxel_size == {"z": None, "y": 0.5, "x": 0.5}

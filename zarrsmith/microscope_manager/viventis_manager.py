@@ -10,6 +10,7 @@ from dask import delayed
 from tifffile import imread
 
 from .microscope_manager import MicroscopeManager
+from ..utils.axes import UNRECORDED_SCALE_KEY
 from ..utils.metadata import build_metadata
 from ..utils.ome import parse_ome_xml, xml_attr
 from ..utils.units import normalize_unit
@@ -75,6 +76,7 @@ class ViventisManager(MicroscopeManager):
         return build_metadata(
             size=[(px.size_t, px.size_c, px.size_z, px.size_y, px.size_x)],
             scales=[px.scale_zyx],
+            **{UNRECORDED_SCALE_KEY: px.unrecorded_axes},
             units=px.units_zyx,
             channels=px.channels,
             dtype=px.dtype,
