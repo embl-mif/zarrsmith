@@ -19,6 +19,11 @@ from ._layout import (compact_row, compose_dock, enable_drag_and_drop, make_butt
                       make_log_pane, make_section, make_title)
 from ._log import EmittingStream, make_log_appender
 from ._output_check import output_allowed
+from ._zarr_options import (  # noqa: F401  (re-exported: part of this module's helpers)
+    DEFAULT_CHUNK_MB, DEFAULT_SHARD_MB, NGFF_FORMATS, PYRAMID_METHODS, auto_channel_names, auto_chunks,
+    block_count, channel_error, channel_option_problems, channel_warning_text, chunk_shard_layout,
+    follow_auto_value, layout_summary, manual_chunks, parse_channel_colors, parse_channel_names,
+)
 
 #: Mosaic readers offered in the widget.
 MOSAIC_READERS = mos.MOSAIC_READERS
@@ -57,13 +62,6 @@ MOSAIC_BATCH_COLUMNS = [
     "drop_singleton", "num_workers",
 ]
 
-#: OME-Zarr versions offered: label -> zarr format (NGFF 0.5 is zarr v3, 0.4 is zarr v2).
-NGFF_FORMATS = {"0.5 (zarr v3)": 3, "0.4 (zarr v2)": 2}
-#: Downsampling of the pyramid levels; "auto": mean for intensity images, nearest for labels.
-PYRAMID_METHODS = ("auto", "mean", "nearest", "mode")
-#: Default (uncompressed) sizes of an output chunk and of a shard, in MB.
-DEFAULT_CHUNK_MB = 4
-DEFAULT_SHARD_MB = 512
 #: Axes that shards never merge: the fusion writes one channel of one timepoint at a time.
 _ALWAYS_UNMERGED = ("t", "c")
 #: Memory a fusion worker holds on top of its output block (the canvases of the piece it
@@ -204,45 +202,6 @@ def fuse_kwargs(
     return kwargs
 
 
-def auto_chunks(axes: str, shape: Sequence[int], dtype, target_mb: float = DEFAULT_CHUNK_MB) -> tuple:
-    """Output chunk shape of about ``target_mb`` (uncompressed), in ``axes`` order.
-
-    Chunks are 1 along ``t`` and ``c``. The spatial sizes are doubled one at a time
-    (powers of two, clipped to the image) while the chunk stays within ``target_mb``,
-    y and x first and z 8 times less: 4 MB gives ``32 x 256 x 256`` for uint16,
-    ``16 x 256 x 256`` for float32 and ``1024 x 2048`` for a uint16 projection.
-    """
-    target = max(1, int(target_mb * 1024 * 1024) // np.dtype(dtype).itemsize)
-    sizes = {ax: max(1, int(s)) for ax, s in zip(axes, shape)}
-    spatial = [ax for ax in "zyx" if ax in sizes]
-    weight = {"z": 8, "y": 1, "x": 1}
-    chunk = {ax: 1 for ax in spatial}
-    while True:
-        total = int(np.prod(list(chunk.values())))
-        growable = sorted((ax for ax in spatial if chunk[ax] < sizes[ax]),
-                          key=lambda ax: (chunk[ax] * weight[ax], "xyz".index(ax)))
-        for ax in growable:
-            new = min(2 * chunk[ax], sizes[ax])
-            if total // chunk[ax] * new <= target:
-                chunk[ax] = new
-                break
-        else:
-            break
-    return tuple(chunk.get(ax, 1) for ax in axes)
-
-
-def manual_chunks(axes: str, shape: Sequence[int], zyx: Sequence[int]) -> tuple:
-    """Chunk shape in ``axes`` order from the widget's ``(z, y, x)`` chunk: 1 along ``t``
-    and ``c``, clipped to the image (z is ignored for projections)."""
-    wanted = dict(zip("zyx", (int(v) for v in zyx)))
-    return tuple(max(1, min(wanted.get(ax, 1), int(s))) for ax, s in zip(axes, shape))
-
-
-def block_count(shape: Sequence[int], block: Sequence[int]) -> int:
-    """Number of ``block``-shaped pieces that tile ``shape``."""
-    return int(np.prod([-(-int(s) // int(b)) for s, b in zip(shape, block)]))
-
-
 def auto_fusion_workers(block_bytes: int, n_blocks: int, cores: Optional[int] = None,
                         free_mb: Optional[float] = None) -> int:
     """Number of regions to fuse in parallel, from the size of a region.
@@ -278,22 +237,14 @@ def zarr_layout(axes: str, shape: Sequence[int], dtype, *, chunk_auto: bool = Tr
     (size and number of the write blocks, one per fusion worker at a time) and
     ``workers`` (``workers``, or :func:`auto_fusion_workers` for 0).
     """
-    from zarrsmith.utils.ngff import _auto_shard_for_level
-
-    chunks = (auto_chunks(axes, shape, dtype, chunk_mb) if chunk_auto
-              else manual_chunks(axes, shape, chunk_zyx))
-    exclude = tuple(dict.fromkeys(_ALWAYS_UNMERGED + tuple(shard_exclude_axes)))
-    shard = None
-    if int(zarr_format) == 3 and shards == "auto":
-        shard = _auto_shard_for_level(shape, chunks, np.dtype(dtype).itemsize, int(float(shard_mb) * 1024 * 1024),
-                                      axes=axes, exclude_axes=exclude)
-        shard = None if shard is None else tuple(min(int(b), int(s)) for b, s in zip(shard, shape))
-    block = shard or chunks
-    block_bytes = int(np.prod(block)) * np.dtype(dtype).itemsize
-    n_blocks = block_count(shape, block)
-    resolved = int(workers) if int(workers) > 0 else auto_fusion_workers(block_bytes, n_blocks, cores, free_mb)
-    return {"chunks": chunks, "shards": shard, "exclude": exclude, "block_bytes": block_bytes,
-            "n_blocks": n_blocks, "workers": resolved, "auto_workers": int(workers) <= 0}
+    layout = chunk_shard_layout(axes, shape, dtype, chunk_auto=chunk_auto, chunk_mb=chunk_mb, chunk_zyx=chunk_zyx,
+                                zarr_format=zarr_format, shards=shards, shard_mb=shard_mb,
+                                shard_exclude_axes=_ALWAYS_UNMERGED + tuple(shard_exclude_axes))
+    auto = int(workers) <= 0
+    layout["workers"] = (auto_fusion_workers(layout["block_bytes"], layout["n_blocks"], cores, free_mb) if auto
+                         else int(workers))
+    layout["auto_workers"] = auto
+    return layout
 
 
 def write_options(layout: dict, *, zarr_format: int = 3, shard_mb: float = DEFAULT_SHARD_MB,
@@ -316,92 +267,6 @@ def write_options(layout: dict, *, zarr_format: int = 3, shard_mb: float = DEFAU
     if int(num_workers) > 0:
         options["num_workers"] = int(num_workers)
     return options
-
-
-def layout_summary(axes: str, dtype, layout: dict) -> str:
-    """``chunks 32x256x256 (4.0 MB), shards 128x1024x1024 (512 MB, 40 shards), 8 fusion workers (auto)``."""
-    itemsize = np.dtype(dtype).itemsize
-
-    def shape(block):
-        spatial = [int(b) for ax, b in zip(axes, block) if ax in "zyx"]
-        mb = int(np.prod(block)) * itemsize / 2**20
-        return "x".join(str(b) for b in spatial), f"{mb:.1f} MB" if mb < 10 else f"{mb:.0f} MB"
-
-    text = "chunks {} ({})".format(*shape(layout["chunks"]))
-    if layout["shards"] is not None:
-        dims, size = shape(layout["shards"])
-        n = layout["n_blocks"]
-        text += f", shards {dims} ({size}, {n} shard{'s' if n != 1 else ''})"
-    else:
-        text += ", no shards"
-    workers = layout["workers"]
-    return text + f", {workers} fusion worker{'s' if workers != 1 else ''}" + (" (auto)" if layout["auto_workers"] else "")
-
-
-def parse_channel_names(text: str) -> list[str]:
-    """Output channel names typed in the widget, separated by spaces (empty: the tile names)."""
-    return str(text or "").split()
-
-
-def parse_channel_colors(text: str) -> list[str]:
-    """Output channel colours typed in the widget (6-digit hex codes or matplotlib names, separated
-    by spaces; empty: the default palette), as ``RRGGBB``. Raises ``ValueError`` on an unknown colour."""
-    from zarrsmith.utils.colors import parse_color
-
-    colors = []
-    for token in str(text or "").split():
-        try:
-            colors.append(parse_color(token))
-        except TypeError as e:
-            raise ValueError(str(e)) from None
-    return colors
-
-
-def channel_option_problems(names_text: str, colors_text: str, channels: Sequence[str]) -> dict:
-    """What is wrong with the channel names and colours typed in the widget for the fused ``channels``.
-
-    Returns ``{"channel_names": [...], "channel_colors": [...]}``, one message per problem (empty
-    lists: both can be used). Names: one per fused channel, all different. Colours: one per fused
-    channel, each a 6-digit hex code or a matplotlib colour name. An empty field (the defaults)
-    is always fine.
-    """
-    from zarrsmith.utils.colors import parse_color
-
-    n = len(channels)
-    fused = f"{n} fused channel{'s' if n != 1 else ''}" + (f" ({', '.join(map(str, channels))})" if n else "")
-
-    def count(values, what):
-        if values and len(values) != n:
-            return [f"{len(values)} {what if len(values) != 1 else what[:-1]} for {fused}: give one per channel, "
-                    "or leave the field empty "
-                    "for the defaults."]
-        return []
-
-    names = parse_channel_names(names_text)
-    name_problems = count(names, "names")
-    repeated = sorted({nm for nm in names if names.count(nm) > 1})
-    if repeated:
-        name_problems.append(f"repeated name{'s' if len(repeated) > 1 else ''} {', '.join(repeated)}: "
-                             "every channel needs its own name.")
-
-    tokens = str(colors_text or "").split()
-    unknown = []
-    for token in tokens:
-        try:
-            parse_color(token)
-        except TypeError:
-            unknown.append(token)
-    color_problems = count(tokens, "colors")
-    if unknown:
-        color_problems.append(f"{', '.join(repr(t) for t in unknown)} not recognized: use 6-digit hex codes "
-                              "(FF00FF) or matplotlib color names (magenta).")
-    return {"channel_names": name_problems, "channel_colors": color_problems}
-
-
-def channel_warning_text(problems: dict) -> str:
-    """The warning shown under the fusion estimate for :func:`channel_option_problems` (empty: none)."""
-    labels = {"channel_names": "Channel names", "channel_colors": "Channel colors"}
-    return "\n".join(f"⚠ {labels[key]}: {message}" for key, messages in problems.items() for message in messages)
 
 
 def register_options(*, register_cameras: bool, register_model: str, register_channel: Optional[str],
@@ -938,6 +803,7 @@ def mosaic_widget():
             w.fields.value = fields[:1]  # tiles of separate fields are not fused together
         show_widget.channels.value = channels[:1]  # one channel keeps napari responsive
         fuse_widget.channels.value = channels
+        _follow_channel_names(reset=True)  # this mosaic's channel names, not the previous one's
         labels = all(mos.fusion.tile_data_type(t) == "label" for t in mosaic.tiles)
         # smooth between tiles and between groups; label ids are copied, never blended
         fuse_widget.blend.value = "none" if labels else "sigmoid"
@@ -1059,10 +925,10 @@ def mosaic_widget():
                            "tooltip": "Leave a skipped tile's position blank in every channel."},
         projection={"choices": list(_PROJECTIONS), "value": "none (3D)"},
         blend={"choices": list(mos.fusion.BLENDS), "value": "sigmoid"},
-        ds_z={"label": "Downsample Z", "min": 1, "max": 256, "value": 4,
+        ds_z={"label": "Downsample Z", "min": 1, "max": 256, "value": 1,
               "tooltip": "Downsampling of the tiles while they are read (each output voxel is the mean of a block)."},
-        ds_y={"label": "Downsample Y", "min": 1, "max": 256, "value": 8},
-        ds_x={"label": "Downsample X", "min": 1, "max": 256, "value": 8},
+        ds_y={"label": "Downsample Y", "min": 1, "max": 256, "value": 1},
+        ds_x={"label": "Downsample X", "min": 1, "max": 256, "value": 1},
         levels={"label": "Resolution levels", "min": 1, "max": 10, "value": 3,
                 "tooltip": "Number of pyramid levels of the output."},
         pyramid_method={"label": "Method", "choices": list(PYRAMID_METHODS), "value": "auto",
@@ -1102,7 +968,8 @@ def mosaic_widget():
                                 "reduced so the shards being written fit in half of the free RAM."},
         channel_names={"label": "Channel names", "widget_type": "LineEdit", "value": "",
                        "tooltip": "Names of the output channels, separated by spaces, one per fused channel. "
-                                  "Empty: the tile channel names."},
+                                  "Filled in with the selected tile channels (spaces replaced by "
+                                  "underscores) until you type names of your own."},
         channel_colors={"label": "Channel colors", "widget_type": "LineEdit", "value": "",
                         "tooltip": "Colours of the output channels (hex codes such as FF00FF or names such as "
                                    "magenta), separated by spaces, one per fused channel. Empty: the default palette."},
@@ -1132,9 +999,9 @@ def mosaic_widget():
         skip_all_channels=False,
         projection="none (3D)",
         blend="sigmoid",
-        ds_z=4,
-        ds_y=8,
-        ds_x=8,
+        ds_z=1,
+        ds_y=1,
+        ds_x=1,
         levels=3,
         pyramid_method="auto",
         pyramid_z=2,
@@ -1320,12 +1187,20 @@ def mosaic_widget():
 
     def _channel_options(plan) -> tuple:
         """The typed channel names and colours, checked against the fused channels (``ValueError``)."""
-        problems = channel_option_problems(fuse_widget.channel_names.value, fuse_widget.channel_colors.value,
-                                           plan.channels)
-        if any(problems.values()):
-            raise ValueError(" ".join(channel_warning_text(problems).replace("⚠ ", "").splitlines()))
+        error = channel_error(channel_option_problems(fuse_widget.channel_names.value,
+                                                      fuse_widget.channel_colors.value, plan.channels))
+        if error:
+            raise ValueError(error)
         return (parse_channel_names(fuse_widget.channel_names.value),
                 parse_channel_colors(fuse_widget.channel_colors.value))
+
+    def _follow_channel_names(*_, reset=False):
+        """Fill in the names of the selected channels (spaces -> underscores) until the user types
+        names of their own; ``reset`` (a new mosaic) replaces whatever is there."""
+        if reset:
+            fuse_widget.channel_names.value = ""
+        follow_auto_value(fuse_widget.channel_names, auto_channel_names(fuse_widget.channels.value),
+                          state, "auto_channel_names")
 
     def _check_channel_options(*_):
         """Warn, while typing, about channel names or colours that the fusion would refuse."""
@@ -1460,6 +1335,7 @@ def mosaic_widget():
     fuse_widget.register_cameras.changed.connect(_register_enabled)
     fuse_widget.ngff.changed.connect(_sharding_enabled)
     fuse_widget.shards.changed.connect(_sharding_enabled)
+    fuse_widget.channels.changed.connect(_follow_channel_names)
     for name in ("channel_names", "channel_colors", "channels"):
         getattr(fuse_widget, name).changed.connect(_check_channel_options)
     if viewer is not None:
@@ -1565,7 +1441,7 @@ def mosaic_widget():
         compact_row(fw, "Ch. colors", (None, "channel_colors")),
     ]
     fw.shard_exclude_axes.native.setMaximumHeight(56)
-    fw.channel_names.native.setPlaceholderText("default: tile channel names")
+    fw.channel_names.native.setPlaceholderText("tile channel names, e.g. GFP Alexa_488")
     fw.channel_colors.native.setPlaceholderText("default palette, e.g. magenta 00FF00")
     advanced_button = make_collapsible_toggle("Additional parameters", advanced_rows)
     fuse_layout = fw.native.layout()
