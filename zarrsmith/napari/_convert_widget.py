@@ -14,7 +14,7 @@ from qtpy.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButto
 from zarrsmith.microscope_manager.readers import READERS
 from zarrsmith.utils.chunks import default_chunk_size, default_num_levels
 from ._batch_csv import append_batch_csv
-from ._layout import compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_title
+from ._layout import compact_row, compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_title
 from ._layout import make_section as _make_section
 from ._dataset_helpers import axis_index as _axis_index
 from ._dataset_helpers import axis_size as _axis_size
@@ -230,23 +230,7 @@ def _compact_advanced_rows(widget, insert_after):
     layout = widget.native.layout()
 
     def row(label, *items):
-        row_widget = QWidget()
-        row_layout = QHBoxLayout(row_widget)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(4)
-        title = QLabel(label)
-        title.setMinimumWidth(78)
-        row_layout.addWidget(title)
-        for prefix, name in items:
-            mg = getattr(widget, name)
-            wrapper = mg.native.parent()
-            if prefix:
-                row_layout.addWidget(QLabel(prefix))
-            row_layout.addWidget(mg.native, 1)
-            # A checkbox has no row wrapper (its parent is the whole panel).
-            if wrapper is not widget.native:
-                wrapper.setVisible(False)
-        return row_widget
+        return compact_row(widget, label, *items)
 
     rows = [
         row("Chunks", ("Z", "chunk_z"), ("Y", "chunk_y"), ("X", "chunk_x")),
