@@ -78,6 +78,12 @@ _REGION_MAX = 2048
 #: Voxels per 3D region piece (32 MB per float32 canvas): bounds the memory of each worker.
 _REGION_VOXELS = 2**23
 
+#: Default target shard size (MB, uncompressed) of a fused output with ``shards="auto"``.
+#: Smaller than ``zarrsmith convert``'s 512 MB: every fusion worker holds one whole level-0
+#: shard (twice, while it is written), and one shard is one task, so smaller shards keep
+#: the memory of each worker low and let more of them work on the same output.
+FUSION_SHARD_TARGET_MB = 256.0
+
 #: Percentiles of the fused values used as the display window written to the output.
 DISPLAY_PERCENTILES = (0.5, 99.9)
 #: Values kept from every fused region to estimate the display window (no extra reads).
@@ -722,6 +728,45 @@ def _merge_region(r: _Region, ds, projection, blend, dtype, steepness: float) ->
         merged = _merge_groups(canvases, r.midline, r.bounds, flat, shape, z0=z0)
     del canvases
     return _cast(merged, dtype)
+
+
+#: Float32 canvases a worker holds per merged piece (accumulator, weights, and the best
+#: weight of ``blend="none"``), counted for the memory of a fusion worker.
+_CANVASES_PER_PIECE = 3
+
+
+def _worker_bytes(region, piece, dtype, flat: bool) -> int:
+    """Memory of one fusion worker: its region (a whole level-0 shard, in the output
+    dtype, plus its encoded copy while it is written) and the canvases of one piece."""
+    spatial = (lambda s: s[1:]) if flat else (lambda s: s)
+    block = math.prod(int(v) for v in spatial(region)) * np.dtype(dtype).itemsize
+    canvases = math.prod(int(v) for v in spatial(piece)) * 4 * _CANVASES_PER_PIECE
+    return 2 * block + canvases
+
+
+def _workers_that_fit(workers: int, region, piece, dtype, flat: bool) -> int:
+    """``workers``, lowered (with a warning) to as many as fit in the memory budget.
+
+    Each worker holds one whole region, a shard of level 0 (about ``shard_target_mb``
+    with ``shards="auto"``), so ``workers`` x the shard size must fit: the same budget as
+    the OME-Zarr writer (half of the free memory, see
+    :func:`zarrsmith.utils.ngff._resolve_num_workers`).
+    """
+    from ..utils.ngff import DEFAULT_MEMORY_FRACTION, _available_memory_mb
+
+    workers = max(1, int(workers))
+    per_worker = _worker_bytes(region, piece, dtype, flat)
+    budget = _available_memory_mb() * DEFAULT_MEMORY_FRACTION * 1024 * 1024
+    fit = max(1, int(budget // per_worker))
+    if fit < workers:
+        warnings.warn(
+            f"Each fusion worker holds a {per_worker / 1024**2:.0f} MB region (a shard of level 0 and "
+            f"its canvases): {fit} of the {workers} workers fit in memory. Use smaller shards "
+            "(shard_target_mb or shards) to fuse with more workers.",
+            UserWarning, stacklevel=3,
+        )
+        return fit
+    return workers
 
 
 def _fuse_level0(regions, arr, *, ds, projection, blend, dtype, steepness: float,
@@ -1520,6 +1565,10 @@ def fuse_tiles(
         (``"mean"`` is refused for labels).
     workers
         Number of regions fused in parallel (threads or processes, see ``executor``).
+        Each worker holds one region, a whole shard of level 0 (about ``shard_target_mb``,
+        256 MB by default), twice over while it is written: memory is about
+        ``workers x 2 x shard size``. Fewer workers are used, with a warning, when they
+        would not fit in half of the free memory; smaller shards allow more of them.
     executor
         ``"process"``, ``"thread"`` or ``"auto"`` (processes when ``workers > 1`` and
         every tile's data is picklable, e.g. :class:`~zarrsmith.mosaic_manager.H5Array`;
@@ -1591,7 +1640,9 @@ def fuse_tiles(
         ``compressor_level``, ``drop_singleton``, ``num_workers`` (threads building the
         pyramid). ``chunks`` and ``shards`` are given in the output axis order (``c, z, y, x``,
         or ``c, y, x`` for projections, after a leading ``t`` for several timepoints),
-        and must be 1 along ``t`` and ``c``.
+        and must be 1 along ``t`` and ``c``. ``shard_target_mb`` defaults to
+        :data:`FUSION_SHARD_TARGET_MB` (256 MB) instead of ``convert``'s 512 MB: smaller
+        shards keep each worker's memory low and give more of them work.
 
     The output is allocated first, with every level and its metadata (see
     :func:`~zarrsmith.utils.allocate.build_allocation_metadata`); level 0 is fused
@@ -1654,6 +1705,7 @@ def fuse_tiles(
     if temp_dir or temp_compression:
         warnings.warn("temp_dir and temp_compression are deprecated and ignored: level 0 is fused "
                       "directly into the output.", DeprecationWarning, stacklevel=2)
+    write_options = {"shard_target_mb": FUSION_SHARD_TARGET_MB, **write_options}
     cfg = ZarrWriteConfig(**write_options)
     if cfg.storage_options:
         raise TypeError("storage_options is not supported by fuse_tiles.")
@@ -1740,6 +1792,7 @@ def fuse_tiles(
                                 else layout_blocks(plan.layout), plan, piece)
         logger.info("Fusing %d regions of up to %s voxels (z, y, x), %s at a time", len(regions),
                     ("-",) + region[1:] if flat else region, ("-", cy, cx) if flat else piece)
+        workers = _workers_that_fit(workers, region, piece, out_dtype, flat)
 
         auto = executor == "auto"
         if auto:

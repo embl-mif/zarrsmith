@@ -20,12 +20,25 @@ def test_metadata_axes_and_sizes():
 
 
 def test_default_chunk_size_follows_the_dtype():
-    chunks, size_mb, n_chunks = default_chunk_size(_metadata("tczyx", (1, 2, 100, 4096, 4096)), max_size_mb=100)
-    assert chunks[:2] == (1, 1) and size_mb <= 100
-    assert n_chunks["z"] == 2 * n_chunks["y"]  # z split twice as much as y and x
-    wide, wide_mb, _ = default_chunk_size(_metadata("tczyx", (1, 2, 100, 4096, 4096), "float32"), max_size_mb=100)
-    assert np.prod(wide) <= np.prod(chunks) and wide_mb <= 100  # 4 bytes a voxel: smaller chunks
+    chunks, size_mb, n_chunks = default_chunk_size(_metadata("tczyx", (1, 2, 100, 4096, 4096)))
+    assert chunks == (1, 1, 16, 256, 512) and size_mb == 4  # about 4 MB, up to 16 planes
+    assert n_chunks == {"z": 7, "y": 16, "x": 8}
+    wide, wide_mb, _ = default_chunk_size(_metadata("tczyx", (1, 2, 100, 4096, 4096), "float32"))
+    assert wide == (1, 1, 16, 256, 256) and wide_mb == 4  # 4 bytes a voxel: smaller chunks
     assert default_chunk_size(_metadata("yx", (50, 60)))[0] == (50, 60)  # small image: one chunk
+    # max_size_mb still sets the size; old callers passing 100 get chunks of up to 100 MB
+    big, big_mb, _ = default_chunk_size(_metadata("tczyx", (1, 2, 100, 4096, 4096)), max_size_mb=100)
+    assert big[2] == 16 and 50 < big_mb <= 100
+
+
+def test_default_chunks_are_square_in_y_x_and_grow_z_last():
+    assert default_chunk_size(_metadata("yx", (50000, 80000)))[0] == (1024, 2048)  # 2D: 4 MB
+    assert default_chunk_size(_metadata("czyx", (2, 5, 2048, 2048)))[0] == (1, 5, 512, 512)  # few planes
+    # y and x span the image: z takes the rest of the size
+    assert default_chunk_size(_metadata("zyx", (500, 64, 64)))[0] == (500, 64, 64)
+    assert default_chunk_size(_metadata("zyx", (2000, 64, 64)))[0] == (512, 64, 64)
+    # a size too small for 16 planes of 256 x 256 keeps fewer planes
+    assert default_chunk_size(_metadata("zyx", (100, 4096, 4096)), max_size_mb=0.5)[0][0] <= 16
 
 
 def test_default_num_levels():

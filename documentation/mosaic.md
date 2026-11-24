@@ -240,7 +240,7 @@ The fused image records where it is: its NGFF `translation` (`zm.metadata["trans
 | `skip` | tiles or tile ids | tiles to leave blank, see below |
 | `levels`, `downscale_factor` | integer, integer or `(z, y, x)` | pyramid levels (default 1) and factor between them (default 2) |
 | `pyramid_method` | `"mean"`, `"nearest"`, `"mode"` | downsampling of the pyramid levels (default: `"mean"`, `"nearest"` for labels) |
-| `workers` | integer | tiles read in parallel (default 1) |
+| `workers` | integer | shards fused in parallel (default 1). Each worker holds one shard of level 0, about twice its size: fewer workers are used, with a warning, when they would not fit in half of the free memory |
 | `out_dtype` | dtype | default: input dtype, `float32` for `sum` |
 | `data_type` | `"intensity"`, `"label"` | write a label image; needs `blend="none"` (the default for labels) and an integer dtype. Default: `"label"` when every tile is label data (tiles of label stores), else `"intensity"` |
 | `midline_axis` | `"x"`, `"y"`, `"z"` | axis along which `sigmoid` and `midline` separate the groups or cameras (default: `z` for several cameras in 3D, `x` otherwise) |
@@ -283,6 +283,29 @@ Fusing labels: tiles of a segmentation whose label IDs already agree across tile
 ```python
 fuse_tiles(label_tiles, "labels.ome.zarr", blend="none", data_type="label", levels=4)
 ```
+
+#### Renumbering label tiles
+
+A segmentation run tile by tile numbers every tile from 1, so the same id means different objects in different tiles, and an object cut by a tile edge has a different id on each side. `RelabeledArray` gives the tiles one numbering as they are read: every non-zero id first gets the tile's `offset` added (e.g. `tile_index * step`, so the tiles never clash), then the ids listed in `mapping` are replaced (e.g. the objects a label matcher found to be the same across an edge):
+
+```python
+from zarrsmith.mosaic_manager import RelabeledArray, fuse_tiles, store_tiles
+
+tiles = []
+for index, store in enumerate(tile_stores, start=1):
+    (tile,), _ = store_tiles(store)
+    tile.data = RelabeledArray(tile.data, offset=index * 100_000, mapping={200_001: 100_002})
+    tiles.append(tile)
+fuse_tiles(tiles, "merged.ome.zarr", levels=4)  # label tiles: blend="none", data_type="label"
+```
+
+From the command line, give the offsets as a CSV (`store,offset`, one row per tile store) and the mapping as a JSON (`{"id": new_id}`):
+
+```console
+zarrsmith fuse -i tiles/ -z merged.ome.zarr --label_offsets offsets.csv --label_mapping mapping.json -nl 4 -df 1 2 2
+```
+
+Either option implies `--data_type label`. The tiles are read from the folder whatever their stores say they hold (a segmentation written by another tool may not mark its stores as labels), unless `--data_type label` is given to read only label stores. Each tile is given only the mapping entries between its offset and the next larger one, the ids it can hold, so the ids of a tile must stay below the next tile's offset.
 
 `plan_fusion(mosaic.tiles, ...)` takes the fusion arguments (`ds`, `projection`, `blend`, `channels`, `crop`, `skip`, `out_dtype`, `midline_axis`, `timepoints`, `reference_timepoint`) and returns the level-0 geometry without reading anything: `plan.summary()`, `plan.shape`, `plan.scale`, `plan.nbytes`.
 
@@ -353,7 +376,7 @@ The fused output stores a **display window** for every channel (OMERO `window` m
 
 An existing output (with `overwrite=True`) is fused next to it, in a hidden `.NAME.partial.zarr`, and replaces it only once the fusion has succeeded.
 
-With `workers > 1`, shards are fused in **worker processes** when the tiles allow it (as Luxendo and Opera tiles do). h5py serialises reads within one process, so threads would not speed up reading HDF5 files. If worker processes cannot be started, fusion falls back to threads with a warning. One shard is one task, so an output that fits in a few shards (about 1 GB each by default) is fused with little parallelism; lower `shard_target_mb` to split it into more tasks.
+With `workers > 1`, shards are fused in **worker processes** when the tiles allow it (as Luxendo and Opera tiles do). h5py serialises reads within one process, so threads would not speed up reading HDF5 files. If worker processes cannot be started, fusion falls back to threads with a warning. One shard is one task, so an output that fits in a few shards is fused with little parallelism; that is why fusion targets shards of about 256 MB by default (`shard_target_mb`), smaller than the 512 MB of `zarrsmith convert`. Lower it further to split a small output into more tasks, or raise it for fewer files. Each worker holds its shard in memory (in the output dtype, plus its encoded copy while it is written), so memory is about `workers × 2 × shard size`: with the default 256 MB shards, 8 workers need about 4 GB. When that does not fit in half of the free memory, fewer workers are used, with a warning; smaller shards let more workers run.
 
 Raw tiles usually have no pyramid, so every fusion reads the full-resolution data, whatever `ds` is. On a network drive the read speed sets the run time.
 

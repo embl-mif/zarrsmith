@@ -54,7 +54,7 @@ zarrsmith convert -i INPUT -m opera -z OUT.zarr -sh auto -stm 256 -sea t c   # o
 
 - `shards="auto"` picks a shard shape per pyramid level and leaves small levels unsharded.
 - `shard_exclude_axes` lists axes that `"auto"` never merges chunks along. It defaults to `t c`, so each timepoint and channel stays in its own shard. Use `none` (CLI/CSV) or `()` (Python) to allow every axis to merge. An explicit shard shape is always used exactly as given.
-- `shard_target_mb` is the target uncompressed size of a shard. The default is 1024 MB (1 GB). Larger shards mean fewer files but more memory per write thread (see below).
+- `shard_target_mb` is the target uncompressed size of a shard. The default is 512 MB (256 MB for fusion). Larger shards mean fewer files but more memory per write thread (see below).
 
 ## Compression
 

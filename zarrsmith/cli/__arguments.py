@@ -251,8 +251,9 @@ def _add_zarr_arguments(parser):
     parser.add_argument(
         '-ms', '--max_size',
         required= False,
-        help= 'Max chunk size in MB. Ignored if --chunk_size is provided.',
-        type= int
+        help= 'Max chunk size in MB (uncompressed). Default: about 4 MB, with up to 16 z planes and y and x '
+              'about square. Ignored if --chunk_size is provided.',
+        type= float
     )
     parser.add_argument(
         '-si', '--scene_index',
@@ -322,7 +323,8 @@ def _add_zarr_arguments(parser):
         '-stm', '--shard_target_mb',
         required=False,
         type=float,
-        help='Target uncompressed shard size in MB, used when --shards auto. Default: 1024.',
+        help='Target uncompressed shard size in MB, used when --shards auto. Default: 512 for convert, '
+             '256 for fuse (each fusion worker holds one shard).',
     )
     parser.add_argument(
         '-sea', '--shard_exclude_axes',
@@ -393,6 +395,18 @@ def _add_mosaic_arguments(parser, legacy: bool = False):
              'already agree across tiles; needs --blend none, the default for labels, and an integer dtype). '
              'Default: label when every tile is label data (a folder of label stores), else intensity. '
              'For a folder of OME-Zarr stores, it also chooses which stores are read.',
+    )
+    parser.add_argument(
+        '-lo', '--label_offsets',
+        help='Label tiles numbered separately (e.g. a segmentation run tile by tile): a CSV with columns '
+             '"store" (the store name, e.g. tile_1_labels.ome.zarr, or the name without .ome.zarr) and '
+             '"offset", added to every non-zero id of that store so the ids of different tiles never clash. '
+             'Implies --data_type label.',
+    )
+    parser.add_argument(
+        '-lm', '--label_mapping',
+        help='JSON {"id": new_id, ...} applied after --label_offsets, e.g. to merge the objects a tile edge '
+             'cut in two (ids not listed are kept). Implies --data_type label.',
     )
     parser.add_argument('-ss', '--sigmoid_steepness', type=float,
                         help='Steepness of the blend=sigmoid transition: higher is sharper. Default: 4 '
@@ -483,7 +497,7 @@ def _adapt_zarr_help_for_mosaic(parser):
     """Reword the shared output options where they mean something specific for a mosaic."""
     helps = {
         '--chunk_size': 'Output chunk size in C Z Y X (C Y X for projections) order, after T for several timepoints.',
-        '--max_size': 'Max output chunk size in MB. Ignored if --chunk_size is provided.',
+        '--max_size': 'Max output chunk size in MB (default about 4 MB). Ignored if --chunk_size is provided.',
         '--scene_index': 'Scene of a Zeiss mosaic to load (default: all of them, one field per scene).',
         '--channel_names': 'Names of the output channels. Example: -cn autofluo cfos',
         '--subset': 'Crop the fused output and/or select channels: axis=selection pairs separated by semicolons, '
@@ -514,7 +528,7 @@ CONVERT_HELP = """\
       /path/to/input_2 | viventis   | /path/to/zarr_2 |               | 2           | 2                | z=0:10;c=0,2       |            |
     Leave a cell empty for the default. channel_colors can be hex codes or matplotlib color names.
     shards: "auto" (default when empty), an explicit shard shape, or "none". Not supported with zarr_format 2.
-    shard_target_mb only applies to shards=auto (default 1024). shard_exclude_axes defaults to "t c"
+    shard_target_mb only applies to shards=auto (default 512). shard_exclude_axes defaults to "t c"
     ("none" lets every axis merge). compressor: "blosc" (default when empty), "gzip" (zarr_format 2 only) or
     "none", in lowercase; compressor_level goes from 0 to 9 (default 1).
     drop_singleton (true/false, default true) removes singleton t/c/z axes.
@@ -563,8 +577,8 @@ FUSE_HELP = """\
     drop_singleton | num_workers | overwrite)
     and of the fusion columns
     downsample | projection | blend | sigmoid_steepness | channels | groups | cameras | fields | tiles | skip_tiles | timepoints |
-    reference_timepoint | midline_axis | out_dtype | data_type | read_workers | temp_dir | transforms |
-    transforms_only (true/false) | register_cameras (true/false) | register_model | register_channel |
+    reference_timepoint | midline_axis | out_dtype | data_type | label_offsets | label_mapping | read_workers | temp_dir |
+    transforms | transforms_only (true/false) | register_cameras (true/false) | register_model | register_channel |
     flatfield (true/false, Opera only, default true), e.g.
       input                  | microscope | output                 | downsample | projection | blend   | num_levels
       /path/to/acquisition_1 | luxendo    | /path/to/acq1_3D.zarr  | 4 8 8      | none       | sigmoid | 3
@@ -837,7 +851,7 @@ def _add_allocate_arguments(parser):
     out.add_argument('-sh', '--shards', nargs='+',
                      help='"auto", a shard shape (one per output axis), or "none". Default: the template\'s '
                           '(zarr v3), "auto" without a template. Not available on zarr v2.')
-    out.add_argument('-stm', '--shard_target_mb', type=float, default=1024.0,
+    out.add_argument('-stm', '--shard_target_mb', type=float, default=512.0,
                      help='Target shard size in MB for --shards auto.')
     out.add_argument('-sl', '--start_level', default='0',
                      help="Level of the template (index or path) that becomes the output's level 0; --crop is "

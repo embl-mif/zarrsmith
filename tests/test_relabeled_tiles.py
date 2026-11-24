@@ -123,3 +123,61 @@ def test_a_folder_of_label_stores_is_a_label_mosaic(tmp_path, monkeypatch):
     cli.main()
     zm = mm.ZarrManager(str(out))
     assert zm.metadata["data_type"] == "label" and set(np.unique(zm.data[0].compute())) == {0, 1, 2}
+
+
+def _tile_folder(tmp_path, data_type):
+    """The two tiles of _two_tiles in one folder, saved as label or (unmarked) intensity stores."""
+    folder = tmp_path / f"tiles_{data_type}"
+    folder.mkdir()
+    a = np.zeros(SHAPE, np.uint16)
+    a[..., 0:10], a[..., 12:24] = 1, 2
+    b = np.zeros(SHAPE, np.uint16)
+    b[..., 0:8], b[..., 10:20] = 1, 2
+    for name, labels, x0 in (("t1", a, 0), ("t2", b, 16)):
+        md = {"axes": "zyx", "scales": [(1.0, 1.0, 1.0)], "data_type": data_type,
+              "translations": {"z": 0.0, "y": 0.0, "x": float(x0)}}
+        mm.ArrayManager(labels, md).to_zarr(str(folder / f"{name}.ome.zarr"), progress=False)
+    return folder
+
+
+@pytest.mark.parametrize("data_type", ["label", "intensity"])  # stores that do not say they hold labels too
+def test_cli_fuse_renumbers_label_tiles(tmp_path, monkeypatch, data_type):
+    import json
+    import sys
+
+    from zarrsmith.cli import zarrsmith as cli
+
+    folder = _tile_folder(tmp_path, data_type)
+    offsets = tmp_path / "offsets.csv"
+    offsets.write_text("store,offset\nt1.ome.zarr,1000\nt2,2000\n")
+    mapping = tmp_path / "mapping.json"
+    mapping.write_text(json.dumps({"2001": 1002}))
+    out = tmp_path / "merged.ome.zarr"
+    monkeypatch.setattr(sys, "argv", ["zarrsmith", "fuse", "-i", str(folder), "-z", str(out),
+                                      "--label_offsets", str(offsets), "--label_mapping", str(mapping),
+                                      "-nl", "2"])
+    cli.main()
+    zm = mm.ZarrManager(str(out))
+    merged = zm.data[0].compute()
+    assert zm.metadata["data_type"] == "label" and merged.dtype == np.uint32
+    assert set(np.unique(merged)) == {0, 1001, 1002, 2002}
+    assert (merged[..., 12:24] == 1002).all()  # one cell across the seam
+    assert set(np.unique(zm.data[1].compute())) <= {0, 1001, 1002, 2002}
+
+
+def test_cli_fuse_needs_an_offset_for_every_tile(tmp_path, monkeypatch):
+    import sys
+
+    from zarrsmith.cli import zarrsmith as cli
+
+    folder = _tile_folder(tmp_path, "label")
+    offsets = tmp_path / "offsets.csv"
+    offsets.write_text("store,offset\nt1,1000\n")
+    monkeypatch.setattr(sys, "argv", ["zarrsmith", "fuse", "-i", str(folder), "-z", str(tmp_path / "o.ome.zarr"),
+                                      "--label_offsets", str(offsets)])
+    with pytest.raises(ValueError, match=r"No offset for the tile store\(s\) \['t2'\]"):
+        cli.main()
+    monkeypatch.setattr(sys, "argv", ["zarrsmith", "fuse", "-i", str(folder), "-z", str(tmp_path / "o.ome.zarr"),
+                                      "--label_offsets", str(offsets), "-dt", "intensity"])
+    with pytest.raises(ValueError, match="need --data_type label"):
+        cli.main()

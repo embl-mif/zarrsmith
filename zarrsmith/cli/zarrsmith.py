@@ -148,7 +148,7 @@ def zarr_convert(
     input_path, 
     zarr_path, 
     microscope: Optional[str] = None, 
-    max_size : Optional[int] = 100, 
+    max_size : Optional[float] = None,
     chunk_size : Optional[List[int]] = None,
     scene_index : Optional[int] = None,
     channel_names : Optional[List[str]] = None,
@@ -178,9 +178,10 @@ def zarr_convert(
         microscope : str
             Microscope used to acquire input data.
             One of \"luxendo\", \"opera\", \"viventis\", \"zeiss\", \"evident\", \"zarrv04\", \"zarr\".
-        max_size : Optional[int]
+        max_size : Optional[float]
             Max chunk size in MB. \n
-            Default: 100
+            Default: None (about 4 MB: up to 16 z planes, y and x about square,
+            see zarrsmith.utils.chunks.default_chunk_size)
         chunk_size : Optional[List[int]]
             Chunk size in TCZYX format, or whatever axes are present in the dataset.
             Default: None
@@ -293,8 +294,8 @@ def zarr_convert(
         size_mb = _dataset_size_mb(dataset.metadata) * np.prod(chunk_size) / np.prod(dataset.metadata["size"][0])
         n_chunks = {ax: int(np.ceil(size / chunk)) for ax, size, chunk in zip(metadata_axes(dataset.metadata), dataset.metadata["size"][0], chunk_size)}
     else:
-        print(f"\tUsing max_size={max_size} MB to select chunk size.")
         chunk_size, size_mb, n_chunks = default_chunk_size(dataset.metadata, max_size)
+        print(f"\tUsing max_size={max_size if max_size is not None else 'default'} MB to select chunk size.")
 
     print(f"Chunk size: {chunk_size}, {size_mb} MB.")
     print(f"N chunks: {n_chunks}.")
@@ -386,7 +387,7 @@ def zarr_convert(
     print(f"NUM_WORKERS: {num_workers if num_workers is not None else '(zarrsmith default)'}.")
     print(f"SHARDS: {shards}.")
     if shards is not None:
-        print(f"SHARD_TARGET_MB: {to_zarr_kwargs.get('shard_target_mb', '(zarrsmith default: 1024)')}.")
+        print(f"SHARD_TARGET_MB: {to_zarr_kwargs.get('shard_target_mb', '(zarrsmith default: 512)')}.")
         print(f"SHARD_EXCLUDE_AXES: {shard_exclude_axes if shard_exclude_axes is not None else '(zarrsmith default: t, c)'}.")
 
     # --- Write to OME-Zarr format ---
@@ -603,7 +604,7 @@ def mosaic_convert(
     input_path,
     zarr_path,
     microscope: Optional[str] = None,
-    max_size: Optional[float] = 100,
+    max_size: Optional[float] = None,
     chunk_size: Optional[List[int]] = None,
     scene_index: Optional[int] = None,
     channel_names: Optional[List[str]] = None,
@@ -635,6 +636,8 @@ def mosaic_convert(
     midline_axis: Optional[str] = None,
     out_dtype: Optional[str] = None,
     data_type: Optional[str] = None,
+    label_offsets: Optional[str] = None,
+    label_mapping: Optional[str] = None,
     read_workers: int = 4,
     temp_dir: Optional[str] = None,
     overwrite: bool = False,
@@ -660,6 +663,10 @@ def mosaic_convert(
     ``read_workers`` its ``workers``. ``flatfield`` is passed to readers that correct
     the tiles (Opera); the others ignore it.
 
+    ``label_offsets`` (CSV ``store,offset``) and ``label_mapping`` (JSON ``{id: new_id}``)
+    renumber label tiles as they are read, see :func:`_relabel_tiles`; either implies
+    ``data_type="label"``.
+
     The transforms (where every tile goes) are written to
     :func:`~zarrsmith.mosaic_manager.default_transforms_path` of ``zarr_path`` before
     fusing; with ``transforms_only`` nothing else is done. ``transforms`` is such a file
@@ -676,6 +683,15 @@ def mosaic_convert(
     from zarrsmith.mosaic_manager.fusion import SIGMOID_STEEPNESS
 
     transforms_only = bool(parse_bool(transforms_only)) if transforms_only is not None else False
+    relabel = _present(label_offsets) or _present(label_mapping)
+    # The reader picks stores by the data type asked for; tiles renumbered as labels may come
+    # from stores that do not say they hold labels (e.g. written by another tool), so only an
+    # explicit --data_type restricts it.
+    reader_data_type = data_type
+    if relabel:
+        if data_type not in (None, "label"):
+            raise ValueError("--label_offsets/--label_mapping renumber label tiles: they need --data_type label.")
+        data_type = "label"
     if not transforms_only:
         _refuse_output(zarr_path, overwrite=overwrite, input_path=input_path)
 
@@ -683,7 +699,7 @@ def mosaic_convert(
     print(f"\n--->Using mosaic manager: {reader.__name__} ({resolved})")
     if scene_index is not None and resolved != "zeiss":
         print(f"\tscene_index={scene_index} is ignored for {resolved} mosaics.")
-    options = reader_options(reader, flatfield=flatfield, scene_index=scene_index, data_type=data_type)
+    options = reader_options(reader, flatfield=flatfield, scene_index=scene_index, data_type=reader_data_type)
     if not flatfield and "flatfield" not in options:
         print(f"\t--no_flatfield is ignored for {resolved} mosaics (no flat-field correction).")
     mosaic = reader(input_path, **options)
@@ -720,6 +736,9 @@ def mosaic_convert(
         use = [t for t in use if str(t.camera) in wanted]
         if not use:
             raise ValueError(f"No tile of cameras {sorted(wanted)}; available: {mosaic.cameras}.")
+    if relabel:
+        _relabel_tiles(use, label_offsets if _present(label_offsets) else None,
+                       label_mapping if _present(label_mapping) else None, out_dtype or "uint32")
 
     if register_cameras and parse_bool(register_cameras):
         if len({t.camera for t in use}) < 2:
@@ -757,8 +776,9 @@ def mosaic_convert(
         chunks = tuple(int(c) for c in chunk_size)
         print(f"\tUsing user-provided chunk size: {chunks}")
     else:
-        chunks, size_mb, _ = default_chunk_size(plan_md, max_size if max_size is not None else 100)
-        print(f"\tUsing max_size={max_size} MB: chunk size {chunks}, {size_mb:.1f} MB.")
+        chunks, size_mb, _ = default_chunk_size(plan_md, max_size)
+        print(f"\tUsing max_size={max_size if max_size is not None else 'default'} MB: "
+              f"chunk size {chunks}, {size_mb:.1f} MB.")
 
     factor = _normalize_downscale_factor(downscale_factor)
     if num_levels is None:
@@ -818,6 +838,60 @@ def mosaic_convert(
     return True
 
 
+def _relabel_tiles(tiles, offsets_csv: Optional[str], mapping_json: Optional[str], dtype: str = "uint32") -> None:
+    """Renumber label tiles in place as they are read (``zarrsmith fuse --label_offsets/--label_mapping``).
+
+    ``offsets_csv`` has the columns ``store`` (a store name, with or without ``.ome.zarr``)
+    and ``offset``: every non-zero id of that store's tiles gets the offset added, so
+    tiles numbered separately do not clash. Every tile needs one. ``mapping_json``
+    (``{"id": new_id}``) is applied afterwards, e.g. the objects a label solver merged
+    across tile edges; ids it does not list are kept. Each tile is given only the
+    entries between its offset and the next larger one (the ids it can hold), so the
+    workers do not each carry the whole mapping. The tiles are marked as label data.
+    """
+    import json
+
+    from zarrsmith.mosaic_manager import RelabeledArray
+
+    offsets: Dict[str, int] = {}
+    if offsets_csv is not None:
+        table = pd.read_csv(offsets_csv)
+        missing_cols = {"store", "offset"} - set(table.columns)
+        if missing_cols:
+            raise ValueError(f"{offsets_csv} needs the columns store and offset; missing {sorted(missing_cols)}.")
+        for store, offset in zip(table["store"].astype(str), table["offset"]):
+            name = store.strip()
+            offsets[name[:-len(".ome.zarr")] if name.endswith(".ome.zarr") else name] = int(offset)
+    mapping: Dict[int, int] = {}
+    if mapping_json is not None:
+        with open(mapping_json, encoding="utf-8") as handle:
+            mapping = {int(k): int(v) for k, v in json.load(handle).items()}
+
+    def stack_of(tile) -> str:
+        name = str(tile.attrs.get("store") or tile.attrs.get("stack") or "")
+        return name[:-len(".ome.zarr")] if name.endswith(".ome.zarr") else name
+
+    if offsets:
+        unknown = sorted({stack_of(t) for t in tiles} - set(offsets))
+        if unknown:
+            raise ValueError(f"No offset for the tile store(s) {unknown} in {offsets_csv}.")
+    bounds = sorted(set(offsets.values()))
+    keys = np.array(sorted(mapping), dtype=np.int64)
+    for tile in tiles:
+        offset = offsets.get(stack_of(tile), 0)
+        if offsets:
+            i = bounds.index(offset)
+            upper = bounds[i + 1] if i + 1 < len(bounds) else None
+            lo = np.searchsorted(keys, offset, side="right")
+            hi = len(keys) if upper is None else np.searchsorted(keys, upper, side="left")
+            own = {int(k): mapping[int(k)] for k in keys[lo:hi]}
+        else:
+            own = mapping
+        tile.data = RelabeledArray(tile.data, offset=offset, mapping=own, dtype=dtype)
+        tile.attrs["data_type"] = "label"
+    print(f"Renumbered {len(tiles)} label tile(s): {len(offsets)} offset(s), {len(mapping)} mapped id(s)")
+
+
 def convert_mosaic_single(args):
     """Runmode to fuse one mosaic to zarr."""
     print(f"Fusing mosaic {args.input_path} -> {args.zarr_path}")
@@ -866,8 +940,8 @@ def convert_mosaic_batch(args):
         for key in ("transforms_only", "register_cameras"):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = parse_bool(v[key])
-        for key in ("projection", "blend", "midline_axis", "out_dtype", "data_type", "temp_dir", "transforms",
-                    "register_model", "register_channel"):
+        for key in ("projection", "blend", "midline_axis", "out_dtype", "data_type", "label_offsets",
+                    "label_mapping", "temp_dir", "transforms", "register_model", "register_channel"):
             if key in columns and _present(v.get(key)):
                 kwargs[key] = str(v[key]).strip()
         for key in ("channels", "groups", "cameras", "fields", "tiles", "skip_tiles"):

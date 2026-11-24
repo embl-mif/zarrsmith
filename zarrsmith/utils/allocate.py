@@ -330,7 +330,7 @@ def allocate_zarr(
     overwrite: bool = False,
     compressor: str | None = DEFAULT_COMPRESSOR,
     compressor_level: int = DEFAULT_COMPRESSOR_LEVEL,
-    shard_target_mb: float = 1024.0,
+    shard_target_mb: float = 512.0,
     **kwargs: Any,
 ) -> zarr.Group:
     """Create an empty OME-Zarr image at ``out``, from a template or explicit geometry.

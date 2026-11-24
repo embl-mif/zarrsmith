@@ -257,10 +257,13 @@ def _store_downsampling_method(multiscales: dict, data_type: str | None) -> str:
     ``build_pyramid``, ``zarrsmith pyramid`` and ``allocate``), so a region
     write keeps the levels, and their NGFF translations, consistent. A store that
     records none (written before this was recorded, or by another tool) keeps
-    ``"nearest"``, as region writes always did.
+    ``"nearest"``, as region writes always did. So does a label store that records
+    ``"mean"`` (a label group made from an image's metadata): averaging would mix ids.
     """
+    from .axes import normalize_data_type
+
     method = recorded_downsampling_method(multiscales)
-    if method is None:
+    if method is None or (method == "mean" and normalize_data_type(data_type) == "label"):
         return "nearest"
     return resolve_downsampling_method(method, data_type)
 

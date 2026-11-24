@@ -691,3 +691,30 @@ def test_allocate_without_a_position_places_averaged_levels(tmp_path, data_type,
     else:
         assert transforms[0][1]["translation"] == [0.0, 0.0, 0.0, 0.0]
         assert transforms[1][1]["translation"] == pytest.approx(level1)
+
+
+def test_a_label_group_made_from_image_metadata_does_not_average(tmp_path):
+    """The image records "mean"; a label group created from its metadata gets "nearest",
+    so writing labels refreshes the coarser levels without mixing ids."""
+    import zarrsmith.microscope_manager as mm
+    from zarrsmith.utils.downsampling import recorded_downsampling_method
+
+    path = tmp_path / "img.ome.zarr"
+    image = mm.ArrayManager(da.zeros((8, 32, 32), dtype=np.uint16, chunks=(8, 16, 16)),
+                            {"axes": "zyx", "scales": [(1.0, 1.0, 1.0)]})
+    image.build_pyramid(num_levels=2, downscale_factor=(1, 2, 2))
+    image.to_zarr(str(path), progress=False)
+    z = ZarrManager(str(path), mode="r+")
+    assert z.metadata["downsampling_method"] == "mean"
+
+    meta = dict(z.metadata, dtype="uint16", data_type="label")
+    meta.pop("shards", None)
+    z.create_empty_group("mask", meta, is_label=True)
+    mask = np.zeros((8, 32, 32), np.uint16)
+    mask[:, ::2, ::2], mask[:, 1::2, 1::2] = 3, 7  # a mean would give 5 (or 1, 2, 3)
+    z.write_label_region(mask, level=0, group="labels/mask", downscale_factor=(1, 2, 2))
+
+    group = zarr.open_group(str(path / "labels" / "mask"), mode="r")
+    ms = group.attrs.get("ome", group.attrs)["multiscales"][0]
+    assert recorded_downsampling_method(ms) == "nearest"
+    assert set(np.unique(group[ms["datasets"][1]["path"]][:])) <= {0, 3, 7}

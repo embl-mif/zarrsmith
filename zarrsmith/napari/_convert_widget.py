@@ -713,7 +713,7 @@ def convert_widget():
                 "tooltip": "auto: mean for intensity images, nearest for labels"},
 
         shards={"label": "Sharding (zarr v3 only)", "choices": ["none", "auto"], "value": "auto"},
-        shard_target_mb={"label": "Shard target (MB)", "min": 1, "max": 100000, "step": 1, "value": 1024},
+        shard_target_mb={"label": "Shard target (MB)", "min": 1, "max": 100000, "step": 1, "value": 512},
         shard_exclude_axes={
             "label": "Never merge axes",
             "choices": ["t", "c", "z", "y", "x"],
@@ -759,7 +759,7 @@ def convert_widget():
         zarr_format=3,
         method="auto",
         shards="auto",
-        shard_target_mb=1024,
+        shard_target_mb=512,
         shard_exclude_axes=("t", "c"),
         drop_singleton=True,
         num_workers=0,
@@ -1014,7 +1014,7 @@ def convert_widget():
         _set_convert_enabled(True)
 
         axes = _dataset_axes(dataset)
-        chunk_map = dict(zip(axes, default_chunk_size(dataset.metadata, max_size_mb=100)[0]))
+        chunk_map = dict(zip(axes, default_chunk_size(dataset.metadata)[0]))
         downscale = (make_convert_widget.downscale_z.value, make_convert_widget.downscale_y.value,
                      make_convert_widget.downscale_x.value)
         num_levels = default_num_levels(dataset.metadata, downscale)

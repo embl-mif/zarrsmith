@@ -171,7 +171,7 @@ class ZarrWriteConfig:
     data_type: Literal["intensity", "label"] | None = None
     chunks: Sequence[int] | Sequence[Sequence[int]] | None = None
     shards: Literal["auto"] | Sequence[int] | Sequence[Sequence[int]] | None = "auto"
-    shard_target_mb: float = 1024.0 # in MB (1 GB)
+    shard_target_mb: float = 512.0  # in MB
     shard_exclude_axes: Sequence[str] = DEFAULT_SHARD_EXCLUDE_AXES
     drop_singleton: bool = True
     num_workers: int | None = None
@@ -836,7 +836,7 @@ def _resolve_creation_shards(
     *,
     zarr_format: int,
     shards: Any = None,
-    shard_target_mb: float = 1024.0,
+    shard_target_mb: float = 512.0,
     shard_exclude_axes: Sequence[str] | None = None,
 ) -> list[tuple[int, ...] | None]:
     """Per-level shard shapes for creating empty arrays from metadata.
