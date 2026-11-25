@@ -205,6 +205,17 @@ NGFF 0.6 stores can be read (axes from `coordinateSystems`, `scale`/`translation
 
 `metadata["extra_attributes"]` holds the group attributes that are not NGFF metadata, such as a pipeline's `t_range`. They are read from a store and written back next to `multiscales` on zarr v2, and next to (not inside) `ome` on zarr v3. Both can be changed with `update_metadata`.
 
+## Update the metadata of a store in place
+
+`update_metadata` changes the in-memory metadata, which reaches disk with `to_zarr`. On a `ZarrManager`, `in_place=True` also writes the updates into the store's NGFF attributes, without copying any data:
+
+```python
+z = mm.ZarrManager("image.ome.zarr", mode="r+")
+z.update_metadata({"channel_names": ["GFP", "RFP"], "scales": [(2.0, 0.5, 0.5), (4.0, 1.0, 1.0)]}, in_place=True)
+```
+
+It takes the same keys and applies them to the root image, its groups and its labels (`include_groups`, `include_labels`). It needs `mode="r+"` (or `"a"`) and an NGFF 0.4 or 0.5 store. Only the entries tied to the updated keys are rewritten: the coordinate transformations (`scales`, `translations`, `time_increment`), the axes units (`units`, `time_increment_unit`), the label and color of the OMERO channels, the `image-label` block (`data_type`) and the custom attributes (`extra_attributes`). Dataset paths, display windows and every other attribute are kept. Every dataset is checked before anything is written, so a refused update changes neither the store nor the manager. A dataset already changed in memory (`subset_dataset`, `build_pyramid`, `reorder_channels`, ...) no longer matches its arrays on disk and is refused: write it with `to_zarr`.
+
 ## Change the pixel size
 
 `resample_dataset` gives a dataset a new pixel size and rescales the data accordingly. Nothing is computed until the dataset is written, and it works with every manager:

@@ -8,7 +8,7 @@ from magicgui.widgets import FileEdit
 from napari import current_viewer
 from napari.layers.utils import layer_utils
 from napari.qt.threading import thread_worker
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton
 
 from zarrsmith.microscope_manager.readers import READERS
@@ -223,6 +223,20 @@ def output_summary(dataset, *, t_range, z_range, y_range, x_range, channels, dro
     # the line zarrsmith convert --dry_run prints
     return output_summary_line(axes, sizes, dataset.data[0].dtype, _scale_for_axes(dataset, spatial),
                                dataset.metadata.get("units") or (), drop_singleton=drop_singleton)
+
+
+def _fit_span(lo, hi, vmax, size=None):
+    """Integer span ``(lo, hi)`` of a ROI side, inside ``[0, vmax]``.
+
+    With ``size`` (the ROI was moved, so it keeps its size), a span reaching past an
+    edge is shifted back inside rather than cut. Without it (drawn or resized), the
+    span is clipped to the image.
+    """
+    lo, hi = sorted((int(np.floor(lo + 0.5)), int(np.floor(hi + 0.5))))
+    if size is not None and 0 <= size <= vmax:
+        lo = max(0, min(lo, vmax - size))
+        return lo, lo + size
+    return max(0, min(lo, vmax)), max(0, min(hi, vmax))
 
 
 def _append_batch_csv(csv_path, row):
@@ -515,34 +529,45 @@ def convert_widget():
 
 
     def roi_to_widget(event=None):
-        if _syncing["roi"]:
+        """Sync the ROI layer to the Y/X ranges once a rectangle is drawn, moved or resized.
+
+        Only one ROI is kept: a newly drawn rectangle replaces the previous one, and the
+        layer then switches to select mode so the next drag moves that rectangle (its
+        size is kept) or resizes it by its handles. Events sent while the mouse is still
+        down (``adding``, ``changing``) are ignored, so a drag is never interrupted.
+        """
+        action = str(getattr(event, "action", "changed") or "changed")
+        if _syncing["roi"] or action in ("adding", "changing", "removing"):
             return
         _syncing["roi"] = True
-    
+
         try:
             if "ROI" not in viewer.layers:
                 return
             layer = viewer.layers["ROI"]
             if layer is None or len(layer.data) == 0:
-                return
+                return  # ROI deleted: the ranges stay as they are
 
-            (y0, x0), (_, _), (y1, x1), (_, _) = layer.data[0]
-
-            y0, y1 = sorted([int(y0), int(y1)])
-            x0, x1 = sorted([int(x0), int(x1)])
-
+            drawn = action == "added"
+            vertices = np.asarray(layer.data[-1], dtype=float)
             dataset = _state["dataset"]
-            b = {
-                "y_max": _axis_size(dataset, "y") - 1,
-                "x_max": _axis_size(dataset, "x") - 1,
-            }
+            y_max = _axis_size(dataset, "y") - 1
+            x_max = _axis_size(dataset, "x") - 1
 
-            y0 = clamp(y0, 0, b["y_max"])
-            y1 = clamp(y1, 0, b["y_max"])
-            x0 = clamp(x0, 0, b["x_max"])
-            x1 = clamp(x1, 0, b["x_max"])
+            # A move keeps the size of the ROI the widget holds; a drawn or resized one is clipped.
+            spans = {}
+            for i, (axis, vmax) in enumerate((("y", y_max), ("x", x_max))):
+                lo, hi = float(vertices[:, i].min()), float(vertices[:, i].max())
+                previous = getattr(make_convert_widget, f"{axis}_range").value
+                old_size = int(previous[1]) - int(previous[0])
+                new_size = int(np.floor(hi + 0.5)) - int(np.floor(lo + 0.5))
+                moved = not drawn and new_size == old_size
+                spans[axis] = _fit_span(lo, hi, vmax, size=old_size if moved else None)
+            (y0, y1), (x0, x1) = spans["y"], spans["x"]
 
-            layer.data = [np.array([[y0, x0], [y0, x1], [y1, x1], [y1, x0]])]
+            rect = np.array([[y0, x0], [y0, x1], [y1, x1], [y1, x0]])
+            if len(layer.data) > 1 or not np.array_equal(np.asarray(layer.data[0]), rect):
+                layer.data = [rect]
 
             make_convert_widget.y_range.value = (y0, y1)
             make_convert_widget.x_range.value = (x0, x1)
@@ -550,6 +575,16 @@ def convert_widget():
             update_3d_box()
         finally:
             _syncing["roi"] = False
+
+        if drawn:
+            # After napari finishes the drawing: drag now moves the ROI just drawn.
+            def _select_roi():
+                if "ROI" in viewer.layers and viewer.layers["ROI"].editable:
+                    roi = viewer.layers["ROI"]
+                    roi.mode = "select"
+                    roi.selected_data = {0} if len(roi.data) else set()
+
+            QTimer.singleShot(0, _select_roi)
 
     def zpoints_to_widget(event=None):
         if _syncing["z"]:
@@ -634,21 +669,6 @@ def convert_widget():
         finally:
             _syncing["z"] = False
         
-    def keep_single_roi(event=None):
-        if _syncing["roi"]:
-            return
-        _syncing["roi"] = True
-
-        try:    
-            if "ROI" not in viewer.layers:
-                return
-            layer = viewer.layers["ROI"]
-            if len(layer.data) > 1:
-                layer.data = [layer.data[-1]]
-
-        finally:
-            _syncing["roi"] = False
-
     def keep_two_zpoints(event=None):
         if _syncing["z"]:
             return
@@ -698,8 +718,8 @@ def convert_widget():
         update_3d_box()
 
         if "ROI" in viewer.layers:
+            # Draw the ROI first; once drawn, the layer switches to select mode to drag it.
             viewer.layers["ROI"].mode = "add_rectangle"
-            viewer.layers["ROI"].events.data.connect(keep_single_roi)
             viewer.layers["ROI"].events.data.connect(roi_to_widget)
             make_convert_widget.y_range.changed.connect(widget_to_roi)
             make_convert_widget.x_range.changed.connect(widget_to_roi)
@@ -1032,11 +1052,18 @@ def convert_widget():
 
     @magicgui(
         call_button="Append to batch CSV",
-        batch_csv_path={"widget_type": "FileEdit", "mode": "w"},
+        # Save dialog: browse to a folder and type a new name (or pick an existing CSV).
+        batch_csv_path={"widget_type": "FileEdit", "mode": "w", "filter": "CSV files (*.csv)", "nullable": True,
+                        "tooltip": "CSV file the conversion is appended to (created if missing)."},
     )
     def make_batch_csv_widget(batch_csv_path: FileEdit = None):
         dataset = _state["dataset"]
         if dataset is None:
+            return
+
+        csv_path = Path(batch_csv_path) if batch_csv_path else None
+        if csv_path is None or csv_path.is_dir():
+            print("ERROR: choose a batch CSV file first (Choose file...). The row is not appended.")
             return
 
         overwrite = bool(make_convert_widget.overwrite.value)
@@ -1049,10 +1076,6 @@ def convert_widget():
         except ValueError as e:
             print(f"ERROR: {e} The row is not appended.")
             return
-
-        csv_path = Path(batch_csv_path) if batch_csv_path else None
-        if csv_path is None:
-            csv_path = Path(make_visualize_widget.input_path.value).parent / "batch.csv"
 
         selected_channel_names = list(make_convert_widget.channels.value) if "c" in _dataset_axes(dataset) else []
         # zarrsmith convert splits the names on spaces: the dataset's names get underscores
@@ -1100,8 +1123,7 @@ def convert_widget():
         csv_path = _append_batch_csv(csv_path, row)
         print(f"Appended batch row to {csv_path}. Run it with:\n  zarrsmith convert --batch \"{csv_path}\"")
 
-    make_batch_csv_widget.batch_csv_path.value = str((Path(make_visualize_widget.input_path.value).parent if make_visualize_widget.input_path.value else Path.cwd()) / "batch.csv")
-    make_batch_csv_widget.enabled = False
+    make_batch_csv_widget.enabled = False  # the CSV field starts empty and is never filled in for the user
 
 
     # -------------------------
@@ -1173,8 +1195,6 @@ def convert_widget():
             make_convert_widget.output_path.value = default_output
             _state["auto_output"] = default_output
         make_convert_widget.overwrite.value = False  # asked for one output, not for the next one
-        if not new_scene:
-            make_batch_csv_widget.batch_csv_path.value = str(default_output.parent / "batch.csv")
         make_batch_csv_widget.enabled = True
 
 

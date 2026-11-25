@@ -150,14 +150,16 @@ def apply_metadata_updates(
     *,
     label: str = "dataset",
     warn_no_channel_axis: bool = True,
-) -> None:
+) -> list[str]:
     """Validate ``updates`` against ``(data, metadata)`` and apply them in place.
 
     Invalid values raise ``ValueError``/``TypeError``. Channel updates that do
     not fit the dataset are skipped with a warning (silently when
     ``warn_no_channel_axis`` is false and the dataset has no channel axis).
     ``updates`` must already be filtered with :func:`known_updates`.
+    Returns the keys that were applied.
     """
+    applied = []
     for key, value in updates.items():
         value, skip = _VALIDATORS[key](
             key, value, data=data, metadata=metadata, label=label
@@ -171,7 +173,9 @@ def apply_metadata_updates(
         if key == "scales":  # given by the user: every voxel size is now known
             metadata.pop(UNRECORDED_SCALE_KEY, None)
         metadata[key] = value
+        applied.append(key)
         logger.info("Updated metadata entry '%s' of %s", key, label)
+    return applied
 
 
 # ---------------------------------------------------------------------------

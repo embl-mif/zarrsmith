@@ -1188,16 +1188,38 @@ class ZarrManager(MicroscopeManager):
         updates: Dict[str, Any],
         include_groups: bool = True,
         include_labels: bool = True,
+        in_place: bool = False,
     ):
         """
         Update metadata for raw, groups, and labels.
 
+        ``updates`` takes the keys of :meth:`MicroscopeManager.update_metadata`.
         Channel-specific metadata is skipped for datasets without a channel axis.
+
+        With ``in_place=False`` (default) only the in-memory metadata changes; it
+        reaches disk with :meth:`to_zarr`. With ``in_place=True`` the updates are
+        also written into the NGFF attributes of this store, which needs
+        ``mode='r+'`` (or ``'a'``) and NGFF 0.4 or 0.5. Only the entries tied to the
+        updated keys are rewritten; dataset paths, OMERO display windows and every
+        other attribute are kept. Every dataset is validated before anything is
+        written, so a refused update leaves the store and the manager unchanged. A
+        dataset changed in memory (by :meth:`subset_dataset`, :meth:`build_pyramid`,
+        :meth:`reorder_channels`...) no longer matches its arrays on disk, so its
+        metadata is not written in place: use :meth:`to_zarr`.
         """
         from ..utils.dataset_ops import apply_metadata_updates, known_updates
+        from ..utils.populate_pyramid import resolve_group
+        from ..utils.update_metadata import check_metadata_writable, write_metadata_updates
 
         updates = known_updates(updates)  # warns once about unknown keys
 
+        if in_place and self.mode not in ("r+", "a", "w"):
+            raise PermissionError(
+                f"Dataset opened in read-only mode ({self.mode!r}). Reopen with mode='r+' to update the metadata in place."
+            )
+
+        # Validate everything first, on copies, so an error leaves nothing half updated.
+        staged = []
         for name, dataset in self._iter_datasets(
             include_raw=True,
             include_groups=include_groups,
@@ -1206,17 +1228,40 @@ class ZarrManager(MicroscopeManager):
             if not dataset.metadata:
                 continue
 
-            apply_metadata_updates(
+            metadata = dict(dataset.metadata)
+            applied = apply_metadata_updates(
                 dataset.data,
-                dataset.metadata,
+                metadata,
                 updates,
                 label=f"dataset {name!r}",
                 warn_no_channel_axis=False,  # e.g. labels have no channel axis
             )
+            group = None
+            if in_place and applied:
+                if dataset.zarr_data is None:
+                    raise ValueError(
+                        f"Dataset {name!r} was changed in memory and no longer matches its arrays on disk, "
+                        "so its metadata cannot be updated in place. Write it with to_zarr instead."
+                    )
+                group = resolve_group(self.root, dataset.path)
+                check_metadata_writable(group, metadata, applied, label=f"Dataset {name!r}")
+            staged.append((dataset, metadata, applied, group))
+
+        for dataset, metadata, applied, group in staged:
+            if group is not None:
+                write_metadata_updates(
+                    group,
+                    metadata,
+                    applied,
+                    label_source={"source": {"image": "../../"}}
+                    if str(dataset.path).startswith("labels/") else None,
+                )
+            dataset.metadata.clear()  # same dict: references to it see the update
+            dataset.metadata.update(metadata)
 
         self._sync_raw_aliases()
 
-        logger.info("Zarr metadata updated.")
+        logger.info("Zarr metadata updated%s.", " in place" if in_place else "")
 
     def to_zarr(
         self,
