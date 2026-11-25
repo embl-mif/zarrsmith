@@ -63,3 +63,16 @@ def metadata():
         "axes": "tczyx",
         "name": "test_image",
     }
+
+@pytest.fixture(autouse=True)
+def _no_blocking_dialogs(monkeypatch):
+    """A Yes/No dialog would wait forever offscreen: fail instead (tests that expect one patch it)."""
+    try:
+        from zarrsmith.napari import _output_check
+    except ImportError:  # napari not installed
+        return
+
+    def ask(title, text):
+        raise AssertionError(f"unexpected dialog: {title}: {text}")
+
+    monkeypatch.setattr(_output_check, "ask_yes_no", ask)

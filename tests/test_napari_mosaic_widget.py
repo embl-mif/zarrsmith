@@ -229,10 +229,14 @@ def test_batch_csv_export_runs_with_the_cli(app, tmp_path, monkeypatch):
     csv = tmp_path / "batch.csv"
     dock.batch_widget.batch_csv_path.value = csv
     dock.batch_widget()
-    dock.batch_widget()                              # appends a second row
+    asked = []
+    from zarrsmith.napari import _output_check
+    monkeypatch.setattr(_output_check, "ask_yes_no", lambda title, text: asked.append(text) or True)
+    dock.batch_widget()                              # same output: asked, appended as _1
 
     table = pd.read_csv(csv, dtype=str).fillna("")
-    assert len(table) == 2
+    assert len(table) == 2 and len(asked) == 1 and "with the same settings" in asked[0]
+    assert Path(table["output"][1]).name == "fused_1.ome.zarr"
     row = table.iloc[0]
     assert row["microscope"] == "luxendo" and row["projection"] == "max"
     assert row["downsample"] == "1 2 2" and row["blend"] == "sigmoid" and row["groups"] == ""
@@ -548,6 +552,31 @@ def test_widget_selects_first_field_and_refuses_several(app, tmp_path):
     dock.batch_widget.batch_csv_path.value = tmp_path / "batch.csv"
     dock.batch_widget()
     assert not (tmp_path / "batch.csv").exists()
+
+
+def test_each_selected_field_gets_its_own_batch_row(app, tmp_path):
+    import pandas as pd
+
+    dock = mw.mosaic_widget()
+    m = TwoFieldMosaic(".")
+    dock.state["mosaic"] = m
+    dock.populate(m, tmp_path)
+    fw = dock.fuse_widget
+    assert dock.batch_widget.batch_csv_path.value is None  # never filled in on load
+    fw.fields.value = ["field0", "field1"]
+    csv = tmp_path / "batch.csv"
+    dock.batch_widget.batch_csv_path.value = csv
+    dock.append_each_field()
+    table = pd.read_csv(csv, dtype=str).fillna("")
+    assert table["fields"].tolist() == ["field0", "field1"]
+    assert [Path(o).name.endswith(f"_{f}.ome.zarr") for o, f in zip(table["output"], table["fields"])] == [True] * 2
+    assert list(fw.fields.value) == ["field0", "field1"]  # the selection is given back
+
+    # a typed output: one per field, named after it
+    fw.output_path.value = tmp_path / "mine.ome.zarr"
+    dock.append_each_field()
+    outputs = [Path(o).name for o in pd.read_csv(csv, dtype=str)["output"]]
+    assert outputs[2:] == ["mine_field0.ome.zarr", "mine_field1.ome.zarr"]
 
 
 def test_batch_row_fields():

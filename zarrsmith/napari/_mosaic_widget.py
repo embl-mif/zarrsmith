@@ -10,16 +10,16 @@ import numpy as np
 from magicgui import magicgui
 from napari import current_viewer
 from napari.qt.threading import thread_worker
-from qtpy.QtWidgets import QLabel, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
 from zarrsmith import mosaic_manager as mos
 from zarrsmith.mosaic_manager.fusion import ALL_TIMEPOINTS
 from zarrsmith.mosaic_manager.tile import series_keys
-from ._batch_csv import append_batch_csv
+from ._batch_csv import append_batch_csv, same_path, split_zarr_name
 from ._layout import (compact_row, compose_dock, enable_drag_and_drop, make_button_holder, make_collapsible_toggle,
                       make_log_pane, make_section, make_title)
 from ._log import EmittingStream, make_log_appender
-from ._output_check import output_allowed
+from ._output_check import confirm_batch_output, output_allowed
 from ._zarr_options import (  # noqa: F401  (re-exported: part of this module's helpers)
     DEFAULT_CHUNK_MB, DEFAULT_SHARD_MB, FUSION_SHARD_MB, NGFF_FORMATS, PYRAMID_METHODS, auto_channel_names, auto_chunks,
     block_count, channel_error, channel_option_problems, channel_warning_text, chunk_shard_layout,
@@ -654,6 +654,8 @@ def mosaic_widget():
         show_widget.enabled = has_mosaic and not busy
         fuse_widget.enabled = has_mosaic and not busy
         batch_widget.enabled = has_mosaic and not busy
+        if "fields_holder" in ui:
+            ui["fields_holder"].setEnabled(has_mosaic and not busy)
         ui["fuse_holder"].setEnabled(has_mosaic and not busy)
 
     # ----- tile map: click a rectangle to pick or unpick that stack position -----
@@ -812,7 +814,6 @@ def mosaic_widget():
             print(f"Tile map: {len(tile_map.data)} stack positions, all picked. In the 2D view, click a tile "
                   "to pick or unpick it for showing and fusing; Shift + drag picks, Ctrl + drag unpicks "
                   "every tile touched by a box.")
-        batch_widget.batch_csv_path.value = input_path.parent / "mosaic_batch.csv"
         _update_output(force=True)
         _update_plan()
 
@@ -1346,10 +1347,21 @@ def mosaic_widget():
     # ----- 4. batch CSV export (run later with zarrsmith fuse --batch) -----
     @magicgui(
         call_button="Append to batch CSV",
+        # Save dialog: browse to a folder and type a new name (or pick an existing CSV).
         batch_csv_path={"widget_type": "FileEdit", "mode": "w", "label": "Batch CSV",
-                        "filter": "*.csv"},
+                        "filter": "CSV files (*.csv)", "nullable": True,
+                        "tooltip": "CSV file the fusion is appended to (created if missing)."},
     )
-    def batch_widget(batch_csv_path: Path = Path("mosaic_batch.csv")):
+    def batch_widget(batch_csv_path: Optional[Path] = None):
+        _append_row(batch_csv_path)
+
+    def _append_row(batch_csv_path, output=None) -> bool:
+        """Append the fusion set in the widget to the batch CSV (to ``output`` if given)."""
+        if not batch_csv_path or Path(batch_csv_path).is_dir():
+            _capture()
+            print("ERROR: choose a batch CSV file first (Choose file...). The row is not appended.")
+            _release()
+            return False
         mosaic = state["mosaic"]
         values = {name: getattr(fuse_widget, name).value for name in
                   ("channels", "groups", "cameras", "fields", "projection", "blend", "ds_z", "ds_y", "ds_x",
@@ -1383,24 +1395,56 @@ def mosaic_widget():
             values["layout"] = layout
         skip_ids = _skip_ids()
         row = batch_row(input_path=state["input_path"], microscope=state["microscope"],
-                        output=fuse_widget.output_path.value, values=values,
+                        output=output or fuse_widget.output_path.value, values=values,
                         all_groups=group_labels(mosaic), skip_ids=skip_ids, picked=_picked(),
                         all_stacks={stack_id(mosaic, t) for t in mosaic.tiles}, all_fields=mosaic.fields,
                         flatfield=state.get("flatfield"), all_timepoints=mosaic.timepoints,
                         all_cameras=camera_labels(mosaic))
         _capture()  # print into this widget's log, not wherever sys.stdout points
         try:
+            # An output the CSV already writes to: ask, and add it as _1, _2... on Yes.
+            if not confirm_batch_output(batch_csv_path, row):
+                return False
             if not output_allowed(row["output"], overwrite=values["overwrite"], sources=[state["input_path"]]):
-                return
+                return False
             path = append_batch_csv(batch_csv_path, row, MOSAIC_BATCH_COLUMNS)
             only = f", {len(row['tiles'].split())} picked stack position(s)" if row["tiles"] else ""
             blank = f", {len(skip_ids)} tile id(s) left blank" if skip_ids else ""
             print(f"Appended {Path(row['output']).name} to {path}{only}{blank}. Run it with:\n"
                   f"  zarrsmith fuse --batch \"{path}\"")
+            return True
         except OSError as e:
             print(f"Could not write the batch CSV: {e}")
+            return False
         finally:
             _release()
+
+    def _append_each_field(*_):
+        """One batch row per selected field (fields are fused one at a time), each with its
+        own output: the automatic name of that field, or the typed path with ``_<field>``."""
+        chosen = list(fuse_widget.fields.value)
+        if state["mosaic"] is None or not chosen:
+            _capture()
+            print("ERROR: select the fields to append under Fields.")
+            _release()
+            return
+        csv = batch_widget.batch_csv_path.value
+        typed = fuse_widget.output_path.value
+        own_path = state["auto_output"] is None or not same_path(typed, state["auto_output"])
+        appended = 0
+        try:
+            for field in chosen:
+                fuse_widget.fields.value = (field,)  # the plan and the automatic name follow
+                output = None
+                if own_path:
+                    parent, stem, suffix = split_zarr_name(typed)
+                    output = parent / f"{stem}_{field}{suffix or '.zarr'}"
+                appended += bool(_append_row(csv, output=output))
+        finally:
+            fuse_widget.fields.value = tuple(chosen)
+        _capture()
+        print(f"Appended {appended} of {len(chosen)} field(s) to the batch CSV.")
+        _release()
     for name in ("projection", "ds_z", "ds_y", "ds_x", "fields"):
         getattr(fuse_widget, name).changed.connect(_update_output)
 
@@ -1465,7 +1509,12 @@ def mosaic_widget():
     layout.addWidget(make_section(make_title("Fuse to OME-Zarr:"), fuse_widget.native, plan_label,
                                   channel_warning, ui["fuse_holder"]))
     batch_widget.native.layout().setContentsMargins(0, 0, 0, 0)
-    layout.addWidget(make_section(make_title("Batch CSV export:"), batch_widget.native))
+    fields_button = QPushButton("Append each selected field")
+    fields_button.setToolTip("One row per field selected under Fields, each with its own output, "
+                             "instead of clicking Append once per field.")
+    fields_button.clicked.connect(_append_each_field)
+    ui["fields_holder"] = make_button_holder(fields_button)
+    layout.addWidget(make_section(make_title("Batch CSV export:"), batch_widget.native, ui["fields_holder"]))
     layout.addStretch(1)
 
     _busy(False)
@@ -1473,6 +1522,7 @@ def mosaic_widget():
     # exposed for tests
     dock.load_widget, dock.show_widget, dock.fuse_widget = load_widget, show_widget, fuse_widget
     dock.batch_widget = batch_widget
+    dock.append_each_field = _append_each_field
     dock.plan_label, dock.state, dock.populate = plan_label, state, _populate
     dock.advanced_button, dock.advanced_rows = advanced_button, advanced_rows
     dock.channel_warning = channel_warning

@@ -18,6 +18,7 @@ from qtpy.QtWidgets import QApplication
 
 import zarrsmith.microscope_manager as mm
 import zarrsmith.napari._convert_widget as convert_module
+from zarrsmith.napari import _output_check
 from zarrsmith.napari._convert_widget import _fit_span
 
 
@@ -133,7 +134,7 @@ def test_append_asks_before_reusing_an_output(loaded, tmp_path, monkeypatch):
         questions.append(text)
         return answer["value"]
 
-    monkeypatch.setattr(convert_module, "_ask_yes_no", ask)
+    monkeypatch.setattr(_output_check, "ask_yes_no", ask)
     csv = tmp_path / "batch.csv"
     dock.batch_csv_widget.batch_csv_path.value = csv
     _draw(viewer.layers["ROI"], _rect(10, 20, 30, 50))
