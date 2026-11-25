@@ -542,10 +542,13 @@ def test_widget_selects_first_field_and_refuses_several(app, tmp_path):
     fw.fields.value = ["field1"]
     assert "x 16 x 16 px" in dock.plan_label.text()  # the output fits field1
     assert Path(fw.output_path.value).name.endswith("_field1.ome.zarr")
+    assert dock.plan_warning.isHidden()
 
-    # several fields: shown as an error, neither fused nor appended to the batch CSV
+    # several fields: an error in the warning color, neither fused nor appended to the batch CSV
     fw.fields.value = ["field0", "field1"]
-    assert "2 separate fields (field0, field1), cannot be fused" in dock.plan_label.text()
+    assert "2 separate fields (field0, field1) cannot be fused" in dock.plan_warning.text()
+    assert not dock.plan_warning.isHidden() and "#e8a33d" in dock.plan_warning.styleSheet()
+    assert "ERROR" not in dock.plan_label.text() and "x 16 x" in dock.plan_label.text()  # the size stays grey
     fw.output_path.value = tmp_path / "both.ome.zarr"
     fw()
     assert not (tmp_path / "both.ome.zarr").exists()

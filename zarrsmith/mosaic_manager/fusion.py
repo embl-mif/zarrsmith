@@ -1050,10 +1050,11 @@ class FusionPlan:
         """Size of level 0 in bytes."""
         return math.prod(self.shape) * self.dtype.itemsize
 
-    def summary(self) -> str:
+    def summary(self, with_error: bool = True) -> str:
         """One line such as ``2 ch x 260 x 1100 x 1500 px (czyx), 1.71 GB, voxel 12 x 11.7 x 11.7 micrometer`` (MB below 0.1 GB);
         ``5 t x 2 ch x ...`` for several timepoints, followed by the reference timepoint
-        or by ``own positions per timepoint``."""
+        or by ``own positions per timepoint``. ``with_error=False`` leaves out the
+        ``ERROR`` of tiles from separate fields (see :attr:`error`), for a caller that shows it apart."""
         dims = " x ".join(str(v) for v in self.shape[-len(self.scale):])
         vox = " x ".join(f"{v:.3g}" for v in self.scale)
         size = f"{self.nbytes / 1e9:.2f} GB" if self.nbytes >= 1e8 else f"{self.nbytes / 1e6:.1f} MB"
@@ -1065,7 +1066,7 @@ class FusionPlan:
             reference = (", own positions per timepoint" if self.per_timepoint
                          else f", reference timepoint {self.reference_timepoint}")
         fields = f"; ERROR: {len(self.fields)} separate fields ({', '.join(self.fields)}), cannot be fused" \
-            if len(self.fields) > 1 else ""
+            if with_error and len(self.fields) > 1 else ""
         cameras = ""
         if self.blend_by == "camera":
             views = sorted(self.cameras, key=lambda c: self.group_order.get(c, 0))

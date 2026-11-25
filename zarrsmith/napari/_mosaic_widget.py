@@ -1121,6 +1121,10 @@ def mosaic_widget():
     plan_label = QLabel("Load a mosaic to see the output size.")
     plan_label.setWordWrap(True)
     plan_label.setStyleSheet("QLabel { color: #aaaaaa; }")
+    plan_warning = QLabel()  # why the plan cannot be fused, in the color of channel_warning
+    plan_warning.setWordWrap(True)
+    plan_warning.setStyleSheet("QLabel { color: #e8a33d; }")
+    plan_warning.setVisible(False)
 
     def _current_plan():
         mosaic = state["mosaic"]
@@ -1291,13 +1295,17 @@ def mosaic_widget():
             plan = _current_plan()
         except (ValueError, KeyError, OSError) as e:
             plan_label.setText(f"Output: {e}")
+            plan_warning.setVisible(False)
             return
+        # Tiles from separate fields: shown in the warning color, like badly formatted channel options.
+        plan_warning.setText(f"ERROR: {plan.error}" if plan is not None and plan.error else "")
+        plan_warning.setVisible(bool(plan_warning.text()))
         if plan is not None:
             note = ""
             if _register_shown() and fuse_widget.register_cameras.value and len(fuse_widget.cameras.value) > 1:
                 note = (f"; camera views registered on the images first ({fuse_widget.register_model.value}, "
                         "about a minute per stack)")
-            text = f"Output: {plan.summary()}{note}"
+            text = f"Output: {plan.summary(with_error=False)}{note}"
             if not plan.error:
                 try:
                     layout = _zarr_layout(plan)
@@ -1506,7 +1514,7 @@ def mosaic_widget():
     layout.setContentsMargins(4, 4, 4, 4)
     layout.addWidget(make_section(make_title("Mosaic loading:"), load_widget.native))
     layout.addWidget(make_section(make_title("Show tiles:"), show_widget.native))
-    layout.addWidget(make_section(make_title("Fuse to OME-Zarr:"), fuse_widget.native, plan_label,
+    layout.addWidget(make_section(make_title("Fuse to OME-Zarr:"), fuse_widget.native, plan_label, plan_warning,
                                   channel_warning, ui["fuse_holder"]))
     batch_widget.native.layout().setContentsMargins(0, 0, 0, 0)
     fields_button = QPushButton("Append each selected field")
@@ -1526,4 +1534,5 @@ def mosaic_widget():
     dock.plan_label, dock.state, dock.populate = plan_label, state, _populate
     dock.advanced_button, dock.advanced_rows = advanced_button, advanced_rows
     dock.channel_warning = channel_warning
+    dock.plan_warning = plan_warning
     return dock
