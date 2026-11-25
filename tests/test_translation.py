@@ -136,6 +136,19 @@ def test_subset_moves_the_origin(tmp_path):
     assert mm.ZarrManager(str(path)).metadata["translations"][0] == {"z": 14.0, "y": 1205.5, "x": -338.0}
 
 
+def test_crop_without_position_records_where_it_was_cut(tmp_path):
+    image = _image(translations=None)
+    image.subset_dataset(T=[0], Z=slice(2, 6), Y=slice(10, 20), rebuild_pyramid=False)
+    assert image.metadata["translations"] == [{"z": 4.0, "y": 5.0, "x": 0.0}]
+    path = tmp_path / "crop.ome.zarr"
+    image.to_zarr(str(path))
+    assert mm.ZarrManager(str(path)).metadata["translations"][0] == {"z": 4.0, "y": 5.0, "x": 0.0}
+
+    whole = _image(translations=None)
+    whole.subset_dataset(T=[1], Z=slice(0, 4), rebuild_pyramid=False)  # starts at voxel 0: nothing moves
+    assert whole.metadata.get("translations") is None
+
+
 def test_subset_selecting_nothing_is_refused():
     image = _image()  # 2 timepoints
     with pytest.raises(ValueError, match=r"selects nothing on axis 't'.*2 element"):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -90,6 +91,74 @@ def test_a_drag_in_progress_is_left_alone(loaded):
     roi.add(_rect(1, 2, 3, 4), shape_type="rectangle", gui=True)  # press of a new drawing
     roi.events.data(value=roi.data, action=ActionType.CHANGING, data_indices=(0,), vertex_indices=((),))
     assert len(roi.data) == 2 and _ranges(dock) == before
+
+
+def test_output_is_empty_until_a_dataset_is_loaded(app, monkeypatch):
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    viewer = ViewerModel()
+    monkeypatch.setattr(convert_module, "current_viewer", lambda: viewer)
+    dock = convert_module.convert_widget()
+    try:
+        assert dock.convert_widget.output_path.value is None
+    finally:
+        dock.close()
+
+
+def test_output_is_named_after_the_dataset_then_the_roi(loaded, tmp_path):
+    viewer, dock, _ = loaded
+    w = dock.convert_widget
+    assert w.output_path.value == tmp_path.parent / f"{tmp_path.name}.zarr"  # full dataset: no region
+
+    _draw(viewer.layers["ROI"], _rect(10, 20, 30, 50))
+    assert w.output_path.value.name == f"{tmp_path.name}_y10-30_x20-50.zarr"
+    w.z_range.value = (1, 3)
+    w.channels.value = (w.channels.choices[1],)
+    assert w.output_path.value.name == f"{tmp_path.name}_c1_z1-3_y10-30_x20-50.zarr"
+
+    # A path typed by the user is kept when the ROI moves.
+    w.output_path.value = tmp_path / "mine.zarr"
+    viewer.layers["ROI"].data = [_rect(12, 22, 32, 52)]
+    assert w.output_path.value == tmp_path / "mine.zarr"
+
+
+def test_append_asks_before_reusing_an_output(loaded, tmp_path, monkeypatch):
+    import pandas as pd
+
+    viewer, dock, _ = loaded
+    questions = []
+    answer = {"value": True}
+
+    def ask(title, text):
+        questions.append(text)
+        return answer["value"]
+
+    monkeypatch.setattr(convert_module, "_ask_yes_no", ask)
+    csv = tmp_path / "batch.csv"
+    dock.batch_csv_widget.batch_csv_path.value = csv
+    _draw(viewer.layers["ROI"], _rect(10, 20, 30, 50))
+    name = dock.convert_widget.output_path.value
+
+    dock.batch_csv_widget()
+    assert questions == []  # a new output: no question
+
+    dock.convert_widget.n_levels.value = 3
+    answer["value"] = False
+    dock.batch_csv_widget()
+    assert "row 1" in questions[-1] and "num_levels" in questions[-1] and "_1.zarr" in questions[-1]
+    assert len(pd.read_csv(csv)) == 1  # declined
+
+    answer["value"] = True
+    dock.batch_csv_widget()
+    dock.batch_csv_widget()
+    outputs = pd.read_csv(csv, dtype=str)["output"].map(lambda p: Path(p).name).tolist()
+    assert outputs == [name.name, name.name.replace(".zarr", "_1.zarr"), name.name.replace(".zarr", "_2.zarr")]
+
+    # Dragging the ROI elsewhere gives a new output: added without a question.
+    asked = len(questions)
+    viewer.layers["ROI"].data = [_rect(30, 20, 50, 50)]
+    dock.batch_csv_widget()
+    assert len(questions) == asked and len(pd.read_csv(csv)) == 4
 
 
 def test_batch_csv_field_starts_empty_and_is_not_filled_on_load(loaded, tmp_path, capsys):

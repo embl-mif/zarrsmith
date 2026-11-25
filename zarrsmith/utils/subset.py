@@ -96,18 +96,21 @@ def subset_metadata(
             new_scales[scale_index] *= spacing_by_axis.get(ax, 1)
     new_metadata["scales"] = [tuple(new_scales)]
 
-    # The first kept voxel becomes voxel 0: move the origin there.
+    # The first kept voxel becomes voxel 0: move the origin there. Without a recorded
+    # position the source sits at the origin, so a crop records where it was cut from.
     translations = normalize_translations(metadata.get("translations"), axes)
+    offsets = {}
+    for scale_index, ax in enumerate(spatial_axes):
+        selection = axis_map[ax]
+        if selection is None:
+            continue
+        indices = index_list_from_selection(selection, shape[axes.index(ax)])
+        if indices and indices[0]:
+            offsets[ax] = indices[0] * old_scales[scale_index]
     if translations is not None:
-        offsets = {}
-        for scale_index, ax in enumerate(spatial_axes):
-            selection = axis_map[ax]
-            if selection is None:
-                continue
-            indices = index_list_from_selection(selection, shape[axes.index(ax)])
-            if indices:
-                offsets[ax] = indices[0] * old_scales[scale_index]
         new_metadata["translations"] = [shifted(translations[0], offsets)]
+    elif offsets:
+        new_metadata["translations"] = [shifted({ax: 0.0 for ax in spatial_axes}, offsets)]
 
     if C is not None and "c" in axes:
         c_axis = axes.index("c")

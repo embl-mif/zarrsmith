@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from ._dataset_helpers import dataset_axes as _dataset_axes
 from ._dataset_helpers import scale_for_axes as _scale_for_axes
 from ._dataset_helpers import points_projection_kwargs
 from ._dataset_helpers import units_kwargs as _units_kwargs
+from zarrsmith.utils.output_path import has_content, has_zarr_name
 from ._output_check import output_allowed
 from ._zarr_options import (DEFAULT_CHUNK_MB, DEFAULT_SHARD_MB, NGFF_FORMATS, PYRAMID_METHODS, auto_channel_names,
                             channel_error, channel_option_problems, channel_warning_text, chunk_shard_layout,
@@ -103,6 +105,86 @@ def _scene_tag(dataset, scene_index):
     if len(scenes) < 2:
         return ""
     return "_" + re.sub(r"[^A-Za-z0-9._-]+", "_", str(scenes[scene_index]))
+
+
+def _span_tag(indices):
+    """``0-4`` for consecutive indices, else ``0_2_5``."""
+    indices = [int(i) for i in indices]
+    if len(indices) > 1 and indices == list(range(indices[0], indices[-1] + 1)):
+        return f"{indices[0]}-{indices[-1]}"
+    return "_".join(str(i) for i in indices)
+
+
+def _region_tag(dataset, *, t_range, z_range, y_range, x_range, channels) -> str:
+    """``_z10-50_y100-611_x200-711`` for the axes the conversion crops, ``""`` for the full dataset.
+
+    Only cropped axes are named (inclusive voxel indices, as in the widget), and the
+    channels only when a subset is selected, in the dataset's axis order.
+    """
+    ranges = {"t": t_range, "z": z_range, "y": y_range, "x": x_range}
+    parts = []
+    for ax in _dataset_axes(dataset):
+        if ax == "c":
+            names = list(dataset.metadata.get("channel_names") or [])
+            selected = [names.index(ch) for ch in channels if ch in names]
+            if selected and sorted(selected) != list(range(len(names))):
+                parts.append(f"c{_span_tag(selected)}")
+            continue
+        start, end = sorted(_present_range(dataset, ax, ranges[ax]))
+        if (start, end) != (0, _axis_size(dataset, ax) - 1):
+            parts.append(f"{ax}{start}-{end}")
+    return "".join(f"_{p}" for p in parts)
+
+
+def _split_zarr_name(path):
+    """``(parent, stem, suffix)`` of a store path, the suffix being ``.ome.zarr`` or ``.zarr``."""
+    path = Path(path)
+    name = path.name
+    for suffix in (".ome.zarr", ".zarr"):
+        if name.lower().endswith(suffix):
+            return path.parent, name[: -len(suffix)], name[-len(suffix):]
+    return path.parent, name, ""
+
+
+def _same_path(a, b) -> bool:
+    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+
+
+def _numbered_output(output, taken) -> Path:
+    """``<name>_1.zarr``, ``<name>_2.zarr``...: the first one not in ``taken`` and not on disk."""
+    parent, stem, suffix = _split_zarr_name(output)
+    n = 1
+    while True:
+        candidate = parent / f"{stem}_{n}{suffix or '.zarr'}"
+        if not candidate.exists() and not any(_same_path(candidate, t) for t in taken):
+            return candidate
+        n += 1
+
+
+def _batch_rows(csv_path) -> list:
+    """The rows of the batch CSV (as written by :func:`_append_batch_csv`), ``[]`` if it has none."""
+    import pandas as pd
+
+    csv_path = Path(csv_path)
+    if csv_path.suffix.lower() != ".csv":
+        csv_path = csv_path.with_suffix(".csv")
+    if not csv_path.is_file() or csv_path.stat().st_size == 0:
+        return []
+    return pd.read_csv(csv_path, dtype=str).fillna("").to_dict("records")
+
+
+def _row_differences(old, new) -> list:
+    """``"num_levels 3 -> 5"`` for every field but the output that differs between two batch rows."""
+    return [f"{key} {old.get(key, '') or '(empty)'} -> {new.get(key, '') or '(empty)'}"
+            for key in new if key != "output" and str(old.get(key, "")) != str(new.get(key, ""))]
+
+
+def _ask_yes_no(title, text) -> bool:
+    """Ask the user a yes/no question in a dialog (patched in tests)."""
+    from qtpy.QtWidgets import QMessageBox
+
+    answer = QMessageBox.question(None, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+    return answer == QMessageBox.Yes
 
 
 def _set_range_widget(widget, size, enabled=True):
@@ -793,7 +875,8 @@ def convert_widget():
             "allow_multiple": True,
         },
 
-        output_path={"widget_type": "FileEdit", "mode": "d"},
+        # Empty until a dataset is loaded, then named after it and the cropped region.
+        output_path={"widget_type": "FileEdit", "mode": "d", "nullable": True},
         overwrite={"label": "Overwrite output", "widget_type": "CheckBox", "value": False},
     )
     def make_convert_widget(
@@ -1018,6 +1101,32 @@ def convert_widget():
             text += f"\nZarr: cannot estimate ({e})"
         output_label.setText(f"Output: {text}")
 
+    def _follow_output_name(*_, force=False):
+        """Name the output after the dataset and the region it crops (nothing for the full
+        dataset): ``scan_TR1.zarr``, then ``scan_TR1_y100-611_x200-711.zarr`` once a ROI is
+        drawn. It follows the ROI and the ranges until the user types a path of their own;
+        ``force`` names it again anyway (a new dataset was loaded)."""
+        dataset, base = _state["dataset"], _state.get("output_base")
+        if dataset is None or base is None:
+            return
+        current = make_convert_widget.output_path.value
+        auto = _state["auto_output"]
+        if not force and current is not None and auto is not None and not _same_path(current, auto):
+            return  # the user's own path
+        parent, stem, suffix, is_zarr_input = base
+        try:
+            region = _region_tag(dataset, **_ranges())
+        except Exception as e:  # the name must never break the widget
+            print(f"Cannot name the output after the region: {e}")
+            region = ""
+        # The whole of a zarr input would otherwise be the input itself.
+        new = parent / f"{stem}{region}{'_1' if is_zarr_input and not region else ''}{suffix}"
+        _state["auto_output"] = new
+        make_convert_widget.output_path.value = new
+
+    for name in ("t_range", "z_range", "y_range", "x_range", "channels"):
+        getattr(make_convert_widget, name).changed.connect(_follow_output_name)
+
     for name in ("t_range", "z_range", "y_range", "x_range", "channels", "drop_singleton", "chunk_auto",
                  "chunk_mb", "chunk_z", "chunk_y", "chunk_x", "zarr_format", "shards", "shard_target_mb",
                  "shard_exclude_axes", "downscale_z", "downscale_y", "downscale_x"):
@@ -1067,8 +1176,10 @@ def convert_widget():
             return
 
         overwrite = bool(make_convert_widget.overwrite.value)
-        if not output_allowed(make_convert_widget.output_path.value, overwrite=overwrite,
-                              sources=[make_visualize_widget.input_path.value]):
+        output = make_convert_widget.output_path.value
+        sources = [make_visualize_widget.input_path.value]
+        if not output or not has_zarr_name(output):
+            output_allowed(output, overwrite=overwrite, sources=sources)  # warns why
             return
 
         try:
@@ -1098,7 +1209,7 @@ def convert_widget():
         row = {
             "input": str(Path(make_visualize_widget.input_path.value).resolve()),
             "microscope": str(make_visualize_widget.file_format.value),
-            "output": str(Path(make_convert_widget.output_path.value)),
+            "output": str(Path(output)),
             "chunk_size": " ".join(str(v) for v in chunk_size),
             "max_size(MB)": "",
             "scene_index": str(make_visualize_widget.scene_index.value),
@@ -1120,6 +1231,31 @@ def convert_widget():
             "num_workers": "" if int(make_convert_widget.num_workers.value) <= 0 else str(int(make_convert_widget.num_workers.value)),
             "overwrite": str(overwrite).lower(),
         }
+
+        # An output the CSV already writes to (or one on disk, without Overwrite): ask
+        # whether to add the row anyway, under the next free name (_1, _2...).
+        rows = _batch_rows(csv_path)
+        same = [(i + 1, r) for i, r in enumerate(rows) if r.get("output") and _same_path(r["output"], output)]
+        on_disk = has_content(output) and not overwrite
+        if same or on_disk:
+            numbered = _numbered_output(output, [r["output"] for r in rows if r.get("output")])
+            if same:
+                number, previous = same[-1]
+                differences = _row_differences(previous, row)
+                why = (f"{Path(output).name} is already the output of row {number} of {Path(csv_path).name}, "
+                       + ("with the same settings." if not differences
+                          else "with other settings:\n  " + "\n  ".join(differences)))
+            else:
+                why = f"{output} already exists on disk."
+            question = f"{why}\n\nAdd this row anyway? Its output will be {numbered.name}."
+            if not _ask_yes_no("Output already used", question):
+                print(f"Not appended: {why}")
+                return
+            output = numbered
+            row["output"] = str(output)
+
+        if not output_allowed(output, overwrite=overwrite, sources=sources):
+            return
         csv_path = _append_batch_csv(csv_path, row)
         print(f"Appended batch row to {csv_path}. Run it with:\n  zarrsmith convert --batch \"{csv_path}\"")
 
@@ -1178,22 +1314,22 @@ def convert_widget():
 
         _state["dataset"] = dataset
 
-        suffix = ""
-        if path.suffix == ".zarr":
-            suffix = "_1"
-
-        if path.is_file() or path.suffix==".zarr":
-            name = path.stem          # removes extension
+        is_zarr_input = path.name.lower().endswith(".zarr")
+        if is_zarr_input:
+            _, name, out_suffix = _split_zarr_name(path)  # scan.ome.zarr -> scan, .ome.zarr
         else:
-            name = path.name          # directory name as-is
+            name = path.stem if path.is_file() else path.name  # a directory name as-is
+            out_suffix = ".zarr"
 
         tag = _scene_tag(dataset, make_visualize_widget.scene_index.value)
-        default_output = path.parent / f"{name}{tag}{suffix}.zarr"
-        # Follow the scene until the user types a path of their own.
-        follow_output = not new_scene or Path(make_convert_widget.output_path.value) == _state["auto_output"]
+        # Follow the scene and the ROI until the user types a path of their own.
+        current, auto = make_convert_widget.output_path.value, _state["auto_output"]
+        follow_output = not new_scene or current is None or (auto is not None and _same_path(current, auto))
         if follow_output:
-            make_convert_widget.output_path.value = default_output
-            _state["auto_output"] = default_output
+            _state["auto_output"] = None  # the previous name is not the user's
+        _state["output_base"] = (path.parent, f"{name}{tag}", out_suffix, is_zarr_input)
+        if follow_output:
+            _follow_output_name(force=True)
         make_convert_widget.overwrite.value = False  # asked for one output, not for the next one
         make_batch_csv_widget.enabled = True
 
@@ -1240,7 +1376,7 @@ def convert_widget():
         _check_channel_options()
 
         if follow_output:
-            make_convert_widget.output_path.value = default_output
+            _follow_output_name(force=True)  # the full dataset: ranges and channels were just reset
         _update_output_summary()
 
         viewer.layers.clear()
