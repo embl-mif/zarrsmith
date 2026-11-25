@@ -118,5 +118,8 @@ def subset_metadata(
             new_metadata["channel_names"] = _subset_list(metadata.get("channel_names"), C, shape[c_axis])
         if "channel_colors" in metadata:
             new_metadata["channel_colors"] = _subset_list(metadata.get("channel_colors"), C, shape[c_axis])
+        windows = metadata.get("channel_windows")
+        if windows is not None and len(windows) == shape[c_axis]:
+            new_metadata["channel_windows"] = _subset_list(windows, C, shape[c_axis])
 
     return new_metadata

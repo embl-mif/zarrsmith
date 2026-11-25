@@ -736,6 +736,10 @@ def convert_widget():
 
         if make_visualize_widget.file_format.value in ["zarr"]:
             viewer.open(make_visualize_widget.input_path.value, plugin='napari-ome-zarr')
+            # napari-ome-zarr opens at the stored display window and limits the slider to it
+            from zarrsmith.utils.display_window import widen_contrast_ranges
+
+            widen_contrast_ranges(viewer.layers)
         else:
             dataset.visualize(viewer=viewer)
 

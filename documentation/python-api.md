@@ -205,6 +205,12 @@ NGFF 0.6 stores can be read (axes from `coordinateSystems`, `scale`/`translation
 
 `metadata["extra_attributes"]` holds the group attributes that are not NGFF metadata, such as a pipeline's `t_range`. They are read from a store and written back next to `multiscales` on zarr v2, and next to (not inside) `ome` on zarr v3. Both can be changed with `update_metadata`.
 
+## Display window
+
+Viewers open each channel of an OME-Zarr with its OMERO display window (`window` `start`/`end`) as the contrast. Every write of intensity data (`to_zarr`, `zarrsmith convert`, the napari converter) sets it to the 0.5th-99.9th percentile of the channel's non-zero values, so images do not open nearly black over the whole range of their data type; `min`/`max` keep that range. The window is estimated after writing, from the coarsest level of the output: whole chunks from the centre of the image, about 4 million voxels per channel at up to 3 timepoints, so the cost does not grow with the image, even without a pyramid. A fusion sets the window from the fused values instead. `display_window=False` keeps the whole range.
+
+`ZarrManager` reads the windows into `metadata["channel_windows"]` (one `(start, end)` per channel, `None` for a channel left at the whole range), keeps them through channel subsets and reordering, and writes them again on `to_zarr`. `visualize()` opens the channels at their window, with the contrast slider over the whole range of the data type so it can still be widened (napari-ome-zarr limits the slider to the window). Set them with `update_metadata({"channel_windows": [...]})`.
+
 ## Update the metadata of a store in place
 
 `update_metadata` changes the in-memory metadata, which reaches disk with `to_zarr`. On a `ZarrManager`, `in_place=True` also writes the updates into the store's NGFF attributes, without copying any data:
@@ -214,7 +220,7 @@ z = mm.ZarrManager("image.ome.zarr", mode="r+")
 z.update_metadata({"channel_names": ["GFP", "RFP"], "scales": [(2.0, 0.5, 0.5), (4.0, 1.0, 1.0)]}, in_place=True)
 ```
 
-It takes the same keys and applies them to the root image, its groups and its labels (`include_groups`, `include_labels`). It needs `mode="r+"` (or `"a"`) and an NGFF 0.4 or 0.5 store. Only the entries tied to the updated keys are rewritten: the coordinate transformations (`scales`, `translations`, `time_increment`), the axes units (`units`, `time_increment_unit`), the label and color of the OMERO channels, the `image-label` block (`data_type`) and the custom attributes (`extra_attributes`). Dataset paths, display windows and every other attribute are kept. Every dataset is checked before anything is written, so a refused update changes neither the store nor the manager. A dataset already changed in memory (`subset_dataset`, `build_pyramid`, `reorder_channels`, ...) no longer matches its arrays on disk and is refused: write it with `to_zarr`.
+It takes the same keys and applies them to the root image, its groups and its labels (`include_groups`, `include_labels`). `channel_windows` sets the display window (contrast) of each channel, e.g. `{"channel_windows": [(110, 1170), None]}`: `None` estimates that channel's window from the stored data (`None` alone: every channel), and label images are skipped. It needs `mode="r+"` (or `"a"`) and an NGFF 0.4 or 0.5 store. Only the entries tied to the updated keys are rewritten: the coordinate transformations (`scales`, `translations`, `time_increment`), the axes units (`units`, `time_increment_unit`), the label, color and display window of the OMERO channels, the `image-label` block (`data_type`) and the custom attributes (`extra_attributes`). Dataset paths, display windows and every other attribute are kept. Every dataset is checked before anything is written, so a refused update changes neither the store nor the manager. A dataset already changed in memory (`subset_dataset`, `build_pyramid`, `reorder_channels`, ...) no longer matches its arrays on disk and is refused: write it with `to_zarr`.
 
 ## Change the pixel size
 

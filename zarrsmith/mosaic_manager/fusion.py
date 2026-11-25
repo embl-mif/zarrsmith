@@ -54,6 +54,8 @@ from ..utils.ngff import ZarrWriteConfig, _resolve_format
 from ..utils.output_path import has_content, has_zarr_name, output_refusal
 from ..utils.populate_pyramid import populate_pyramid
 from ..utils.to_zarr import _drop_axes_from_config_shapes
+from ..utils.display_window import (DISPLAY_PERCENTILES, read_display_windows, window_from_values,
+                                    write_display_windows)
 from .fields import check_single_field, fields_of, multiple_fields_message
 from .tile import Tile, series_keys
 
@@ -85,8 +87,6 @@ _REGION_VOXELS = 2**23
 #: the memory of each worker low and let more of them work on the same output.
 FUSION_SHARD_TARGET_MB = 256.0
 
-#: Percentiles of the fused values used as the display window written to the output.
-DISPLAY_PERCENTILES = (0.5, 99.9)
 #: Values kept from every fused region to estimate the display window (no extra reads).
 _WINDOW_SAMPLES = 65536
 
@@ -916,29 +916,14 @@ class _RegionSeries:
 
 
 def _display_windows(samples: Dict[int, np.ndarray], n_channels: int, dtype) -> List[Tuple[float, float]]:
-    """``(start, end)`` display window per channel from the fused-value samples."""
-    windows = []
-    for c in range(n_channels):
-        values = samples.get(c)
-        if values is None or values.size == 0:
-            windows.append((0.0, 1.0))
-            continue
-        low, high = (float(v) for v in np.percentile(values, DISPLAY_PERCENTILES))
-        windows.append((low, high if high > low else low + 1.0))
-    return windows
+    """``(start, end)`` display window per channel from the fused-value samples
+    (:data:`~zarrsmith.utils.display_window.DISPLAY_PERCENTILES`, as every zarrsmith write)."""
+    return [window_from_values(samples.get(c, np.empty(0)), DISPLAY_PERCENTILES) for c in range(n_channels)]
 
 
 def _write_display_windows(path, windows: Sequence[Tuple[float, float]]) -> None:
     """Store the display windows in the OMERO channel metadata (NGFF 0.4 and 0.5)."""
-    root = zarr.open_group(str(path), mode="r+")
-    attrs = root.attrs.asdict()
-    nested = "ome" in attrs  # NGFF 0.5 keeps everything under "ome"
-    omero = (attrs["ome"] if nested else attrs).get("omero")
-    if not omero:
-        return
-    for channel, (start, end) in zip(omero.get("channels", []), windows):
-        channel.setdefault("window", {}).update({"start": start, "end": end})
-    root.attrs.update({"ome": attrs["ome"]} if nested else {"omero": omero})
+    write_display_windows(zarr.open_group(str(path), mode="r+"), windows)
 
 
 def tile_sources(tiles: Sequence[Tile]) -> List[str]:
@@ -964,10 +949,7 @@ def _write_sources(path, plan: "FusionPlan") -> None:
 def display_windows(path) -> List[Tuple[float, float]]:
     """Display window ``(start, end)`` of every channel of an OME-Zarr image, from its
     OMERO metadata (written by :func:`fuse_tiles` from the fused values)."""
-    attrs = zarr.open_group(str(path), mode="r").attrs.asdict()
-    omero = attrs.get("ome", attrs).get("omero") or {}
-    return [(float(c["window"]["start"]), float(c["window"]["end"]))
-            for c in omero.get("channels", []) if "window" in c]
+    return read_display_windows(zarr.open_group(str(path), mode="r"))
 
 
 # ---------------------------------------------------------------------------

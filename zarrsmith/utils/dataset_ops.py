@@ -60,6 +60,35 @@ def _check_channel_values(key, value, *, data, metadata, label):
     return value, None
 
 
+def _check_channel_windows(key, value, *, data, metadata, label):
+    """One ``(start, end)`` display window per channel (``None``: from the data); ``None``
+    alone sets every channel from the data. Intensity data only."""
+    if normalize_data_type(metadata.get("data_type")) == "label":
+        # worded as the "no channel axis" skips, which ZarrManager does not warn about
+        return None, f"{label} is label data and has no channel axis for display windows. Skipping '{key}'."
+    n = channel_count(data, metadata) or 1  # without a c axis: one channel
+    if value is None:
+        return None, None
+    if not isinstance(value, (list, tuple)) or len(value) != n:
+        return None, (
+            f"'{key}' needs one (start, end) or None per channel ({n}) in {label}, "
+            f"got {value!r}. Skipping."
+        )
+    windows = []
+    for window in value:
+        if window is None:
+            windows.append(None)
+            continue
+        try:
+            start, end = (float(v) for v in window)
+        except (TypeError, ValueError):
+            raise ValueError(f"Each '{key}' entry must be (start, end) or None, got {window!r}.") from None
+        if not end > start:
+            raise ValueError(f"A display window must have end > start, got {window!r}.")
+        windows.append((start, end))
+    return windows, None
+
+
 def _check_scales(key, value, *, data, metadata, label):
     if not isinstance(value, list) or len(value) != len(data):
         raise ValueError(
@@ -119,6 +148,7 @@ def _check_data_type(key, value, **_):
 _VALIDATORS: dict[str, Callable[..., tuple[Any, Optional[str]]]] = {
     "channel_names": _check_channel_values,
     "channel_colors": _check_channel_values,
+    "channel_windows": _check_channel_windows,
     "scales": _check_scales,
     "translations": _check_translations,
     "extra_attributes": _check_extra_attributes,
@@ -211,8 +241,8 @@ def reorder_channels(
         slicer[c_dim] = new_order
         reordered.append(level[tuple(slicer)])
 
-    for key in ("channel_names", "channel_colors"):
-        if key in metadata:
+    for key in ("channel_names", "channel_colors", "channel_windows"):
+        if metadata.get(key) is not None and len(metadata[key]) == n:
             metadata[key] = [metadata[key][i] for i in new_order]
     metadata["size"] = [tuple(level.shape) for level in reordered]
     metadata["chunksize"] = [tuple(level.chunksize) for level in reordered]

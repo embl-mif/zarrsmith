@@ -94,7 +94,8 @@ def visualize(
     Datasets without a ``t`` axis are passed to napari without an artificial time
     dimension, so napari will not expose an active T slider.  Datasets without a
     ``c`` axis are displayed as a single image/label layer rather than channel
-    layers.
+    layers. Channels with a display window (``metadata["channel_windows"]``, read from
+    an OME-Zarr's OMERO ``window``) open with that contrast.
     """
     try:
         import napari
@@ -125,7 +126,14 @@ def visualize(
         except Exception as exc:
             raise RuntimeError(f"Failed to load data into memory: {exc}") from exc
 
-    add_layers(viewer, pyramid, metadata, level=start_level, translate=True)
+    layers = add_layers(viewer, pyramid, metadata, level=start_level, translate=True)
+    # A stored or chosen display window (metadata["channel_windows"]) is the contrast, with the
+    # slider over the whole dtype range so it can still be widened.
+    windows = metadata.get("channel_windows")
+    if windows and str(metadata.get("data_type", "intensity")).lower() != "label":
+        from .display_window import apply_display_windows
+
+        apply_display_windows(layers, windows)
     return viewer
 
 

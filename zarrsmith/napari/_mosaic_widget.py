@@ -592,15 +592,14 @@ def shown_contrast_limits(layers, mosaic) -> dict:
             for layer in tile_layers(layers, mosaic.path)}
 
 
-def apply_display_windows(layers, windows, dtype) -> None:
-    """Give the image layers of a fused result its stored display windows (one per
-    channel, in layer order), with the slider over the whole dtype range."""
+def apply_display_windows(layers, windows, dtype=None) -> None:
+    """Give the last image layers its display windows (one per channel, in layer order), with
+    the slider over the whole range of their data type (``dtype`` is no longer needed: the
+    layers' own is used)."""
+    from zarrsmith.utils.display_window import apply_display_windows as _apply
+
     images = [layer for layer in layers if hasattr(layer, "contrast_limits")]
-    for layer, window in zip(images[-len(windows):] if windows else [], windows):
-        if np.issubdtype(np.dtype(dtype), np.integer):
-            info = np.iinfo(np.dtype(dtype))
-            layer.contrast_limits_range = (info.min, info.max)
-        layer.contrast_limits = window
+    _apply(images[-len(windows):] if windows else [], windows)
 
 
 def show_first_timepoint(viewer, axes: str) -> None:
@@ -1105,9 +1104,9 @@ def mosaic_widget():
             _release()
             if open_result:
                 _clear_layers()
-                # the result opens at its stage position (its NGFF translation), on the tile map
+                # the result opens at its stage position (its NGFF translation), on the tile map,
+                # with the display windows of the fusion (visualize applies the stored ones)
                 zm.visualize(viewer=viewer)
-                apply_display_windows(viewer.layers, mos.display_windows(out), zm.metadata["dtype"])
                 show_first_timepoint(viewer, "".join(zm.metadata["axes"]))
 
         @worker.errored.connect

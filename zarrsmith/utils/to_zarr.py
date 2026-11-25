@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -9,6 +10,7 @@ import numpy as np
 import zarr
 
 from .axes import normalize_axes, normalize_data_type, spatial_axes_in_order
+from .display_window import update_display_windows
 from .output_path import check_output_path
 from .translation import drop_axes, normalize_translations
 from .ngff import (
@@ -19,6 +21,8 @@ from .ngff import (
     _write_pyramid_v2,
     _write_pyramid_v3,
 )
+
+logger = logging.getLogger("zarrsmith")
 
 _DROPPABLE_AXES = ("t", "c", "z")
 
@@ -114,6 +118,21 @@ def _metadata_for_write(
     out["data_type"] = data_type
     return out
 
+def _set_display_windows(group: zarr.Group, metadata: dict, axes, cfg: ZarrWriteConfig) -> None:
+    """The display window of every channel: ``metadata["channel_windows"]`` where given, else
+    estimated from the written data (``cfg.display_window``), so viewers do not open the image
+    over the whole range of its data type. Intensity data only; with ``compute=False`` nothing
+    is written yet, so only the given windows are stored."""
+    if metadata.get("data_type") != "intensity":
+        return
+    given = metadata.get("channel_windows")
+    if not cfg.compute and not given:
+        return
+    windows = update_display_windows(group, axes, given, from_data=cfg.compute and cfg.display_window)
+    if any(w is not None for w in windows):
+        logger.info("Display window per channel: %s", windows)
+
+
 def to_zarr(
     path: str | Path,
     data_levels: Sequence[da.Array],
@@ -167,6 +186,7 @@ def to_zarr(
         ngff_version=ngff_version,
         name=effective_metadata.get("name") or "dataset",
     )
+    _set_display_windows(root, effective_metadata, axes, cfg)
 
     return root if cfg.compute else delayed
 
@@ -220,5 +240,6 @@ def write_multiscale_to_group(
         name=name or effective_metadata.get("name") or "dataset",
         label_source={"source": {"image": "../../"}} if is_label else None,
     )
+    _set_display_windows(group, effective_metadata, axes, cfg)
 
     return group if cfg.compute else delayed

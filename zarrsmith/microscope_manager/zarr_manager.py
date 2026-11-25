@@ -374,6 +374,16 @@ class ZarrManager(MicroscopeManager):
         metadata["zarr_format"] = group.metadata.zarr_format
         # How the stored levels were made (None if not recorded), kept on a re-write.
         metadata["downsampling_method"] = recorded_downsampling_method(multiscales)
+        # Display windows someone chose (None: the whole dtype range), kept on a re-write.
+        windows = None
+        if metadata["data_type"] == "intensity":
+            from ..utils.display_window import recorded_windows
+
+            windows = recorded_windows(group, metadata["dtype"])
+            n = data_levels[0].shape[metadata["axes"].index("c")] if "c" in metadata["axes"] else 1
+            if windows is not None and len(windows) != n:
+                windows = None
+        metadata["channel_windows"] = windows
 
         return data_levels, zarr_levels, metadata
 

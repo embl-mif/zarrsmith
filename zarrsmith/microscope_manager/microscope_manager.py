@@ -220,6 +220,10 @@ class MicroscopeManager(ABC):
                 Supports:
                     - channel_names (list[str])
                     - channel_colors (list[str]): valid matplotlib colors or hex code
+                    - channel_windows (list of ``(start, end)`` or ``None``, one per
+                      channel): the display window (contrast) written to the OMERO
+                      metadata; ``None`` (a channel, or all) estimates it from the data
+                      on write. Intensity data only.
                     - scales (list[tuple])
                     - translations (dict such as ``{"y": 10.0, "x": -5.0}``, or one
                       per level; physical position of voxel 0, ``None`` to clear)

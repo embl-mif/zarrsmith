@@ -28,6 +28,7 @@ from .ngff import (
     _write_extra_attributes,
 )
 from .colors import parse_color
+from .display_window import update_display_windows
 
 #: Updated keys that change the ``coordinateTransformations`` of every level.
 _TRANSFORM_KEYS = frozenset({"scales", "translations", "time_increment"})
@@ -95,6 +96,8 @@ def write_metadata_updates(
       ``coordinateTransformations`` (a multiscale-level one is folded into them);
     - ``units``, ``time_increment_unit``: the ``axes`` entries;
     - ``channel_names``, ``channel_colors``: label and color of the OMERO channels;
+    - ``channel_windows``: the display window (``start``/``end``) of the OMERO channels,
+      estimated from the coarsest stored level for a channel given ``None``;
     - ``data_type``: the ``image-label`` block, or OMERO channels for intensity data;
     - ``extra_attributes``: the group attributes that are not NGFF metadata.
     """
@@ -155,6 +158,12 @@ def write_metadata_updates(
         if fmt.zarr_format == 3:
             entry["version"] = fmt.version
         add_metadata(group, entry, fmt=fmt)
+
+    # The windows given (None: estimated from the stored data, as on a write), also for an
+    # image just turned to intensity data, whose OMERO channels are new.
+    if data_type == "intensity" and keys & {"channel_windows", "data_type"}:
+        metadata["channel_windows"] = update_display_windows(
+            group, axes, metadata.get("channel_windows") if "channel_windows" in keys else None)
 
     if "extra_attributes" in keys:
         extra = metadata.get("extra_attributes") or {}

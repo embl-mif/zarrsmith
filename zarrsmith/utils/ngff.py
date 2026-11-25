@@ -163,6 +163,13 @@ class ZarrWriteConfig:
         notebook) while the arrays are written. Only applies when
         ``compute=True`` and a local (threaded) dask scheduler is used.
         Pass ``False`` for silent writes, e.g. in batch jobs or tests.
+    display_window
+        If ``True`` (default), the OMERO display window (``start``/``end``) of every
+        channel of intensity data is set to the 0.5th-99.9th percentile of its
+        non-zero values, sampled from the coarsest level once it is written (see
+        :mod:`zarrsmith.utils.display_window`), so viewers open it with a usable
+        contrast. ``False`` keeps the whole range of the data type. Only applies
+        when ``compute=True``.
     """
 
     ngff_version: Literal["0.4", "0.5"] | None = None
@@ -180,6 +187,7 @@ class ZarrWriteConfig:
     drop_singleton: bool = True
     num_workers: int | None = None
     progress: bool = True
+    display_window: bool = True
 
 def _infer_ngff_version(group: zarr.Group) -> str:
     """Infer the NGFF metadata layout used by an existing group."""
