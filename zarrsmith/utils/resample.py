@@ -245,7 +245,7 @@ def resample_levels(
         [resampled],
         {**metadata, "scales": [target]},
         num_levels=len(data),
-        downscale_factor=infer_downscale_factors(metadata),
+        downscale_factor=infer_downscale_factors(metadata)[1],
     )
 
 

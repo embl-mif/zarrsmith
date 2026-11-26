@@ -1,5 +1,5 @@
 """The command line grouped by stage: one meaning per short flag, old spellings still working,
---help-all, and the commands plan-tiles and fuse-labels (with --pyramid_like)."""
+--help-all, and the commands plan-tiles and fuse-labels (with --infer_downscale_factors)."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,7 @@ import pytest
 import zarrsmith.microscope_manager as mm
 from zarrsmith.cli import zarrsmith as cli
 from zarrsmith.cli.__arguments import STAGES, _build_parser, _parse_arguments
-from zarrsmith.utils.dataset_ops import pyramid_like
+from zarrsmith.utils.dataset_ops import infer_downscale_factors
 
 COMMANDS = [name for _, commands in STAGES for name, *_ in commands]
 
@@ -89,6 +89,8 @@ def test_old_spellings_still_work_with_a_note(tmp_path, capsys, old, new, dest, 
     assert "Note:" in note and "still works" in note or "sets the data type" in note
 
 
+
+
 def test_allocate_takes_z_and_old_o(tmp_path, capsys):
     a = _parse_arguments(["allocate", "-t", str(tmp_path), "-z", str(tmp_path / "a.ome.zarr")])
     b = _parse_arguments(["allocate", "-t", str(tmp_path), "-o", str(tmp_path / "a.ome.zarr")])
@@ -98,7 +100,7 @@ def test_allocate_takes_z_and_old_o(tmp_path, capsys):
         _parse_arguments(["allocate", "-t", str(tmp_path)])
 
 
-# ---- pyramid_like -----------------------------------------------------------------------
+# ---- infer_downscale_factors -----------------------------------------------------------------------
 
 def _image(path, shape=(8, 64, 96), levels=3, factor=(1, 2, 2), scale=(2.0, 0.5, 0.5)):
     data = np.random.default_rng(0).integers(0, 1000, shape).astype(np.uint16)
@@ -110,13 +112,20 @@ def _image(path, shape=(8, 64, 96), levels=3, factor=(1, 2, 2), scale=(2.0, 0.5,
     return path
 
 
-def test_pyramid_like_from_a_level(tmp_path):
+def test_infer_downscale_factors_from_a_level(tmp_path):
     md = mm.ZarrManager(str(_image(tmp_path / "img.ome.zarr", levels=4)), mode="r").metadata
-    assert pyramid_like(md, 0) == (4, (1, 2, 2))
-    assert pyramid_like(md, 1) == (3, (1, 2, 2))
-    assert pyramid_like(md, 3) == (1, (2, 2, 2))
+    assert infer_downscale_factors(md, 0) == (4, (1, 2, 2))
+    assert infer_downscale_factors(md, 1) == (3, (1, 2, 2))
+    assert infer_downscale_factors(md, 3) == (1, (2, 2, 2))
     with pytest.raises(ValueError, match="out of range"):
-        pyramid_like(md, 4)
+        infer_downscale_factors(md, 4)
+
+
+def test_infer_downscale_factors_falls_back_to_array_sizes():
+    sizes = {"axes": "czyx", "size": [(2, 8, 64, 96), (2, 8, 32, 48), (2, 8, 16, 24)]}
+    assert infer_downscale_factors(sizes) == (3, (1, 2, 2))  # no voxel sizes
+    assert infer_downscale_factors({**sizes, "scales": [(1.0, 0.5, 0.5)]}, 1) == (2, (1, 2, 2))  # one, not per level
+    assert infer_downscale_factors({"axes": "yx"}) == (1, (2, 2, 2))  # nothing to go on
 
 
 # ---- plan-tiles -------------------------------------------------------------------------
@@ -178,7 +187,7 @@ def test_fuse_labels_renumbers_and_follows_the_source_pyramid(tmp_path):
     img = _image(tmp_path / "img.ome.zarr", shape=(8, 128, 80), levels=4)
     out = tmp_path / "merged.ome.zarr"
     cli.main(["fuse-labels", "-i", str(folder), "-z", str(out), "-lo", str(tmp_path / "offsets.csv"),
-              "-lm", str(tmp_path / "mapping.json"), "--pyramid_like", str(img), "--pyramid_start_level", "1"])
+              "-lm", str(tmp_path / "mapping.json"), "--infer_downscale_factors", str(img), "--start_level", "1"])
     zm = mm.ZarrManager(str(out), mode="r")
     merged = np.asarray(zm.data[0])
     assert zm.metadata["data_type"] == "label" and merged.dtype == np.uint32

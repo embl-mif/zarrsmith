@@ -305,7 +305,7 @@ From the command line, give the offsets as a CSV (`store,offset`, one row per ti
 zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr --label_offsets offsets.csv --label_mapping mapping.json -nl 4 -df 1 2 2
 ```
 
-`zarrsmith fuse-labels` ([command line](cli.md#stitch-label-tiles)) fuses them as label data; `--pyramid_like IMAGE --pyramid_start_level K` makes the pyramid follow the segmented image. (`zarrsmith fuse` still takes both options, with a note.) The tiles are read from the folder whatever their stores say they hold (a segmentation written by another tool may not mark its stores as labels), unless `--data_type label` is given to read only label stores. Each tile is given only the mapping entries between its offset and the next larger one, the ids it can hold, so the ids of a tile must stay below the next tile's offset.
+`zarrsmith fuse-labels` ([command line](cli.md#stitch-label-tiles)) fuses them as label data; `--infer_downscale_factors IMAGE --start_level K` makes the pyramid follow the segmented image. (`zarrsmith fuse` still takes both options, with a note.) The tiles are read from the folder whatever their stores say they hold (a segmentation written by another tool may not mark its stores as labels), unless `--data_type label` is given to read only label stores. Each tile is given only the mapping entries between its offset and the next larger one, the ids it can hold, so the ids of a tile must stay below the next tile's offset.
 
 `plan_fusion(mosaic.tiles, ...)` takes the fusion arguments (`ds`, `projection`, `blend`, `channels`, `crop`, `skip`, `out_dtype`, `midline_axis`, `timepoints`, `reference_timepoint`) and returns the level-0 geometry without reading anything: `plan.summary()`, `plan.shape`, `plan.scale`, `plan.nbytes`.
 

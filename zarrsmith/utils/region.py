@@ -24,7 +24,7 @@ PixelBounds = Mapping[str, tuple[int, int]]
 PhysicalBounds = Mapping[str, tuple[float | None, float | None]]
 
 
-def _per_axis(value: float | Mapping[str, float] | None, axes: Sequence[str], default: float) -> dict[str, float]:
+def _value_for_every_axis(value: float | Mapping[str, float] | None, axes: Sequence[str], default: float) -> dict[str, float]:
     if value is None:
         return {ax: default for ax in axes}
     if isinstance(value, Mapping):
@@ -202,7 +202,7 @@ class Region:
         The rest follows the source image (``source``, set by ``ZarrManager.read_region``):
         units and time step, the format (NGFF 0.4 / zarr v2 for a 0.4 source, else 0.5 / zarr v3;
         ``ngff_version``/``zarr_format`` override it), the chunks (clipped to the labels) and the
-        pyramid from the region's level on (:func:`zarrsmith.utils.dataset_ops.pyramid_like`),
+        pyramid from the region's level on (:func:`zarrsmith.utils.dataset_ops.infer_downscale_factors`),
         sampled with ``method`` ("nearest" or "mode") so ids are never mixed. ``num_levels=1``
         writes level 0 only. Without a source: one level, zarr v3, micrometer.
         ``write_options`` go to the writer (e.g. ``shards``, ``compressor``). Returns the written
@@ -211,7 +211,7 @@ class Region:
         import dask.array as da
 
         from ..microscope_manager import ArrayManager, ZarrManager
-        from .dataset_ops import pyramid_like
+        from .dataset_ops import infer_downscale_factors
 
         labels = np.asarray(labels)
         no_c = [ax for ax in self.axes if ax != "c"]
@@ -263,7 +263,7 @@ class Region:
         metadata["chunksize"] = [tuple(chunks)]
 
         if num_levels is None or downscale_factor is None:
-            levels, factor = pyramid_like(source, self.level) if source.get("scales") else (1, (2, 2, 2))
+            levels, factor = infer_downscale_factors(source, self.level) if source.get("scales") else (1, (2, 2, 2))
             num_levels = levels if num_levels is None else num_levels
             downscale_factor = factor if downscale_factor is None else downscale_factor
         if zarr_format is None:
@@ -304,8 +304,8 @@ def read_region(
     axes = "".join(axes)
     shape = dict(zip(axes, (int(n) for n in array.shape)))
     spatial = list(spatial_axes_in_order(axes))
-    scale_d = _per_axis(scale, spatial, 1.0) if scale is not None else {ax: 1.0 for ax in spatial}
-    trans_d = _per_axis(translation, spatial, 0.0)
+    scale_d = _value_for_every_axis(scale, spatial, 1.0) if scale is not None else {ax: 1.0 for ax in spatial}
+    trans_d = _value_for_every_axis(translation, spatial, 0.0)
 
     selection = {str(k).lower(): v for k, v in (selection or {}).items()}
     unknown = sorted(set(selection) - set(axes))
@@ -329,10 +329,10 @@ def read_region(
     if physical:
         phys = {ax: ranges[ax] for ax in spatial if ax in selection}
         ranges.update(physical_to_pixel_bounds(phys, scale_d, trans_d, shape, clip=clip))
-        halo_px = {ax: physical_to_pixels(h, scale_d[ax]) for ax, h in _per_axis(halo, spatial, 0.0).items()}
+        halo_px = {ax: physical_to_pixels(h, scale_d[ax]) for ax, h in _value_for_every_axis(halo, spatial, 0.0).items()}
     else:
-        halo_px = {ax: int(h) for ax, h in _per_axis(halo, spatial, 0.0).items()}
-        if any(float(h) != int(h) for h in _per_axis(halo, spatial, 0.0).values()):
+        halo_px = {ax: int(h) for ax, h in _value_for_every_axis(halo, spatial, 0.0).items()}
+        if any(float(h) != int(h) for h in _value_for_every_axis(halo, spatial, 0.0).values()):
             raise ValueError("A halo in pixels must be whole; use physical=True for physical units.")
 
     bounds = {}

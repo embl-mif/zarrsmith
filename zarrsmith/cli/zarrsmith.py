@@ -975,16 +975,16 @@ def _relabel_tiles(tiles, offsets_csv: Optional[str], mapping_json: Optional[str
     print(f"Renumbered {len(tiles)} label tile(s): {len(offsets)} offset(s), {len(mapping)} mapped id(s)")
 
 
-def _apply_pyramid_like(kwargs: Dict[str, Any]) -> None:
-    """``--pyramid_like IMAGE --pyramid_start_level K``: the number of levels and the factor of
+def _apply_infer_downscale_factors(kwargs: Dict[str, Any]) -> None:
+    """``--infer_downscale_factors IMAGE --start_level K``: the number of levels and the factor of
     IMAGE from level K on, unless --num_levels/--downscale_factor are given (in place)."""
-    from zarrsmith.utils.dataset_ops import pyramid_like
+    from zarrsmith.utils.dataset_ops import infer_downscale_factors
 
-    like = kwargs.pop("pyramid_like", None)
-    start = int(kwargs.pop("pyramid_start_level", 0) or 0)
+    like = kwargs.pop("infer_downscale_factors", None)
+    start = int(kwargs.pop("start_level", 0) or 0)
     if like is None:
         return
-    levels, factor = pyramid_like(mm.ZarrManager(str(like), mode="r").metadata, start)
+    levels, factor = infer_downscale_factors(mm.ZarrManager(str(like), mode="r").metadata, start)
     kwargs.setdefault("num_levels", levels)
     kwargs.setdefault("downscale_factor", list(factor))
     print(f"Pyramid like {like} from level {start}: {kwargs['num_levels']} level(s), "
@@ -999,7 +999,7 @@ def _fusion_kwargs(args) -> Dict[str, Any]:
     }
     if "chunk_size" in kwargs:
         kwargs.pop("max_size", None)
-    _apply_pyramid_like(kwargs)
+    _apply_infer_downscale_factors(kwargs)
     return kwargs
 
 

@@ -339,7 +339,7 @@ def _io_section(parser, *, input_help, output_help='Path to the output .ome.zarr
     return group
 
 
-def _pyramid_section(parser, *, like=False, start_level=False, defaults=None, method=True,
+def _pyramid_section(parser, *, infer=False, start_level=False, defaults=None, method=True,
                      num_levels_help='Number of pyramidal levels.',
                      factor_help='Pyramid downsampling factor. Use one value for isotropic downsampling or three '
                                  'values for anisotropic Z Y X factors, e.g. -df 1 2 2.'):
@@ -351,14 +351,14 @@ def _pyramid_section(parser, *, like=False, start_level=False, defaults=None, me
     if method:
         _add(group, '-me', '--method', choices=['mean', 'nearest', 'mode'],
              help='Downsampling method of the pyramid levels. Default: mean for intensity data, nearest for labels.')
-    if like:
-        _add(group, '-pl', '--pyramid_like', metavar='IMAGE', type=valid_input_path,
-             help='Make the pyramid follow this OME-Zarr image from --pyramid_start_level on: the same number of '
+    if infer:
+        _add(group, '-idf', '--infer_downscale_factors', metavar='IMAGE', type=valid_input_path,
+             help='Make the pyramid follow this OME-Zarr image from --start_level on: the same number of '
                   'levels below it and the same factor between them, so level k of the output matches level '
                   'start + k of the image (e.g. labels of an image segmented at a coarser level). '
                   '--num_levels/--downscale_factor override it.')
-        _add(group, '-psl', '--pyramid_start_level', type=int, default=0, metavar='LEVEL',
-             help='Level of --pyramid_like that the output\'s level 0 matches.')
+        _add(group, '-sl', '--start_level', type=int, default=0, metavar='LEVEL',
+             help='Level of --infer_downscale_factors that the output\'s level 0 matches.')
     if start_level:
         _add(group, '-sl', '--start_level', default='0', help=start_level)
     return group
@@ -646,7 +646,7 @@ def _add_fuse_arguments(parser, *, legacy=False):
               '--reference_timepoint: measured at the reference timepoint and applied to all, or at every '
               'timepoint with -rtp all.')
 
-    _pyramid_section(parser, like=not legacy)
+    _pyramid_section(parser, infer=not legacy)
     _storage_section(parser, **_MOSAIC_STORAGE_HELP)
     _channel_metadata_section(parser, names_help='Names of the output channels. Example: -cn autofluo cfos')
     _performance_section(parser, read_workers=True, temp_dir=True)
@@ -665,7 +665,7 @@ FUSE_LABELS_HELP = """\
     Examples:
       zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr -lo offsets.csv -lm mapping.json
       zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr -lo offsets.csv -lm mapping.json \\
-          --pyramid_like image.ome.zarr --pyramid_start_level 1
+          --infer_downscale_factors image.ome.zarr --start_level 1
       zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr        (ids already agree across tiles)
 
     --label_offsets is a CSV with the columns store (the store name, with or without .ome.zarr) and
@@ -690,7 +690,7 @@ def _add_fuse_labels_arguments(parser):
     _add(labels, '--label_offset_step', type=int, metavar='N',
          help='With --tiles_csv: the step between the offsets of consecutive tiles.')
     _add(labels, '-dt', '--dtype', dest='out_dtype', default='uint32', help='Output dtype (an integer type).')
-    _pyramid_section(parser, like=True)
+    _pyramid_section(parser, infer=True)
     _storage_section(parser, **_MOSAIC_STORAGE_HELP,
                      shard_target_help='Target uncompressed shard size in MB, used when --shards auto. Default: 256 '
                                        '(each fusion worker holds one shard).')

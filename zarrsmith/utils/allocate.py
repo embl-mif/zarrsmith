@@ -85,7 +85,7 @@ def _crop_range(spec: Any, n: int, axis: str) -> tuple[int, int]:
     return start, stop
 
 
-def _per_axis(values: Sequence[Any] | None, axes: str, name: str) -> tuple[Any, ...] | None:
+def _one_value_per_axis(values: Sequence[Any] | None, axes: str, name: str) -> tuple[Any, ...] | None:
     if values is None:
         return None
     values = tuple(values)
@@ -233,7 +233,7 @@ def build_allocation_metadata(
     dtype_out = str(np.dtype(dtype or info["dtype"]))
 
     if chunk_size is not None:
-        chunk0 = tuple(int(c) for c in _per_axis(chunk_size, axes_out, "chunk_size"))
+        chunk0 = tuple(int(c) for c in _one_value_per_axis(chunk_size, axes_out, "chunk_size"))
     elif chunks is not None:
         chunk0 = tuple(int(chunks.get(ax, 1)) for ax in axes_out)
     else:
@@ -253,7 +253,7 @@ def build_allocation_metadata(
         else:
             shards = "auto"
     elif isinstance(shards, (list, tuple)):
-        shards = tuple(int(s) for s in _per_axis(shards, axes_out, "shards"))
+        shards = tuple(int(s) for s in _one_value_per_axis(shards, axes_out, "shards"))
 
     # Pyramid geometry: level k is level 0 shrunk k times. By default the template's own
     # pyramid below the start level, so `zarrsmith pyramid` then fills the same layout.

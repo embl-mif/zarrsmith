@@ -124,7 +124,7 @@ def test_parse_ome_xml_errors_and_warnings():
 
 def test_dataset_ops_roundtrip(image_pyramid, metadata):
     md = dict(metadata)
-    assert infer_downscale_factors(md) == 2
+    assert infer_downscale_factors(md)[1] == (2, 2, 2)
 
     data = reorder_channels(image_pyramid, md, [1, 0])
     assert md["channel_names"] == ["B", "A"]

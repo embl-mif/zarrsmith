@@ -326,7 +326,7 @@ def _divisor_at_most(n: int, limit: int) -> int:
     return 1
 
 
-def _per_axis(value, axes, name) -> dict[str, float]:
+def _values_for_given_axes(value, axes, name) -> dict[str, float]:
     if value is None:
         return {}
     if isinstance(value, Mapping):
@@ -425,7 +425,7 @@ def plan_tiles(
         raise ValueError("physical=True needs the level's scale.")
 
     def to_pixels(values, name):
-        values = _per_axis(values, axes, name)
+        values = _values_for_given_axes(values, axes, name)
         if physical:
             return {ax: physical_to_pixels(float(v), float(scale[ax])) for ax, v in values.items()}
         bad = {ax: v for ax, v in values.items() if float(v) != int(v)}
@@ -433,7 +433,7 @@ def plan_tiles(
             raise ValueError(f"{name} in pixels must be whole numbers, got {bad}; use physical=True for units.")
         return {ax: int(v) for ax, v in values.items()}
 
-    roi_in = _per_axis(roi, axes, "roi")
+    roi_in = _values_for_given_axes(roi, axes, "roi")
     if physical:
         bounds = physical_to_pixel_bounds(roi_in, scale, translation, shape)
     else:

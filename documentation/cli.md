@@ -27,7 +27,7 @@ Every command lists its options in the same sections, in the same order, so an o
 | Input and output | `-i`, `-z`, `--batch` |
 | What to read | the reader and the part of the input: `-m`, `--scene_index`, `--subset`; for `fuse` the channels, groups, cameras, fields, tiles and timepoints |
 | the command's own sections | e.g. *Fusion* and *Tile positions* for `fuse`, *Estimate* and *Corrected image* for `chromatic-shift`, *Tiles* for `plan-tiles` |
-| Pyramid | `-nl`, `-df`, `-me`, and for `fuse`/`fuse-labels` `--pyramid_like` |
+| Pyramid | `-nl`, `-df`, `-me`, and for `fuse`/`fuse-labels` `--infer_downscale_factors` |
 | Storage layout | `-zf`, `-cs`, `-ms`, shards, compression, `-ds` |
 | Channel metadata | `-cn`, `-cc` |
 | Performance | `-nw`, `-rw` |
@@ -112,7 +112,7 @@ The fusion options:
 | `-rch`, `--register_channel` | reference channel of `--register_cameras` (e.g. a nuclear stain): the transform is measured on it and applied to every channel; `all` registers every channel on its own images. Timepoints follow `-rtp`: measured at the reference timepoint and applied to all, or at every timepoint with `-rtp all` | the first channel |
 | `-dt`, `--dtype` | output dtype | the input dtype (`float32` with `-b sum`) |
 | `-dty`, `--data_type` | `intensity` or `label` (a label image; needs `-b none`, the default for labels, and an integer dtype). For a folder of OME-Zarr stores it also picks which stores are read | `label` when every tile is label data (a folder of label stores), else `intensity` |
-| `-pl`, `--pyramid_like` / `-psl`, `--pyramid_start_level` | make the pyramid follow another OME-Zarr image from a level on: its number of levels below that level and its factor (see [Stitch label tiles](#stitch-label-tiles)); `-nl`/`-df` override it | the convert defaults |
+| `-idf`, `--infer_downscale_factors` / `-sl`, `--start_level` | make the pyramid follow another OME-Zarr image from a level on: its number of levels below that level and its factor (see [Stitch label tiles](#stitch-label-tiles)); `-nl`/`-df` override it | the convert defaults |
 | `-rw`, `--read_workers` | regions fused in parallel processes; 0 chooses from the cores (half of them, at most 16), the number of regions and the free memory, as the napari widget does. Not to be confused with `-nw` (write threads) | 0 |
 | `-td`, `--temp_dir` | deprecated and ignored: level 0 is fused directly into the output | |
 | `-ow`, `--overwrite` | replace an existing output, once the fusion has succeeded | off |
@@ -296,7 +296,7 @@ zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr -lo offsets.csv -lm mapping.j
 
 # the pyramid of the labels follows the segmented image from level 1 on (it was segmented at level 1)
 zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr -lo offsets.csv -lm mapping.json \
-    --pyramid_like image.ome.zarr --pyramid_start_level 1
+    --infer_downscale_factors image.ome.zarr --start_level 1
 ```
 
 | Option | Does | Default |
@@ -306,7 +306,7 @@ zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr -lo offsets.csv -lm mapping.j
 | `-lm`, `--label_mapping` | JSON `{"id": new_id}` applied after the offsets, e.g. the objects a tile edge cut in two, merged by a label solver; ids not listed are kept | none |
 | `-dt`, `--dtype` | output dtype, an integer type | `uint32` |
 | `--tiles_csv` / `--label_offset_step` | instead of `-lo`: a CSV with the columns `tile_index` and `segmented_tile_path` (or `store`) of every tile, e.g. the tiles CSV of `plan-tiles` with the segmented store of each tile; each store gets the offset `tile_index * step` (written next to the output as `<name>.label_offsets.csv`) | |
-| `-pl`, `--pyramid_like` / `-psl`, `--pyramid_start_level` | make the pyramid follow this image from that level on: the same number of levels below it and the same factor, so level `k` of the labels matches level `start + k` of the image; `-nl`/`-df` override it | the convert defaults |
+| `-idf`, `--infer_downscale_factors` / `-sl`, `--start_level` | make the pyramid follow this image from that level on: the same number of levels below it and the same factor, so level `k` of the labels matches level `start + k` of the image; `-nl`/`-df` override it | the convert defaults |
 
 The storage, performance and run options of `fuse` apply too (`--help-all`). Labels are never blended: every voxel is copied from one tile, overlaps are cut in their middle, and the pyramid levels sample voxels instead of averaging them. Each tile is given only the mapping entries between its offset and the next larger one, so the ids of a tile must stay below the next tile's offset (see [Renumbering label tiles](mosaic.md#renumbering-label-tiles)). Without `--label_offsets` and `--label_mapping` the ids must already agree across tiles, and only stores marked as labels are read.
 

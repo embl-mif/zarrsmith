@@ -254,46 +254,33 @@ def reorder_channels(
 # Subsetting
 # ---------------------------------------------------------------------------
 
-def pyramid_like(metadata: dict[str, Any], start_level: int = 0) -> tuple[int, tuple[int, int, int]]:
+def infer_downscale_factors(metadata: dict[str, Any], start_level: int = 0) -> tuple[int, tuple[int, int, int]]:
     """The pyramid of an image from ``start_level`` on: ``(levels, (z, y, x) factor)``.
 
     ``levels`` counts ``start_level`` and every level below it; the factor is the one between
     ``start_level`` and the next level, from their voxel sizes (1 on an axis the image does not
     have). A pyramid built with them over data matching ``start_level`` (e.g. labels of an image
     segmented at a coarser level) has level ``k`` matching level ``start_level + k`` of the image.
-    With a single level from ``start_level`` on, the factor is ``(2, 2, 2)`` (unused).
+    Without a voxel size per level, the factor comes from the array sizes instead. With a single
+    level from ``start_level`` on, the factor is ``(2, 2, 2)`` (unused).
     """
     scales = metadata.get("scales") or []
-    if not 0 <= start_level < len(scales):
-        raise ValueError(f"start_level {start_level} is out of range: the image has {len(scales)} level(s).")
-    levels = len(scales) - start_level
+    sizes = metadata.get("size") or []
+    by_scale = len(scales) >= len(sizes)
+    n_levels = max(len(scales), len(sizes), 1)
+    if not 0 <= start_level < n_levels:
+        raise ValueError(f"start_level {start_level} is out of range: the image has {n_levels} level(s).")
+    levels = n_levels - start_level
     if levels == 1:
         return 1, (2, 2, 2)
-    spatial = spatial_axes_in_order(_axes_of(metadata))
-    ratio = {ax: scales[start_level + 1][i] / scales[start_level][i] for i, ax in enumerate(spatial)}
-    return levels, tuple(max(1, int(round(ratio.get(ax, 1.0)))) for ax in "zyx")
-
-
-def infer_downscale_factors(metadata: dict[str, Any]) -> int | tuple[int, ...]:
-    """Infer the per-spatial-axis downscale factors between pyramid levels 0 and 1.
-
-    Returns ``2`` for single-level data. Isotropic factors are returned as an
-    ``int``; anisotropic ones (e.g. ``(1, 2, 2)``) as a tuple in spatial-axis
-    order, so the original pyramid layout is rebuilt faithfully.
-    """
-    sizes = metadata.get("size", [])
-    if len(sizes) < 2:
-        return 2
     axes = _axes_of(metadata)
-    factors = []
-    for i, ax in enumerate(axes):
-        if ax not in SPATIAL_AXIS_SET:
-            continue
-        s0, s1 = sizes[0][i], sizes[1][i]
-        factors.append(max(1, int(round(s0 / s1))) if s1 else 2)
-    if not factors:
-        return 2
-    return factors[0] if len(set(factors)) == 1 else tuple(factors)
+    if by_scale:
+        spatial = spatial_axes_in_order(axes)
+        ratio = {ax: scales[start_level + 1][i] / scales[start_level][i] for i, ax in enumerate(spatial)}
+    else:
+        ratio = {ax: (sizes[start_level][i] / sizes[start_level + 1][i] if sizes[start_level + 1][i] else 2.0)
+                 for i, ax in enumerate(axes) if ax in SPATIAL_AXIS_SET}
+    return levels, tuple(max(1, int(round(ratio.get(ax, 1.0)))) for ax in "zyx")
 
 
 def subset_levels(
@@ -338,7 +325,7 @@ def subset_levels(
             )
 
     num_levels = len(data)
-    factors = infer_downscale_factors(metadata)
+    factors = infer_downscale_factors(metadata)[1]
 
     new_data = [subset_dask_array(data[0], axes=axes, **selections)]
     new_metadata = subset_metadata(metadata, **selections)
