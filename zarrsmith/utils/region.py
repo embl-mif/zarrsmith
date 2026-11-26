@@ -133,7 +133,9 @@ class Region:
 
     ``data`` is the block as read (core plus halo); ``core`` is the requested
     region alone. ``bounds`` and ``window`` are the pixel bounds of the core and
-    of the block, for every axis of the image.
+    of the block, for every axis of the image. ``source`` is the metadata of the
+    image it was read from (set by ``ZarrManager.read_region``), which
+    :meth:`to_label_image` follows.
     """
 
     data: np.ndarray
@@ -143,6 +145,7 @@ class Region:
     window: dict[str, tuple[int, int]]
     scale: dict[str, float] = field(default_factory=dict)
     translation: dict[str, float] = field(default_factory=dict)
+    source: dict | None = field(default=None, repr=False, compare=False)
 
     @property
     def crop(self) -> tuple[slice, ...]:
@@ -170,6 +173,109 @@ class Region:
     def core_translation(self) -> dict[str, float]:
         """Translation of an image holding only the core: the centre of its first pixel."""
         return {ax: self.translation.get(ax, 0.0) + self.bounds[ax][0] * s for ax, s in self.scale.items()}
+
+    def to_label_image(
+        self,
+        labels,
+        path,
+        *,
+        num_levels: int | None = None,
+        downscale_factor=None,
+        method: str = "nearest",
+        chunks: Sequence[int] | None = None,
+        ngff_version: str | None = None,
+        zarr_format: int | None = None,
+        dtype="uint32",
+        overwrite: bool = False,
+        **write_options,
+    ):
+        """Write ``labels`` segmented from this region as a standalone OME-Zarr label image.
+
+        ``labels`` covers the core (``.core``) without its channel axis, or the whole block
+        read (``.data``, halo included): it is then cropped to the core. With a ``t`` axis in
+        the region, ``labels`` may keep it or not (one timepoint). The image is placed at the
+        core (:meth:`core_translation`), with the voxel size of the region's level, is marked
+        as label data and has ``dtype`` (an id that does not fit raises ``ValueError``).
+
+        The rest follows the source image (``source``, set by ``ZarrManager.read_region``):
+        units and time step, the format (NGFF 0.4 / zarr v2 for a 0.4 source, else 0.5 / zarr v3;
+        ``ngff_version``/``zarr_format`` override it), the chunks (clipped to the labels) and the
+        pyramid from the region's level on (:func:`zarrsmith.utils.dataset_ops.pyramid_like`),
+        sampled with ``method`` ("nearest" or "mode") so ids are never mixed. ``num_levels=1``
+        writes level 0 only. Without a source: one level, zarr v3, micrometer.
+        ``write_options`` go to the writer (e.g. ``shards``, ``compressor``). Returns the written
+        image as a ``ZarrManager``.
+        """
+        import dask.array as da
+
+        from ..microscope_manager import ArrayManager, ZarrManager
+        from .dataset_ops import pyramid_like
+
+        labels = np.asarray(labels)
+        no_c = [ax for ax in self.axes if ax != "c"]
+        crop = dict(zip(self.axes, self.crop))
+        if "t" in no_c and labels.ndim == len(no_c) - 1:
+            no_c.remove("t")  # one timepoint
+        if labels.ndim != len(no_c):
+            raise ValueError(f"labels have {labels.ndim} axes; expected {len(no_c)} ({''.join(no_c)}).")
+        core_shape = tuple(self.bounds[ax][1] - self.bounds[ax][0] for ax in no_c)
+        window_shape = tuple(self.window[ax][1] - self.window[ax][0] for ax in no_c)
+        if labels.shape == window_shape and labels.shape != core_shape:
+            labels = labels[tuple(crop[ax] for ax in no_c)]
+        elif labels.shape != core_shape:
+            raise ValueError(f"labels have shape {labels.shape}; expected the core {core_shape} "
+                             f"or the block read {window_shape} ({''.join(no_c)}).")
+        dtype = np.dtype(dtype)
+        if dtype.kind not in "iu":
+            raise ValueError(f"Labels need an integer dtype, got {dtype}.")
+        if labels.size and (labels.max() > np.iinfo(dtype).max or labels.min() < np.iinfo(dtype).min):
+            raise ValueError(f"Label ids up to {int(labels.max())} do not fit in {dtype}.")
+        labels = labels.astype(dtype)
+
+        source = self.source or {}
+        axes = "".join(no_c)
+        spatial = [ax for ax in axes if ax in "zyx"]
+        src_spatial = [ax for ax in (source.get("axes") or self.axes) if ax in "zyx"]
+        src_units = list(source.get("units") or ())
+        units = dict(zip(src_spatial, src_units)) if len(src_units) == len(src_spatial) else {}
+        translation = self.core_translation()
+        metadata = {
+            "axes": axes,
+            "size": [labels.shape],
+            "dtype": str(dtype),
+            "data_type": "label",
+            "scales": [tuple(float(self.scale.get(ax, 1.0)) for ax in spatial)],
+            "units": tuple(units.get(ax, "micrometer") for ax in spatial),
+            "translations": [{ax: float(translation.get(ax, 0.0)) for ax in spatial}],
+        }
+        if "t" in axes:
+            for key in ("time_increment", "time_increment_unit"):
+                if source.get(key) is not None:
+                    metadata[key] = source[key]
+
+        if chunks is None:
+            src_axes = "".join(source.get("axes") or self.axes)
+            src_chunks = (source.get("chunksize") or [None] * (self.level + 1))[self.level] if source else None
+            by_axis = dict(zip(src_axes, src_chunks)) if src_chunks else {}
+            chunks = tuple(min(int(by_axis.get(ax, n)), int(n)) for ax, n in zip(axes, labels.shape))
+        metadata["chunksize"] = [tuple(chunks)]
+
+        if num_levels is None or downscale_factor is None:
+            levels, factor = pyramid_like(source, self.level) if source.get("scales") else (1, (2, 2, 2))
+            num_levels = levels if num_levels is None else num_levels
+            downscale_factor = factor if downscale_factor is None else downscale_factor
+        if zarr_format is None:
+            zarr_format = 2 if ngff_version == "0.4" else (int(source.get("zarr_format") or 3) if ngff_version is None else 3)
+        ngff_version = ngff_version or ("0.4" if int(zarr_format) == 2 else "0.5")
+
+        manager = ArrayManager([da.from_array(labels, chunks=tuple(chunks))], metadata)
+        if int(num_levels) > 1:
+            manager.build_pyramid(num_levels=int(num_levels), downscale_factor=downscale_factor, method=method)
+        write_options.setdefault("drop_singleton", False)  # keep the axes as segmented
+        write_options.setdefault("progress", False)
+        manager.to_zarr(str(path), ngff_version=ngff_version, zarr_format=int(zarr_format), overwrite=overwrite,
+                        **write_options)
+        return ZarrManager(str(path), mode="r")
 
 
 def read_region(

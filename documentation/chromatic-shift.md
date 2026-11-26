@@ -55,7 +55,7 @@ The same steps are available as `zarrsmith chromatic-shift`, for scripts and pip
 zarrsmith chromatic-shift -i brain.ome.zarr -z brain_corrected.ome.zarr -r chromatic_shift.json
 zarrsmith chromatic-shift -i brain.ome.zarr -r chromatic_shift.json                 # only measure
 zarrsmith chromatic-shift -i other.ome.zarr -z other_corrected.ome.zarr -sf chromatic_shift.json
-zarrsmith chromatic-shift -i timelapse.ome.zarr -z corrected.ome.zarr -rc cFos-647 -tp 5   # reference channel and timepoint
+zarrsmith chromatic-shift -i timelapse.ome.zarr -z corrected.ome.zarr -ref cFos-647 -tp 5   # reference channel and timepoint
 ```
 
 Add `--fail_on_warning` in a pipeline: when the report has warnings, the command exits with an error and writes only the report. Every option, and the `--batch` CSV columns, are in [Command line](cli.md#correct-the-chromatic-shift).

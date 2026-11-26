@@ -694,10 +694,13 @@ class ZarrManager(MicroscopeManager):
 
         dataset, axes, scale, translation = self._level_geometry(group, level)
         arrays = dataset.zarr_data or dataset.data
-        return _read_region(
+        region = _read_region(
             arrays[level], axes, level=level, scale=scale, translation=translation,
             selection=selection, halo=halo, physical=physical, clip=clip,
         )
+        # What Region.to_label_image follows: the image's pyramid, units, chunks and format
+        region.source = {**dataset.metadata, "zarr_format": (self.metadata or {}).get("zarr_format")}
+        return region
 
     def _level_geometry(self, group: Optional[str], level: int):
         """``(dataset, axes, scale, translation)`` of one level of an image; scale and

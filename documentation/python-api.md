@@ -128,6 +128,17 @@ r = z.read_region(1, y=(250.0, 500.0), x=(0.0, 250.0), halo=8.0, physical=True)
 r.core_translation()  # translation of an image holding only the core
 ```
 
+Labels segmented from a region can be written as their own label image, placed where the region is and following the image it was read from:
+
+```python
+r = z.read_region(1, z=(0, 40), y=(512, 1024), x=(0, 512), halo=16)
+labels = segment(r.data)                                  # the block, halo included (or only r.core)
+r.to_label_image(labels, "tile_labels.ome.zarr")          # cropped to the core, uint32, marked as labels
+r.to_label_image(labels, "tile_labels.ome.zarr", num_levels=1, overwrite=True)  # level 0 only
+```
+
+The image sits at `r.core_translation()` with the voxel size of the level read. Its units, time step, chunks (clipped to the labels) and format come from the source image (NGFF 0.4 / zarr v2 for a 0.4 source, else 0.5 / zarr v3; `ngff_version`/`zarr_format` override it). Its pyramid follows the source from the level read on, sampled with `method="nearest"` (or `"mode"`) so ids are never mixed: `zarrsmith.utils.dataset_ops.pyramid_like(metadata, start_level)` gives that number of levels and factor for any image. With a `t` axis in the region, the labels may keep it or hold one timepoint. Other keywords (`shards`, `compressor`, ...) go to the writer.
+
 `group="seg"` or `group="labels/nuclei"` reads another image of the store. The conversions are also available on their own in `zarrsmith.utils.region`: `physical_to_pixel_bounds`, `pixel_to_physical_bounds`, `physical_to_pixels` and `halo_window`. Positions follow NGFF 0.6, where a translation is the centre of the first pixel: pixel `i` covers `[t + (i - 1/2) s, t + (i + 1/2) s)`, and physical bounds take every pixel they overlap.
 
 ## Plan tiles for parallel processing
@@ -141,6 +152,10 @@ raw = mm.ZarrManager("raw.ome.zarr")
 plan = raw.plan_tiles(1, tile_size={"y": 1024, "x": 1024}, overlap=64, halo=32)  # z is not split
 plan.tiles            # Tile(index, grid, bounds) in level-1 pixels, numbered from 1 in z, y, x order
 plan.rows()           # one dict per tile (bounds, tile size, overlap), e.g. for a CSV
+plan.neighbors(tile)  # the next tile along z, y and x (None at the end of an axis)
+# the tiles CSV of `zarrsmith plan-tiles`: bounds, planned size and overlap, forward neighbours
+from zarrsmith.utils.tiling import write_tiles_csv
+write_tiles_csv(plan, "tiles.csv", source_id="raw", input_uri="raw.ome.zarr")
 
 allocate_zarr("seg.ome.zarr", template="raw.ome.zarr", data_type="label", dtype="uint32",
               **plan.allocate_kwargs("tzyx"))  # level 1, cropped to the ROI, shard = stride

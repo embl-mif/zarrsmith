@@ -133,7 +133,7 @@ mosaic.fuse("slide.ome.zarr", field="field0", ds=(1, 4, 4))
 ```
 
 - **Tiles.** Every store gives one tile per timepoint and channel, from its full-resolution level, with its voxel size. Stores with the same channel names are fused channel by channel (`ch0`, `ch1`, ... without names). A 2D store is a tile one plane deep.
-- **Label stores** (a segmentation run tile by tile) are read when the folder holds only label stores, or with `ZarrMosaicManager(folder, data_type="label")` (`zarrsmith fuse -dt label`). Their tiles are marked as label data, so they are fused into a label image without blending: no `data_type` or `blend` to give. In a folder that also holds images, the images are read and the label stores left out, with a message.
+- **Label stores** (a segmentation run tile by tile) are read when the folder holds only label stores, or with `ZarrMosaicManager(folder, data_type="label")` (`zarrsmith fuse -dty label`, or `zarrsmith fuse-labels`). Their tiles are marked as label data, so they are fused into a label image without blending: no `data_type` or `blend` to give. In a folder that also holds images, the images are read and the label stores left out, with a message.
 - **Left out**, with a message: a store fused from the stores of the same folder, i.e. an earlier fusion of this mosaic written into it (the widget's default output). Fused images record the files or folders of their tiles in the root attribute `zarrsmith_sources`. A fused field moved to another folder is an ordinary tile there.
 - **Without a position**, a store is placed at the origin, with a warning: convert it with a reader that finds the position, or set one with `update_metadata({"translations": ...})`.
 - **Fusion** needs one voxel size and unit for all the stores of a field. Stores that do not touch stay in separate fields, so for separately imaged positions (e.g. the files of a slide scanned one region at a time) the mosaic is mostly a way to see them side by side.
@@ -302,10 +302,10 @@ fuse_tiles(tiles, "merged.ome.zarr", levels=4)  # label tiles: blend="none", dat
 From the command line, give the offsets as a CSV (`store,offset`, one row per tile store) and the mapping as a JSON (`{"id": new_id}`):
 
 ```console
-zarrsmith fuse -i tiles/ -z merged.ome.zarr --label_offsets offsets.csv --label_mapping mapping.json -nl 4 -df 1 2 2
+zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr --label_offsets offsets.csv --label_mapping mapping.json -nl 4 -df 1 2 2
 ```
 
-Either option implies `--data_type label`. The tiles are read from the folder whatever their stores say they hold (a segmentation written by another tool may not mark its stores as labels), unless `--data_type label` is given to read only label stores. Each tile is given only the mapping entries between its offset and the next larger one, the ids it can hold, so the ids of a tile must stay below the next tile's offset.
+`zarrsmith fuse-labels` ([command line](cli.md#stitch-label-tiles)) fuses them as label data; `--pyramid_like IMAGE --pyramid_start_level K` makes the pyramid follow the segmented image. (`zarrsmith fuse` still takes both options, with a note.) The tiles are read from the folder whatever their stores say they hold (a segmentation written by another tool may not mark its stores as labels), unless `--data_type label` is given to read only label stores. Each tile is given only the mapping entries between its offset and the next larger one, the ids it can hold, so the ids of a tile must stay below the next tile's offset.
 
 `plan_fusion(mosaic.tiles, ...)` takes the fusion arguments (`ds`, `projection`, `blend`, `channels`, `crop`, `skip`, `out_dtype`, `midline_axis`, `timepoints`, `reference_timepoint`) and returns the level-0 geometry without reading anything: `plan.summary()`, `plan.shape`, `plan.scale`, `plan.nbytes`.
 
@@ -355,10 +355,10 @@ Tiles that are not in the file keep their stage positions, and entries without a
 | Goal | Command line | Python |
 |---|---|---|
 | Stitch tiles (any microscope) | `zarrsmith fuse -i ACQ -z out.ome.zarr -rds 4 8 8` | `mosaic.fuse(out, ds=(4, 8, 8))` |
-| Fuse the two MuVi cameras of one sample | `zarrsmith fuse -i ACQ -z s0.ome.zarr -f field0 -rds 1 4 4` | `mosaic.fuse(out, field="field0", ds=(1, 4, 4))` |
-| Fuse the two MuVi cameras, registered on the images | `... -f field0 -rc -rch DAPI` | `mosaic.register_cameras(field="field0", reference_channel="DAPI")`, then `mosaic.fuse(...)` |
-| One camera only | `... -f field0 -cam left` | `mosaic.fuse(out, tiles=[t for t in mosaic.field_tiles("field0") if t.camera == "left"])` |
-| Quick look (MIP, cameras merged by max) | `... -f field0 -p max -rds 1 4 4` | `mosaic.fuse(out, field="field0", projection="max")` |
+| Fuse the two MuVi cameras of one sample | `zarrsmith fuse -i ACQ -z s0.ome.zarr -fi field0 -rds 1 4 4` | `mosaic.fuse(out, field="field0", ds=(1, 4, 4))` |
+| Fuse the two MuVi cameras, registered on the images | `... -fi field0 -rc -rch DAPI` | `mosaic.register_cameras(field="field0", reference_channel="DAPI")`, then `mosaic.fuse(...)` |
+| One camera only | `... -fi field0 -cam left` | `mosaic.fuse(out, tiles=[t for t in mosaic.field_tiles("field0") if t.camera == "left"])` |
+| Quick look (MIP, cameras merged by max) | `... -fi field0 -p max -rds 1 4 4` | `mosaic.fuse(out, field="field0", projection="max")` |
 | Every sample of a MuVi experiment | one `--batch` row per field (`fields` column) | loop over `mosaic.fields` |
 | Timelapse, one geometry for all | `... -rtp 0` | `reference_timepoint=0` |
 | Timelapse, each timepoint at its own positions | `... -rtp all` | `reference_timepoint="all"` |
@@ -387,16 +387,16 @@ Raw tiles usually have no pyramid, so every fusion reads the full-resolution dat
 ```console
 zarrsmith fuse -i /path/to/2026-10-14_103957 -z acq_3D.ome.zarr -rds 4 8 8 -nl 3
 zarrsmith fuse -i /path/to/2026-10-14_103957 -z acq_MIP.ome.zarr -rds 1 8 8 -p max -b midline
-zarrsmith fuse -i /path/to/2026-10-14_103957 -z acq_field1_MIP.ome.zarr -rds 1 8 8 -p max -f field1
-zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_MIP.ome.zarr -p max -f A3_field1        # Opera
-zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_raw.ome.zarr -p max -f A3_field1 -nff   # without flat-field
+zarrsmith fuse -i /path/to/2026-10-14_103957 -z acq_field1_MIP.ome.zarr -rds 1 8 8 -p max -fi field1
+zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_MIP.ome.zarr -p max -fi A3_field1        # Opera
+zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_raw.ome.zarr -p max -fi A3_field1 -nff   # without flat-field
 zarrsmith fuse -i /path/to/timelapse -z acq_t.ome.zarr -rds 4 8 8 -rtp 0                        # every timepoint, reference 0
 zarrsmith fuse -i /path/to/timelapse -z part.ome.zarr -rds 4 8 8 -tp 10 11 12 -rtp 0            # some timepoints
 zarrsmith fuse -i tile_scan.czi -z acq_t.ome.zarr -rds 1 2 2 -rtp all                            # own positions per timepoint
-zarrsmith fuse -i /path/to/muvi_acq -z sample0.ome.zarr -f field0 -rds 1 4 4                    # MuVi: both cameras
-zarrsmith fuse -i /path/to/muvi_acq -z sample0_left.ome.zarr -f field0 -cam left                # one camera
-zarrsmith fuse -i /path/to/muvi_acq -z sample0.ome.zarr -f field0 -tfo                          # transforms only
-zarrsmith fuse -i /path/to/muvi_acq -z sample0.ome.zarr -f field0 -tf sample0.transforms.json   # apply a file
+zarrsmith fuse -i /path/to/muvi_acq -z sample0.ome.zarr -fi field0 -rds 1 4 4                    # MuVi: both cameras
+zarrsmith fuse -i /path/to/muvi_acq -z sample0_left.ome.zarr -fi field0 -cam left                # one camera
+zarrsmith fuse -i /path/to/muvi_acq -z sample0.ome.zarr -fi field0 -tfo                          # transforms only
+zarrsmith fuse -i /path/to/muvi_acq -z sample0.ome.zarr -fi field0 -tf sample0.transforms.json   # apply a file
 ```
 
 The fields are listed when the mosaic is loaded. Without `-f/--fields` (or `-t/--tiles`) the first field is fused. Asking for tiles from several fields prints an error and nothing is fused; in a `--batch` run that row is not done, the other rows still run, and the rows that were not fused are listed at the end.

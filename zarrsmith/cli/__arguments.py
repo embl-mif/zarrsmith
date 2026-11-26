@@ -3,6 +3,7 @@ __all__ = ['_parse_arguments']
 import argparse
 import os
 import re
+import sys
 import textwrap
 
 from zarrsmith import __version__
@@ -247,285 +248,191 @@ def parse_subset_spec(value: str):
 
     return subset
 
-def _add_zarr_arguments(parser):
-    """OME-Zarr output options shared by ``convert`` and ``fuse``."""
-    parser.add_argument(
-        '-dr', '--dry_run', action='store_true',
-        help='Print what would be written and stop, writing nothing: the output (axes, size, voxel), '
-             'its chunks and shards (size and count), the pyramid levels and, for fuse, the fusion '
-             'workers; the same recap as the napari widgets. Only metadata is read (fuse: camera '
-             'registration is skipped). With --batch: every row.',
-    )
-    parser.add_argument(
-        '-cs', '--chunk_size',
-        required= False,
-        nargs= '+',
-        help= 'Chunk size in TCZYX format, or whatever axes are present in the dataset.',
-        type= int
-    )
-    parser.add_argument(
-        '-ms', '--max_size',
-        required= False,
-        help= 'Max chunk size in MB (uncompressed). Default: about 4 MB, about cubic in micrometers (from the '
-              'voxel size) with at most 32 z planes. Ignored if --chunk_size is provided.',
-        type= float
-    )
-    parser.add_argument(
-        '-si', '--scene_index',
-        required= False,
-        help= 'Scene index for .czi and .vsi files. Default: the first scene.',
-        type= int
-    )
-    parser.add_argument(
-        '-cn', '--channel_names',
-        required= False,
-        nargs= '+',
-        help= 'Name of channels. Example: -cn bf gfp rfp'
-    )
-    parser.add_argument(
-        '-cc', '--channel_colors',
-        required= False,
-        type= parse_color,
-        nargs= '+',
-        help= 'Color(s) of channel(s). It needs to be hex or matplotlib color name. Example: -cc 0000FF cyan 00ff00'
-    )
-    parser.add_argument(
-        '-zf', '--zarr_format',
-        required=False,
-        choices=[2, 3],
-        type=int,
-        help='Output zarr format. Zarr v2 maps to NGFF 0.4 and Zarr v3 maps to NGFF 0.5.',
-    )
-    parser.add_argument(
-        '-df', '--downscale_factor',
-        required=False,
-        nargs='+',
-        type=int,
-        metavar='FACTOR',
-        help='Pyramid downsampling factor. Use one value for isotropic downsampling or three values for anisotropic Z Y X factors, e.g. -df 1 2 2.',
-    )
-    parser.add_argument(
-        '-nl', '--num_levels',
-        required=False,
-        type=int,
-        metavar='FACTOR',
-        help='Number of pyramidal levels.',
-    )
-    parser.add_argument(
-        '-me', '--method',
-        required=False,
-        choices=['mean', 'nearest', 'mode'],
-        help='Downsampling method of the pyramid levels. Default: mean for intensity data, nearest for labels.',
-    )
-    parser.add_argument(
-        '-s', '--subset',
-        required=False,
-        type=str,
-        help='Subset the input before pyramid generation. Format: axis=selection pairs separated by semicolons, e.g. "y=10:100:2;x=20:80;c=DAPI,GFP". Use integers, comma-separated indices, or slices like 0:10:2; channels (c) also by name.',
-    )
-    parser.add_argument(
-        '-sh', '--shards',
-        required=False,
-        nargs='+',
-        help=(
-            'Zarr v3 sharding for the output. Use "auto" to size shards automatically, '
-            'a shard shape matching the dataset axes, e.g. "-sh 1 1 8 2160 4096", or '
-            '"none" to disable sharding. With --zarr_format 2 sharding is not supported '
-            'and is set to none with a warning. Default: auto.'
-        ),
-    )
-    parser.add_argument(
-        '-stm', '--shard_target_mb',
-        required=False,
-        type=float,
-        help='Target uncompressed shard size in MB, used when --shards auto. Default: 512 for convert, '
-             '256 for fuse (each fusion worker holds one shard).',
-    )
-    parser.add_argument(
-        '-sea', '--shard_exclude_axes',
-        required=False,
-        nargs='+',
-        help=(
-            'Axes that --shards auto never merges chunks along, e.g. "-sea t c". '
-            'Use "none" to allow every axis to merge. Default: t c.'
-        ),
-    )
-    parser.add_argument(
-        '-cp', '--compressor',
-        required=False,
-        type=str.lower,
-        choices=['blosc', 'gzip', 'none'],
-        help=(
-            'Codec of the output. "blosc" is Blosc with zstd and byte shuffle, "gzip" needs --zarr_format 2, '
-            '"none" stores the chunks uncompressed. Default: blosc.'
-        ),
-    )
-    parser.add_argument(
-        '-cpl', '--compressor_level',
-        required=False,
-        type=int,
-        help='Compression level, 0 to 9. Higher levels write much more slowly and rarely save much space. Default: 1.',
-    )
-    parser.add_argument(
-        '-ds', '--drop_singleton',
-        required=False,
-        type=parse_bool,
-        help='Remove singleton t/c/z axes from the output ("true" or "false"). Default: true.',
-    )
-    parser.add_argument(
-        '-nw', '--num_workers',
-        required=False,
-        type=int,
-        help='Number of threads used to write the zarr in parallel. Default: half of the available cores, capped at 8.',
-    )
 
 
 _OVERWRITE_HELP = ('Replace an existing output. Without it a non-empty output is refused. Only a Zarr store '
                    'is ever replaced: any other non-empty folder is refused in all cases.')
 
 
-def _add_mosaic_arguments(parser, legacy: bool = False):
-    """Fusion options of ``fuse`` (``legacy``: the old ``mosaic2zarr`` spelling of --overwrite)."""
-    parser.add_argument(
-        '-rds', '--read_downsample' if legacy else '--downsample', dest='read_downsample', nargs='+', type=int,
-        metavar='FACTOR',
-        help='Downsampling applied while reading the tiles (block mean): one value or Z Y X, e.g. -rds 4 8 8. '
-             'Default: 1 (full resolution).',
-    )
-    parser.add_argument(
-        '-p', '--projection', choices=['none', 'max', 'sum'], default='none',
-        help='"none" writes a 3D volume; "max"/"sum" write a 2D projection along z.',
-    )
-    parser.add_argument(
-        '-b', '--blend', choices=['sigmoid', 'max', 'sum', 'midline', 'none'], default=None,
-        help='How overlapping tiles are merged: sigmoid (default for images: smooth transition across every overlap, '
-             'between tiles and between tile groups), max, sum (overlaps brighter), midline (each tile group, '
-             'e.g. illumination side, up to the middle of the overlap, with a sharp switch there), or none '
-             '(no blending: every voxel is copied unchanged from one tile, cut in the middle of each overlap; '
-             'the default and the only choice for label data).',
-    )
-    parser.add_argument(
-        '-dt', '--data_type', choices=['intensity', 'label'], default=None,
-        help='Write the output as an intensity image or as a label image (tiles of label IDs that '
-             'already agree across tiles; needs --blend none, the default for labels, and an integer dtype). '
-             'Default: label when every tile is label data (a folder of label stores), else intensity. '
-             'For a folder of OME-Zarr stores, it also chooses which stores are read.',
-    )
-    parser.add_argument(
-        '-lo', '--label_offsets',
-        help='Label tiles numbered separately (e.g. a segmentation run tile by tile): a CSV with columns '
-             '"store" (the store name, e.g. tile_1_labels.ome.zarr, or the name without .ome.zarr) and '
-             '"offset", added to every non-zero id of that store so the ids of different tiles never clash. '
-             'Implies --data_type label.',
-    )
-    parser.add_argument(
-        '-lm', '--label_mapping',
-        help='JSON {"id": new_id, ...} applied after --label_offsets, e.g. to merge the objects a tile edge '
-             'cut in two (ids not listed are kept). Implies --data_type label.',
-    )
-    parser.add_argument('-ss', '--sigmoid_steepness', type=float,
-                        help='Steepness of the blend=sigmoid transition: higher is sharper. Default: 4 '
-                             '(the switch takes the central ~27%% of the overlap).')
-    parser.add_argument('-ch', '--channels', nargs='+', help='Tile channels to fuse, in output order. Default: all.')
-    parser.add_argument('-g', '--groups', nargs='+', help='Tile groups to fuse (e.g. L R). Default: all.')
-    parser.add_argument('-cam', '--cameras', nargs='+',
-                        help='Cameras to fuse (MuVi SPIM: left right). Default: all, blended into one image.')
-    parser.add_argument(
-        '-f', '--fields', nargs='+',
-        help='Field to fuse (the output fits it): fields are groups of touching tiles, named field0, field1, '
-             '... by position and listed when the mosaic is loaded. Tiles from several fields are not fused '
-             '(an error is printed). Default: the first field (field0), unless --tiles is given.',
-    )
-    parser.add_argument(
-        '-t', '--tiles', nargs='+',
-        help='Only fuse these tiles (the output fits them): stacks such as 1-x00-y00 (every channel), or '
-             '"channel/stack" ids such as cFos-647/1-x00-y00. Default: all.',
-    )
-    parser.add_argument(
-        '-st', '--skip_tiles', nargs='+',
-        help='Tiles to leave blank (not read; the output keeps its full size): "channel/stack" ids such as '
-             'cFos-647/1-x00-y00, or a stack such as 1-x00-y00 for every channel.',
-    )
-    parser.add_argument(
-        '-tp', '--timepoints', nargs='+', type=int,
-        help='Timepoints to fuse, as listed when the mosaic is loaded. More than one gives an output with a '
-             't axis. Default: all.',
-    )
-    parser.add_argument(
-        '-rtp', '--reference_timepoint', type=parse_timepoint_or_all,
-        help='Timepoint whose tiles set the geometry (output size, tile positions, transitions): every '
-             'timepoint is fused with it. It need not be among --timepoints. "all" places every timepoint '
-             'at its own stage positions instead. Default: the first timepoint.',
-    )
-    parser.add_argument('-ma', '--midline_axis', choices=['x', 'y', 'z'],
-                        help='Axis along which blend=midline/sigmoid separates the groups (or the cameras). '
-                             'Default: z for the opposing cameras of a MuVi SPIM, x otherwise.')
-    parser.add_argument(
-        '-tf', '--transforms',
-        help='Transforms JSON (written by an earlier fuse, possibly edited) giving the tile positions to use '
-             'instead of the stage positions. Tiles not listed keep their stage positions.',
-    )
-    parser.add_argument(
-        '-tfo', '--transforms_only', action='store_true',
-        help='Only compute the transforms and write them (next to the output, <output>.transforms.json): '
-             'nothing is fused. Every fuse writes this file before fusing.',
-    )
-    parser.add_argument(
-        '-rc', '--register_cameras', action='store_true',
-        help='MuVi SPIM: register the camera views on the images before fusing. The transform between '
-             'the right and the left view (translation and rotation, see --register_model) is measured '
-             'around the z centre of the stack, where the fusion hands over from one camera to the other, '
-             'and applied to the right view (the detection paths of the two cameras never match exactly, so '
-             'the stage positions alone leave a jump). The transforms file records the registration: reuse '
-             'it with --transforms.',
-    )
-    parser.add_argument(
-        '-rm', '--register_model', choices=['rigid', 'translation'], default='rigid',
-        help='Transform fitted by --register_cameras: rigid (translation and rotation, default; the right '
-             'view is resampled on the left grid) or translation (the right view is only moved).',
-    )
-    parser.add_argument(
-        '-rch', '--register_channel',
-        help='Reference channel of --register_cameras (e.g. a nuclear stain such as DAPI): the transform is '
-             'measured on it and applied to every channel. "all" registers every channel on its own images '
-             '(also corrects a chromatic difference between the cameras; a channel that cannot be registered '
-             'takes the transform of the best registered one). Default: the first channel. Timepoints follow '
-             '--reference_timepoint: measured at the reference timepoint and applied to all, or at every '
-             'timepoint with -rtp all.',
-    )
-    parser.add_argument('-od', '--out_dtype', help='Output dtype, e.g. uint16 or float32. Default: input dtype '
-                        '(float32 for blend=sum).')
-    parser.add_argument('-rw', '--read_workers', type=int, default=0,
-                        help='Regions fused in parallel (worker processes). Default: 0, chosen from the cores, '
-                             'the regions and the free memory, as in the napari widget. Not to be confused '
-                             'with -nw (write threads).')
-    parser.add_argument('-td', '--temp_dir', help='Folder for the temporary fused level 0. Default: next to the output.')
-    parser.add_argument('-nff', '--no_flatfield', dest='flatfield', action='store_false',
-                        help='Opera: do not apply the flat-field correction stored by Harmony '
-                             '(applied by default, as in the images stitched by Harmony).')
-    if legacy:
-        parser.add_argument('-ow', '--overwrite', type=parse_bool, default=False,
-                            help='Replace an existing output ("true" or "false").')
-    else:
-        parser.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
+# ---------------------------------------------------------------------------------------
+# Help layout: every command lists its options in the same sections, in this order:
+#   Input and output | Input | What to read | <the command's own sections> | Pyramid |
+#   Storage layout | Channel metadata | Performance | Run
+# Options marked advanced (most of Storage layout, Channel metadata, Performance, and a few
+# fine-tuning options) are only shown by `zarrsmith <command> --help-all`; they work either way.
+# ---------------------------------------------------------------------------------------
+
+_ADVANCED = '_zarrsmith_advanced'
 
 
-def _adapt_zarr_help_for_mosaic(parser):
-    """Reword the shared output options where they mean something specific for a mosaic."""
-    helps = {
-        '--chunk_size': 'Output chunk size in C Z Y X (C Y X for projections) order, after T for several timepoints.',
-        '--max_size': 'Max output chunk size in MB (default about 4 MB). Ignored if --chunk_size is provided.',
-        '--scene_index': 'Scene of a Zeiss mosaic to load (default: all of them, one field per scene).',
-        '--channel_names': 'Names of the output channels. Example: -cn autofluo cfos',
-        '--subset': 'Crop the fused output and/or select channels: axis=selection pairs separated by semicolons, '
-                    'e.g. "z=0:100;y=200:900;c=1" or "c=DAPI,GFP" (channels by index or name). z/y/x are in output voxels (after --downsample); '
-                    'slices may not have a step. Timepoints are chosen with --timepoints.',
-    }
-    for action in parser._actions:
-        for flag, text in helps.items():
-            if flag in action.option_strings:
-                action.help = text
+def _section(parser, title, advanced=False):
+    group = parser.add_argument_group(title)
+    setattr(group, _ADVANCED, advanced)
+    return group
 
+
+def _add(group, *flags, advanced=None, **kwargs):
+    """``group.add_argument`` that marks the option as advanced (hidden without --help-all)."""
+    action = group.add_argument(*flags, **kwargs)
+    setattr(action, _ADVANCED, getattr(group, _ADVANCED, False) if advanced is None else advanced)
+    return action
+
+
+class _DeprecatedOption(argparse.Action):
+    """An old spelling of an option: still works, with a warning naming the new one; not in the help."""
+
+    def __init__(self, option_strings, dest, new=None, base='store', **kwargs):
+        self.new, self.base = new, base
+        if base in ('store_true', 'store_false'):
+            kwargs['nargs'] = 0
+        kwargs.setdefault('default', argparse.SUPPRESS)
+        kwargs['help'] = argparse.SUPPRESS
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(f"Note: {option_string} is now {self.new}; the old spelling still works for now.", file=sys.stderr)
+        value = {'store_true': True, 'store_false': False}.get(self.base, values)
+        setattr(namespace, self.dest, value)
+
+
+def _deprecated(group, *flags, dest, new, **kwargs):
+    group.add_argument(*flags, dest=dest, action=_DeprecatedOption, new=new, **kwargs)
+
+
+class _DtypeOrDataType(argparse.Action):
+    """fuse ``-dt/--dtype``: the output dtype. ``-dt`` used to be ``--data_type``, so ``-dt label``
+    and ``-dt intensity`` still set the data type, with a note."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if str(values).lower() in ('intensity', 'label'):
+            print(f"Note: {option_string} {values} sets the data type: {option_string} is now the output dtype, "
+                  f"use -dty/--data_type {values}.", file=sys.stderr)
+            namespace.data_type = str(values).lower()
+        else:
+            namespace.out_dtype = values
+
+
+def _finish_help(parser, command, show_all):
+    """Hide the advanced options unless --help-all, and say how many there are."""
+    hidden = [a for a in parser._actions if getattr(a, _ADVANCED, False) and a.help is not argparse.SUPPRESS]
+    _add(parser._optionals, '--help-all', action='store_true',
+         help='Show every option, including storage layout, channel metadata and performance options.')
+    if show_all or not hidden:
+        return
+    for action in hidden:
+        action.help = argparse.SUPPRESS
+    note = f"{len(hidden)} more options (storage layout, channel metadata, performance, fine tuning): " \
+           f"`zarrsmith {command} --help-all`."
+    parser.epilog = f"{parser.epilog}\n\n{note}" if parser.epilog else note
+
+
+# ---- Sections shared by several commands -----------------------------------------------
+
+def _io_section(parser, *, input_help, output_help='Path to the output .ome.zarr.', batch=True,
+                required=False, output_type=os.path.abspath, input_type=None):
+    group = _section(parser, 'Input and output' + (' (or --batch)' if batch and not required else ''))
+    _add(group, '-i', '--input_path', required=required, type=input_type or valid_input_path, help=input_help)
+    _add(group, '-z', '--zarr_path', required=required, type=output_type, help=output_help)
+    if batch and not required:
+        _add(group, '--batch', metavar='CSV', type=valid_input_path,
+             help='Run every row of this CSV file instead (see the description above).')
+    return group
+
+
+def _pyramid_section(parser, *, like=False, start_level=False, defaults=None, method=True,
+                     num_levels_help='Number of pyramidal levels.',
+                     factor_help='Pyramid downsampling factor. Use one value for isotropic downsampling or three '
+                                 'values for anisotropic Z Y X factors, e.g. -df 1 2 2.'):
+    defaults = defaults or {}
+    group = _section(parser, 'Pyramid')
+    _add(group, '-nl', '--num_levels', type=int, metavar='N', help=num_levels_help, **defaults.get('num_levels', {}))
+    _add(group, '-df', '--downscale_factor', nargs='+', type=int, metavar='FACTOR', help=factor_help,
+         **defaults.get('downscale_factor', {}))
+    if method:
+        _add(group, '-me', '--method', choices=['mean', 'nearest', 'mode'],
+             help='Downsampling method of the pyramid levels. Default: mean for intensity data, nearest for labels.')
+    if like:
+        _add(group, '-pl', '--pyramid_like', metavar='IMAGE', type=valid_input_path,
+             help='Make the pyramid follow this OME-Zarr image from --pyramid_start_level on: the same number of '
+                  'levels below it and the same factor between them, so level k of the output matches level '
+                  'start + k of the image (e.g. labels of an image segmented at a coarser level). '
+                  '--num_levels/--downscale_factor override it.')
+        _add(group, '-psl', '--pyramid_start_level', type=int, default=0, metavar='LEVEL',
+             help='Level of --pyramid_like that the output\'s level 0 matches.')
+    if start_level:
+        _add(group, '-sl', '--start_level', default='0', help=start_level)
+    return group
+
+
+def _storage_section(parser, *, chunk_help='Chunk size in TCZYX format, or whatever axes are present in the dataset.',
+                     max_size_help='Max chunk size in MB (uncompressed). Default: about 4 MB, about cubic in '
+                                   'micrometers (from the voxel size) with at most 32 z planes. Ignored if '
+                                   '--chunk_size is provided.',
+                     shard_target_help='Target uncompressed shard size in MB, used when --shards auto. Default: '
+                                       '512 for convert, 256 for fuse (each fusion worker holds one shard).'):
+    group = _section(parser, 'Storage layout', advanced=True)
+    _add(group, '-zf', '--zarr_format', choices=[2, 3], type=int, advanced=False,
+         help='Output zarr format. Zarr v2 maps to NGFF 0.4 and Zarr v3 maps to NGFF 0.5.')
+    _add(group, '-cs', '--chunk_size', nargs='+', type=int, advanced=False, help=chunk_help)
+    _add(group, '-ms', '--max_size', type=float, help=max_size_help)
+    _add(group, '-sh', '--shards', nargs='+',
+         help='Zarr v3 sharding for the output. Use "auto" to size shards automatically, a shard shape matching '
+              'the dataset axes, e.g. "-sh 1 1 8 2160 4096", or "none" to disable sharding. With --zarr_format 2 '
+              'sharding is not supported and is set to none with a warning. Default: auto.')
+    _add(group, '-stm', '--shard_target_mb', type=float, help=shard_target_help)
+    _add(group, '-sea', '--shard_exclude_axes', nargs='+',
+         help='Axes that --shards auto never merges chunks along, e.g. "-sea t c". Use "none" to allow every '
+              'axis to merge. Default: t c.')
+    _add(group, '-cp', '--compressor', type=str.lower, choices=['blosc', 'gzip', 'none'],
+         help='Codec of the output. "blosc" is Blosc with zstd and byte shuffle, "gzip" needs --zarr_format 2, '
+              '"none" stores the chunks uncompressed. Default: blosc.')
+    _add(group, '-cpl', '--compressor_level', type=int,
+         help='Compression level, 0 to 9. Higher levels write much more slowly and rarely save much space. Default: 1.')
+    _add(group, '-ds', '--drop_singleton', type=parse_bool,
+         help='Remove singleton t/c/z axes from the output ("true" or "false"). Default: true.')
+    return group
+
+
+def _channel_metadata_section(parser, names_help='Name of channels. Example: -cn bf gfp rfp'):
+    group = _section(parser, 'Channel metadata', advanced=True)
+    _add(group, '-cn', '--channel_names', nargs='+', help=names_help)
+    _add(group, '-cc', '--channel_colors', type=parse_color, nargs='+',
+         help='Color(s) of channel(s). It needs to be hex or matplotlib color name. Example: -cc 0000FF cyan 00ff00')
+    return group
+
+
+def _performance_section(parser, *, read_workers=False, temp_dir=False, num_workers_default=None,
+                         num_workers_help='Number of threads used to write the zarr in parallel. Default: half of '
+                                          'the available cores, capped at 8.'):
+    group = _section(parser, 'Performance', advanced=True)
+    kwargs = {} if num_workers_default is None else {'default': num_workers_default}
+    _add(group, '-nw', '--num_workers', type=int, help=num_workers_help, **kwargs)
+    if read_workers:
+        _add(group, '-rw', '--read_workers', type=int, default=0,
+             help='Regions fused in parallel (worker processes). Default: 0, chosen from the cores, the regions and '
+                  'the free memory, as in the napari widget. Not to be confused with -nw (write threads).')
+    if temp_dir:
+        _add(group, '-td', '--temp_dir', help=argparse.SUPPRESS)  # deprecated and ignored
+    return group
+
+
+def _run_section(parser, *, dry_run=True, overwrite=True, legacy_overwrite=False, dry_run_help=None):
+    group = _section(parser, 'Run')
+    if dry_run:
+        _add(group, '-dr', '--dry_run', action='store_true', help=dry_run_help or (
+            'Print what would be written and stop, writing nothing: the output (axes, size, voxel), its chunks '
+            'and shards (size and count), the pyramid levels and, for fuse, the fusion workers; the same recap '
+            'as the napari widgets. Only metadata is read (fuse: camera registration is skipped). With --batch: '
+            'every row.'))
+    if legacy_overwrite:
+        _add(group, '-ow', '--overwrite', type=parse_bool, default=False,
+             help='Replace an existing output ("true" or "false").')
+    elif overwrite:
+        _add(group, '-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
+    return group
+
+
+# ---- convert ----------------------------------------------------------------------------
 
 CONVERT_HELP = """\
     Convert a dataset to OME-Zarr, or every dataset listed in a CSV file (--batch).
@@ -555,23 +462,47 @@ CONVERT_HELP = """\
     skipped with a warning, and the other rows still run.
 """
 
+CONVERT_MICROSCOPES = ['luxendo', 'opera', 'viventis', 'zeiss', 'evident', 'zarrv04', 'zarr', 'scape']
+
+
+def _add_convert_arguments(parser, *, legacy=False):
+    _io_section(parser, required=legacy, batch=not legacy,
+                input_help='Path to input file.' if legacy else 'Path to the input dataset (file or folder).')
+    read = _section(parser, 'What to read')
+    _add(read, '-m', '--microscope', default=None, choices=CONVERT_MICROSCOPES, type=str,
+         help='Microscope used for imaging. Leave empty to auto-detect from the input path.')
+    _add(read, '-si', '--scene_index', type=int, help='Scene index for .czi and .vsi files. Default: the first scene.')
+    _add(read, '-s', '--subset', type=str,
+         help='Subset the input before pyramid generation. Format: axis=selection pairs separated by semicolons, '
+              'e.g. "y=10:100:2;x=20:80;c=DAPI,GFP". Use integers, comma-separated indices, or slices like '
+              '0:10:2; channels (c) also by name.')
+    _pyramid_section(parser)
+    _storage_section(parser)
+    _channel_metadata_section(parser)
+    _performance_section(parser)
+    _run_section(parser)
+
+
+# ---- fuse -------------------------------------------------------------------------------
+
 FUSE_HELP = """\
-    Fuse the raw tiles of a mosaic (a raw Luxendo acquisition, an Opera Harmony export) into one
-    OME-Zarr image, 3D or a 2D projection (-p max), or every mosaic listed in a CSV file (--batch).
-    The output options are those of `zarrsmith convert`; -s/--subset crops the fused output
-    (z/y/x in output voxels, after --downsample) and selects channels (c).
+    Fuse the raw tiles of a mosaic (a raw Luxendo acquisition, an Opera Harmony export, a Zeiss .czi,
+    a folder of OME-Zarr stores) into one OME-Zarr image, 3D or a 2D projection (-p max), or every
+    mosaic listed in a CSV file (--batch). The output options are those of `zarrsmith convert`;
+    -s/--subset crops the fused output (z/y/x in output voxels, after --downsample) and selects
+    channels (c). Label tiles of a tiled segmentation: see `zarrsmith fuse-labels`.
 
     Examples:
       zarrsmith fuse -i /path/to/2026-10-14_103957 -z out_3D.ome.zarr -rds 4 8 8 -nl 3
       zarrsmith fuse -i /path/to/2026-10-14_103957 -z out_MIP.ome.zarr -rds 1 8 8 -p max -b midline
-      zarrsmith fuse -i /path/to/2026-10-14_103957 -z field1_MIP.ome.zarr -rds 1 8 8 -p max -f field1 -st 3-x01-y00
-      zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_MIP.ome.zarr -p max -f A3_field1
+      zarrsmith fuse -i /path/to/2026-10-14_103957 -z field1_MIP.ome.zarr -rds 1 8 8 -p max -fi field1 -st 3-x01-y00
+      zarrsmith fuse -i "/path/to/plate-Measurement 1" -z A3_MIP.ome.zarr -p max -fi A3_field1
       zarrsmith fuse -i /path/to/timelapse -z out_t.ome.zarr -rds 4 8 8 -tp 0 1 2 3 -rtp 0
       zarrsmith fuse --batch mosaics.csv
 
     Tiles that touch or overlap form a field (field0, field1, ... ordered by position; for Opera plates
     one set per well: A3_field0, A3_field1, ...); the fields are listed when the mosaic is loaded. Only
-    one field is fused at a time: the first one by default, another with -f. Tiles from separate fields
+    one field is fused at a time: the first one by default, another with -fi. Tiles from separate fields
     are never fused together: an error is printed and the fusion is not done (in a batch, the other
     rows still run). Opera tiles are flat-field corrected as in Harmony, unless -nff is given.
 
@@ -606,6 +537,261 @@ FUSE_HELP = """\
     The napari "Mosaic Fusion" widget writes such files with "Append to batch CSV".
 """
 
+FUSE_MICROSCOPES = ['luxendo', 'opera', 'zeiss', 'zarr']
+
+_MOSAIC_STORAGE_HELP = dict(
+    chunk_help='Output chunk size in C Z Y X (C Y X for projections) order, after T for several timepoints.',
+    max_size_help='Max output chunk size in MB (default about 4 MB). Ignored if --chunk_size is provided.',
+)
+
+
+def _add_fuse_arguments(parser, *, legacy=False):
+    _io_section(parser, required=legacy, batch=not legacy,
+                input_help='Acquisition folder.' if legacy else
+                'Acquisition folder (for Luxendo: the folder containing raw/; for Opera: the Harmony export '
+                'containing Images/).')
+
+    read = _section(parser, 'What to read')
+    _add(read, '-m', '--microscope', default=None, choices=FUSE_MICROSCOPES, type=str,
+         help='Microscope of the mosaic. Leave empty to auto-detect (raw Luxendo acquisitions, Opera Harmony '
+              'exports with Images/Index.xml, Zeiss .czi files, folders of OME-Zarr stores placed at their '
+              'NGFF translation).')
+    _add(read, '-si', '--scene_index', type=int,
+         help='Scene of a Zeiss mosaic to load (default: all of them, one field per scene).')
+    _add(read, '-nff', '--no_flatfield', dest='flatfield', action='store_false',
+         help='Opera: do not apply the flat-field correction stored by Harmony (applied by default, as in the '
+              'images stitched by Harmony).')
+    _add(read, '-ch', '--channels', nargs='+', help='Tile channels to fuse, in output order. Default: all.')
+    _add(read, '-gr', '--groups', nargs='+', help='Tile groups to fuse (e.g. L R). Default: all.')
+    _deprecated(read, '-g', dest='groups', new='-gr/--groups', nargs='+')
+    _add(read, '-cam', '--cameras', nargs='+',
+         help='Cameras to fuse (MuVi SPIM: left right). Default: all, blended into one image.')
+    _add(read, '-fi', '--fields', nargs='+',
+         help='Field to fuse (the output fits it): fields are groups of touching tiles, named field0, field1, '
+              '... by position and listed when the mosaic is loaded. Tiles from several fields are not fused '
+              '(an error is printed). Default: the first field (field0), unless --tiles is given.')
+    _deprecated(read, '-f', dest='fields', new='-fi/--fields', nargs='+')
+    _add(read, '-tl', '--tiles', nargs='+',
+         help='Only fuse these tiles (the output fits them): stacks such as 1-x00-y00 (every channel), or '
+              '"channel/stack" ids such as cFos-647/1-x00-y00. Default: all.')
+    _deprecated(read, '-t', dest='tiles', new='-tl/--tiles', nargs='+')
+    _add(read, '-st', '--skip_tiles', nargs='+',
+         help='Tiles to leave blank (not read; the output keeps its full size): "channel/stack" ids such as '
+              'cFos-647/1-x00-y00, or a stack such as 1-x00-y00 for every channel.')
+    _add(read, '-tp', '--timepoints', nargs='+', type=int,
+         help='Timepoints to fuse, as listed when the mosaic is loaded. More than one gives an output with a '
+              't axis. Default: all.')
+    _add(read, '-rtp', '--reference_timepoint', type=parse_timepoint_or_all,
+         help='Timepoint whose tiles set the geometry (output size, tile positions, transitions): every '
+              'timepoint is fused with it. It need not be among --timepoints. "all" places every timepoint '
+              'at its own stage positions instead. Default: the first timepoint.')
+    _add(read, '-s', '--subset', type=str,
+         help='Crop the fused output and/or select channels: axis=selection pairs separated by semicolons, '
+              'e.g. "z=0:100;y=200:900;c=1" or "c=DAPI,GFP" (channels by index or name). z/y/x are in output '
+              'voxels (after --downsample); slices may not have a step. Timepoints are chosen with --timepoints.')
+
+    fusion = _section(parser, 'Fusion')
+    _add(fusion, '-rds', '--read_downsample' if legacy else '--downsample', dest='read_downsample', nargs='+',
+         type=int, metavar='FACTOR',
+         help='Downsampling applied while reading the tiles (block mean): one value or Z Y X, e.g. -rds 4 8 8. '
+              'Default: 1 (full resolution).')
+    _add(fusion, '-p', '--projection', choices=['none', 'max', 'sum'], default='none',
+         help='"none" writes a 3D volume; "max"/"sum" write a 2D projection along z.')
+    _add(fusion, '-b', '--blend', choices=['sigmoid', 'max', 'sum', 'midline', 'none'], default=None,
+         help='How overlapping tiles are merged: sigmoid (default for images: smooth transition across every '
+              'overlap, between tiles and between tile groups), max, sum (overlaps brighter), midline (each tile '
+              'group, e.g. illumination side, up to the middle of the overlap, with a sharp switch there), or none '
+              '(no blending: every voxel is copied unchanged from one tile, cut in the middle of each overlap; '
+              'the default and the only choice for label data).')
+    _add(fusion, '-ss', '--sigmoid_steepness', type=float, advanced=True,
+         help='Steepness of the blend=sigmoid transition: higher is sharper. Default: 4 (the switch takes the '
+              'central ~27%% of the overlap).')
+    _add(fusion, '-ma', '--midline_axis', choices=['x', 'y', 'z'], advanced=True,
+         help='Axis along which blend=midline/sigmoid separates the groups (or the cameras). Default: z for the '
+              'opposing cameras of a MuVi SPIM, x otherwise.')
+    _add(fusion, '-dt', '--dtype', dest='out_dtype', action=_DtypeOrDataType,
+         help='Output dtype, e.g. uint16 or float32. Default: input dtype (float32 for blend=sum).')
+    _deprecated(fusion, '-od', '--out_dtype', dest='out_dtype', new='-dt/--dtype')
+    _add(fusion, '-dty', '--data_type', choices=['intensity', 'label'], default=None,
+         help='Write the output as an intensity image or as a label image (tiles of label IDs that already '
+              'agree across tiles; needs --blend none, the default for labels, and an integer dtype). Default: '
+              'label when every tile is label data (a folder of label stores), else intensity. For a folder of '
+              'OME-Zarr stores, it also chooses which stores are read.')
+    _deprecated(fusion, '-lo', '--label_offsets', dest='label_offsets', default=None,
+                new='`zarrsmith fuse-labels --label_offsets`')
+    _deprecated(fusion, '-lm', '--label_mapping', dest='label_mapping', default=None,
+                new='`zarrsmith fuse-labels --label_mapping`')
+
+    place = _section(parser, 'Tile positions')
+    _add(place, '-tf', '--transforms',
+         help='Transforms JSON (written by an earlier fuse, possibly edited) giving the tile positions to use '
+              'instead of the stage positions. Tiles not listed keep their stage positions.')
+    _add(place, '-tfo', '--transforms_only', action='store_true',
+         help='Only compute the transforms and write them (next to the output, <output>.transforms.json): '
+              'nothing is fused. Every fuse writes this file before fusing.')
+    _add(place, '-rc', '--register_cameras', action='store_true',
+         help='MuVi SPIM: register the camera views on the images before fusing. The transform between the right '
+              'and the left view (translation and rotation, see --register_model) is measured around the z centre '
+              'of the stack, where the fusion hands over from one camera to the other, and applied to the right '
+              'view (the detection paths of the two cameras never match exactly, so the stage positions alone '
+              'leave a jump). The transforms file records the registration: reuse it with --transforms.')
+    _add(place, '-rm', '--register_model', choices=['rigid', 'translation'], default='rigid', advanced=True,
+         help='Transform fitted by --register_cameras: rigid (translation and rotation, default; the right view is '
+              'resampled on the left grid) or translation (the right view is only moved).')
+    _add(place, '-rch', '--register_channel', advanced=True,
+         help='Reference channel of --register_cameras (e.g. a nuclear stain such as DAPI): the transform is '
+              'measured on it and applied to every channel. "all" registers every channel on its own images (also '
+              'corrects a chromatic difference between the cameras; a channel that cannot be registered takes the '
+              'transform of the best registered one). Default: the first channel. Timepoints follow '
+              '--reference_timepoint: measured at the reference timepoint and applied to all, or at every '
+              'timepoint with -rtp all.')
+
+    _pyramid_section(parser, like=not legacy)
+    _storage_section(parser, **_MOSAIC_STORAGE_HELP)
+    _channel_metadata_section(parser, names_help='Names of the output channels. Example: -cn autofluo cfos')
+    _performance_section(parser, read_workers=True, temp_dir=True)
+    _run_section(parser, legacy_overwrite=legacy)
+
+
+# ---- fuse-labels ------------------------------------------------------------------------
+
+FUSE_LABELS_HELP = """\
+    Stitch the label stores of a segmentation run tile by tile into one OME-Zarr label image.
+    Every store in the folder sits at its own NGFF translation. Tiles numbered separately get an
+    offset each (--label_offsets), then the objects cut by a tile edge are merged (--label_mapping,
+    e.g. from a label solver). Labels are never blended: every voxel is copied from one tile,
+    overlaps are cut in their middle, and the pyramid levels sample voxels instead of averaging them.
+
+    Examples:
+      zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr -lo offsets.csv -lm mapping.json
+      zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr -lo offsets.csv -lm mapping.json \\
+          --pyramid_like image.ome.zarr --pyramid_start_level 1
+      zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr        (ids already agree across tiles)
+
+    --label_offsets is a CSV with the columns store (the store name, with or without .ome.zarr) and
+    offset, added to every non-zero id of that store; every store needs one. --label_mapping is a JSON
+    {"id": new_id} applied after the offsets; ids not listed are kept. Each tile is given only the
+    mapping entries between its offset and the next larger one, so the ids of a tile must stay below
+    the next tile's offset. Without either, only stores marked as labels are read, as they are.
+"""
+
+
+def _add_fuse_labels_arguments(parser):
+    _io_section(parser, batch=False, required=True, input_help='Folder of the tile label stores (OME-Zarr).',
+                output_help='Path to the merged label .ome.zarr.')
+    labels = _section(parser, 'Labels')
+    _add(labels, '-lo', '--label_offsets', metavar='CSV', type=valid_input_path,
+         help='CSV store,offset: the offset added to every non-zero id of each store.')
+    _add(labels, '-lm', '--label_mapping', metavar='JSON', type=valid_input_path,
+         help='JSON {"id": new_id}, applied after the offsets (e.g. objects merged across tile edges).')
+    _add(labels, '-dt', '--dtype', dest='out_dtype', default='uint32', help='Output dtype (an integer type).')
+    _pyramid_section(parser, like=True)
+    _storage_section(parser, **_MOSAIC_STORAGE_HELP,
+                     shard_target_help='Target uncompressed shard size in MB, used when --shards auto. Default: 256 '
+                                       '(each fusion worker holds one shard).')
+    _performance_section(parser, read_workers=True)
+    _run_section(parser, dry_run_help='Print what would be written and stop, writing nothing: the output, its '
+                                      'chunks and shards, the pyramid levels and the fusion workers.')
+
+
+# ---- plan-tiles -------------------------------------------------------------------------
+
+PLAN_TILES_HELP = """\
+    Cut one level of an OME-Zarr image into overlapping tiles for parallel processing, and write
+    them to a CSV: one row per tile with its bounds (voxels of that level, half-open [min, max)),
+    its forward neighbours and the planned tile size and overlap.
+
+    Examples:
+      zarrsmith plan-tiles -i image.ome.zarr -oc tiles.csv -ts 512 -ov 32 -ha 16
+      zarrsmith plan-tiles -i image.ome.zarr -oc tiles.csv -ts "y=1024;x=1024" -ov 32 -lv 1
+      zarrsmith plan-tiles -i image.ome.zarr -oc tiles.csv -mtv 300000000 -ov 16 -ha 20
+      zarrsmith plan-tiles -i image.ome.zarr -oc tiles.csv -ts 100 -ov 5 -ha 10 -pu --roi "y=50:400;x=0:300"
+
+    An axis given a tile size is cut at that size; an axis without one is left whole, unless a tile
+    would read more than --max_tile_voxels voxels (halo included, times --resize ** ndim): those axes
+    are then cut, choosing the tile counts with the least cut area that fit. A last tile smaller than
+    the halo (at least 2 voxels) is merged into the one before it. Tiles are numbered from 1, x
+    fastest, then y, then z.
+
+    CSV columns: dataset_id (<id>__<tile_id>), source_dataset_id, tile_id, tile_index, input_uri,
+    x_min ... z_max, resolution_level, tile_overlap_<ax>, tile_size_<ax> (the planned size; an axis
+    left whole reports its ROI length and overlap 0) and the forward neighbours right_* (next along x),
+    bottom_* (along y), behind_* (along z): their dataset_id and tile_index, blank at the end of an axis.
+"""
+
+
+def parse_axis_values(value):
+    """``--tile_size`` / ``--overlap`` / ``--halo``: one number for every spatial axis, or
+    ``"z=16;y=512;x=512"``."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if '=' not in text:
+        try:
+            return float(text)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"Invalid value '{value}': a number, or e.g. \"y=512;x=512\".") from exc
+    out = {}
+    for part in re.split(r'[;,\s]+', text):
+        if not part:
+            continue
+        match = re.fullmatch(r'([zyxZYX])=([0-9.eE+-]+)', part)
+        if match is None:
+            raise argparse.ArgumentTypeError(f"Invalid '{part}': use axis=value with z, y or x, e.g. \"y=512;x=512\".")
+        out[match.group(1).lower()] = float(match.group(2))
+    return out
+
+
+def parse_roi_spec(value):
+    """``--roi "z=0:40;y=100:900"`` (voxels, or physical units with --physical); a side may be empty."""
+    if value is None:
+        return None
+    roi = {}
+    for part in re.split(r'[;,\s]+', str(value).strip()):
+        if not part:
+            continue
+        match = re.fullmatch(r'([zyxZYX])=([0-9.eE+-]*):([0-9.eE+-]*)', part)
+        if match is None:
+            raise argparse.ArgumentTypeError(f"Invalid ROI '{part}'. Use axis=start:stop, e.g. \"y=100:900;x=0:500\".")
+        axis, start, stop = match.groups()
+        roi[axis.lower()] = (float(start) if start else None, float(stop) if stop else None)
+    return roi or None
+
+
+def _add_plan_tiles_arguments(parser):
+    io = _section(parser, 'Input and output')
+    _add(io, '-i', '--input_path', required=True, type=valid_input_path, help='OME-Zarr image to tile.')
+    _add(io, '-oc', '--output_csv', required=True, type=os.path.abspath, help='Path of the tiles CSV.')
+    _add(io, '-id', '--source_id',
+         help='source_dataset_id of the rows (dataset_id is <id>__<tile_id>). Default: the store name without '
+              '.ome.zarr.')
+    tiles = _section(parser, 'Tiles')
+    _add(tiles, '-lv', '--level', type=int, default=0, help='Pyramid level to tile; the bounds are in its voxels.')
+    _add(tiles, '-ts', '--tile_size', type=parse_axis_values,
+         help='Tile size: one value for every spatial axis, or per axis, e.g. "y=1024;x=1024". An axis without '
+              'one is left whole unless --max_tile_voxels cuts it.')
+    _add(tiles, '-ov', '--overlap', type=parse_axis_values, default=0,
+         help='Overlap between neighbouring tiles: one value, or per axis.')
+    _add(tiles, '-ha', '--halo', type=parse_axis_values, default=0,
+         help='Context the processing step reads around each tile: counts towards --max_tile_voxels, and is the '
+              'smallest last tile before it is merged into the previous one.')
+    _add(tiles, '-mtv', '--max_tile_voxels', type=int,
+         help='Most voxels one tile may read, halo included (e.g. what fits in GPU or host memory). Axes without '
+              'a tile size are cut to fit it.')
+    _add(tiles, '-rs', '--resize', type=float, default=1.0,
+         help='Linear factor by which the processing step enlarges each tile (e.g. 30 / diameter for Cellpose); '
+              'the budget is checked on voxels * resize ** ndim.')
+    _add(tiles, '-roi', '--roi', type=parse_roi_spec,
+         help='Part of the level to tile, e.g. "z=0:40;y=100:900". Default: the whole level.')
+    _add(tiles, '-pu', '--physical', action='store_true',
+         help='--tile_size, --overlap, --halo and --roi are in physical units (the NGFF translation is the centre '
+              'of the first voxel). Default: voxels of --level.')
+    _run_section(parser, overwrite=False, dry_run_help='Print the plan (tile counts, sizes, largest read) and '
+                                                       'write nothing.')
+
+
+# ---- chromatic-shift --------------------------------------------------------------------
+
 CHROMATIC_SHIFT_HELP = """\
     Measure the axial (Z) chromatic shift between the channels of an OME-Zarr image on the sample
     itself (its lower and upper surfaces) and write a corrected copy with the same chunks, shards,
@@ -630,28 +816,6 @@ CHROMATIC_SHIFT_HELP = """\
       /path/to/a.ome.zarr  | /path/to/a_csc.ome.zarr  | /path/to/a_csc.json  | cFos-647          | 150
       /path/to/b.ome.zarr  | /path/to/b_csc.ome.zarr  |                      | 0                 |
     Leave a cell empty for the default; shifts are space separated.
-"""
-
-
-RESAMPLE_HELP = """\
-    Change the pixel size of an OME-Zarr image, rescaling the data accordingly, and write a copy with
-    the same compression and number of levels as the input, and chunks and shards fitted to each level.
-    Image groups and labels are resampled too. Run `zarrsmith convert` first for other formats.
-
-    Examples:
-      zarrsmith resample -i brain.ome.zarr -z brain_1um.ome.zarr -ps 1
-      zarrsmith resample -i brain.ome.zarr -z brain_iso.ome.zarr -ps 1 0.5 0.5
-      zarrsmith resample --batch images.csv
-
-    The pixel size is in the units of the dataset, usually micrometer. Images use linear interpolation,
-    with anti-aliasing on the axes that shrink, and labels use nearest neighbour.
-
-    The --batch CSV file has the columns input | output | pixel_size, plus any of fast | include_groups |
-    include_labels | overwrite | num_workers, with the same meaning as the options below, e.g.
-      input                | output                  | pixel_size  | fast
-      /path/to/a.ome.zarr  | /path/to/a_1um.ome.zarr | 1           |
-      /path/to/b.ome.zarr  | /path/to/b_iso.ome.zarr | 1 0.5 0.5   | true
-    Leave a cell empty for the default; the pixel size is space separated.
 """
 
 
@@ -680,81 +844,101 @@ def parse_refine_level(value):
 def _add_chromatic_shift_arguments(parser):
     # Options whose default lives in the library are left out of the namespace when not
     # given (SUPPRESS), so the help shows the real default instead of "(default: None)".
-    io = parser.add_argument_group('Input and output (or --batch)')
-    io.add_argument('-i', '--input_path', type=valid_input_path, help='Path to the input OME-Zarr image.')
-    io.add_argument('-z', '--zarr_path', type=os.path.abspath,
-                    help='Path to the corrected .ome.zarr. Leave out to only measure the shift.')
-    io.add_argument('-r', '--report', type=os.path.abspath,
-                    help='Save the estimate report (JSON) to this file.')
-    io.add_argument('--batch', metavar='CSV', type=valid_input_path,
-                    help='Run every row of this CSV file instead (see the description above).')
+    io = _io_section(parser, input_help='Path to the input OME-Zarr image.', batch=False,
+                     output_help='Path to the corrected .ome.zarr. Leave out to only measure the shift.')
+    io.title = 'Input and output (or --batch)'
+    _add(io, '-r', '--report', type=os.path.abspath, help='Save the estimate report (JSON) to this file.')
+    _add(io, '--batch', metavar='CSV', type=valid_input_path,
+         help='Run every row of this CSV file instead (see the description above).')
 
-    est = parser.add_argument_group('Estimate')
-    est.add_argument('-sf', '--shifts', default=argparse.SUPPRESS, nargs='+',
-                     help='Skip the estimate and apply these shifts: one value per channel, or a JSON report '
-                          'from an earlier run.')
-    est.add_argument('-rc', '--reference_channel', default='0',
-                     help='Reference channel, as an index or a channel name.')
-    est.add_argument('-tp', '--timepoint', default=argparse.SUPPRESS, type=int,
-                     help='Timepoint the shift is measured on, an index along the t axis. Every timepoint is '
-                          'corrected with the same shift. Default: 0.')
-    est.add_argument('-mxs', '--max_shift', default=argparse.SUPPRESS, type=float,
-                     help='Largest shift searched, in the Z unit. Default: 10%% of the stack depth.')
-    est.add_argument('-cl', '--coarse_level', default=argparse.SUPPRESS, type=int,
-                     help='Pyramid level of the coarse estimate. Default: the coarsest level with at least '
-                          '16 Z planes and 32 pixels in Y and X.')
-    est.add_argument('-rl', '--refine_level', default=argparse.SUPPRESS, type=parse_refine_level,
-                     help='Pyramid level of the refinement crops, or "none" to skip refinement. Default: 0.')
-    est.add_argument('-nr', '--n_regions', default=argparse.SUPPRESS, type=int, help='Number of refinement crops. Default: 32.')
-    est.add_argument('-cy', '--crop_yx', default=argparse.SUPPRESS, type=int, help='Crop width in Y and X, in pixels. Default: 64.')
-    est.add_argument('-mzn', '--min_z_normal', default=argparse.SUPPRESS, type=float,
-                     help='How flat a surface must be to count as Z-facing (1 = flat). Default: 0.7.')
-    est.add_argument('-mc', '--min_correlation', default=argparse.SUPPRESS, type=float,
-                     help='Crops with a lower correlation peak are left out. Default: 0.2.')
-    est.add_argument('-th', '--threshold', default=argparse.SUPPRESS, type=float,
-                     help='Sample mask threshold on the 0-1 rescaled coarse image. Default: Otsu.')
-    est.add_argument('-fw', '--fail_on_warning', action='store_true',
-                     help='Exit with an error, without writing the corrected image, when the estimate has '
-                          'warnings (e.g. the search limit was reached).')
+    est = _section(parser, 'Estimate')
+    _add(est, '-sf', '--shifts', default=argparse.SUPPRESS, nargs='+',
+         help='Skip the estimate and apply these shifts: one value per channel, or a JSON report from an earlier run.')
+    _add(est, '-ref', '--reference_channel', default='0', help='Reference channel, as an index or a channel name.')
+    _deprecated(est, '-rc', dest='reference_channel', new='-ref/--reference_channel')
+    _add(est, '-tp', '--timepoints', dest='timepoint', default=argparse.SUPPRESS, type=int, metavar='TIMEPOINT',
+         help='Timepoint the shift is measured on, an index along the t axis. Every timepoint is corrected with '
+              'the same shift. Default: 0.')
+    _deprecated(est, '--timepoint', dest='timepoint', new='-tp/--timepoints', type=int)
+    _add(est, '-mxs', '--max_shift', default=argparse.SUPPRESS, type=float,
+         help='Largest shift searched, in the Z unit. Default: 10%% of the stack depth.')
+    _add(est, '-cl', '--coarse_level', default=argparse.SUPPRESS, type=int, advanced=True,
+         help='Pyramid level of the coarse estimate. Default: the coarsest level with at least 16 Z planes and '
+              '32 pixels in Y and X.')
+    _add(est, '-rl', '--refine_level', default=argparse.SUPPRESS, type=parse_refine_level, advanced=True,
+         help='Pyramid level of the refinement crops, or "none" to skip refinement. Default: 0.')
+    _add(est, '-nr', '--n_regions', default=argparse.SUPPRESS, type=int, advanced=True,
+         help='Number of refinement crops. Default: 32.')
+    _add(est, '-cy', '--crop_yx', default=argparse.SUPPRESS, type=int, advanced=True,
+         help='Crop width in Y and X, in pixels. Default: 64.')
+    _add(est, '-mzn', '--min_z_normal', default=argparse.SUPPRESS, type=float, advanced=True,
+         help='How flat a surface must be to count as Z-facing (1 = flat). Default: 0.7.')
+    _add(est, '-mc', '--min_correlation', default=argparse.SUPPRESS, type=float, advanced=True,
+         help='Crops with a lower correlation peak are left out. Default: 0.2.')
+    _add(est, '-th', '--threshold', default=argparse.SUPPRESS, type=float, advanced=True,
+         help='Sample mask threshold on the 0-1 rescaled coarse image. Default: Otsu.')
+    _add(est, '-fw', '--fail_on_warning', action='store_true',
+         help='Exit with an error, without writing the corrected image, when the estimate has warnings (e.g. the '
+              'search limit was reached).')
 
-    out = parser.add_argument_group('Corrected image')
-    out.add_argument('-e', '--extent', choices=['union', 'same', 'intersection'], default='union',
-                     help='union grows Z so no channel loses data, same keeps the input size, intersection '
-                          'crops to the planes every channel covers.')
-    out.add_argument('-o', '--order', type=int, choices=[0, 1], default=1,
-                     help='1 interpolates linearly; 0 rounds the shifts to whole planes (voxel values untouched).')
-    out.add_argument('-ig', '--include_groups', type=parse_bool, default=True,
-                     help='Also shift image subgroups with the same channels ("true" or "false").')
-    out.add_argument('-il', '--include_labels', type=parse_bool, default=True,
-                     help='Also write labels, padded or cropped to the new Z extent ("true" or "false").')
-    out.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
-    out.add_argument('-nw', '--num_workers', default=argparse.SUPPRESS, type=int,
-                     help='Number of threads used to write the zarr. Default: half of the available cores, '
-                          'capped at 8.')
+    out = _section(parser, 'Corrected image')
+    _add(out, '-e', '--extent', choices=['union', 'same', 'intersection'], default='union',
+         help='union grows Z so no channel loses data, same keeps the input size, intersection crops to the planes '
+              'every channel covers.')
+    _add(out, '-o', '--order', type=int, choices=[0, 1], default=1,
+         help='1 interpolates linearly; 0 rounds the shifts to whole planes (voxel values untouched).')
+    _add(out, '-ig', '--include_groups', type=parse_bool, default=True,
+         help='Also shift image subgroups with the same channels ("true" or "false").')
+    _add(out, '-il', '--include_labels', type=parse_bool, default=True,
+         help='Also write labels, padded or cropped to the new Z extent ("true" or "false").')
+    _performance_section(parser, num_workers_default=argparse.SUPPRESS,
+                         num_workers_help='Number of threads used to write the zarr. Default: half of the available '
+                                          'cores, capped at 8.')
+    _run_section(parser, dry_run=False)
+
+
+# ---- resample ---------------------------------------------------------------------------
+
+RESAMPLE_HELP = """\
+    Change the pixel size of an OME-Zarr image, rescaling the data accordingly, and write a copy with
+    the same compression and number of levels as the input, and chunks and shards fitted to each level.
+    Image groups and labels are resampled too. Run `zarrsmith convert` first for other formats.
+
+    Examples:
+      zarrsmith resample -i brain.ome.zarr -z brain_1um.ome.zarr -ps 1
+      zarrsmith resample -i brain.ome.zarr -z brain_iso.ome.zarr -ps 1 0.5 0.5
+      zarrsmith resample --batch images.csv
+
+    The pixel size is in the units of the dataset, usually micrometer. Images use linear interpolation,
+    with anti-aliasing on the axes that shrink, and labels use nearest neighbour.
+
+    The --batch CSV file has the columns input | output | pixel_size, plus any of fast | include_groups |
+    include_labels | overwrite | num_workers, with the same meaning as the options below, e.g.
+      input                | output                  | pixel_size  | fast
+      /path/to/a.ome.zarr  | /path/to/a_1um.ome.zarr | 1           |
+      /path/to/b.ome.zarr  | /path/to/b_iso.ome.zarr | 1 0.5 0.5   | true
+    Leave a cell empty for the default; the pixel size is space separated.
+"""
 
 
 def _add_resample_arguments(parser):
-    io = parser.add_argument_group('Input and output (or --batch)')
-    io.add_argument('-i', '--input_path', type=valid_input_path, help='Path to the input OME-Zarr image.')
-    io.add_argument('-z', '--zarr_path', type=os.path.abspath, help='Path to the resampled .ome.zarr.')
-    io.add_argument('--batch', metavar='CSV', type=valid_input_path,
-                    help='Run every row of this CSV file instead (see the description above).')
+    _io_section(parser, input_help='Path to the input OME-Zarr image.', output_help='Path to the resampled .ome.zarr.')
+    out = _section(parser, 'Resampling')
+    _add(out, '-ps', '--pixel_size', nargs='+', type=float, metavar='SIZE',
+         help='New pixel size: one value for every spatial axis, or three values in Z Y X order.')
+    _add(out, '-f', '--fast', action='store_true',
+         help='Read images from the coarsest pyramid level still fine enough instead of level 0: much less data '
+              'when shrinking, but it keeps the aliasing of that level. Labels always do this.')
+    _add(out, '-ig', '--include_groups', type=parse_bool, default=True,
+         help='Also resample image subgroups ("true" or "false").')
+    _add(out, '-il', '--include_labels', type=parse_bool, default=True, help='Also resample labels ("true" or "false").')
+    _performance_section(parser, num_workers_default=argparse.SUPPRESS,
+                         num_workers_help='Number of threads used to write the zarr. Default: half of the available '
+                                          'cores, capped at 8, and fewer if memory requires it.')
+    _run_section(parser, dry_run=False)
 
-    out = parser.add_argument_group('Resampling')
-    out.add_argument('-ps', '--pixel_size', nargs='+', type=float, metavar='SIZE',
-                     help='New pixel size: one value for every spatial axis, or three values in Z Y X order.')
-    out.add_argument('-f', '--fast', action='store_true',
-                     help='Read images from the coarsest pyramid level still fine enough instead of level 0: much '
-                          'less data when shrinking, but it keeps the aliasing of that level. Labels always do this.')
-    out.add_argument('-ig', '--include_groups', type=parse_bool, default=True,
-                     help='Also resample image subgroups ("true" or "false").')
-    out.add_argument('-il', '--include_labels', type=parse_bool, default=True,
-                     help='Also resample labels ("true" or "false").')
-    out.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
-    out.add_argument('-nw', '--num_workers', default=argparse.SUPPRESS, type=int,
-                     help='Number of threads used to write the zarr. Default: half of the available cores, '
-                          'capped at 8, and fewer if memory requires it.')
 
+# ---- allocate ---------------------------------------------------------------------------
 
 ALLOCATE_HELP = """\
     Create an empty OME-Zarr image, to be filled tile by tile (e.g. by parallel jobs) and then
@@ -762,10 +946,10 @@ ALLOCATE_HELP = """\
     or from --size/--axes/--scale.
 
     Examples:
-      zarrsmith allocate -t raw.ome.zarr -o probabilities.ome.zarr --dtype float32 --num_channels 3
-      zarrsmith allocate -t raw.ome.zarr -o seg.ome.zarr --data_type label --dtype uint32 \\
+      zarrsmith allocate -t raw.ome.zarr -z probabilities.ome.zarr --dtype float32 --num_channels 3
+      zarrsmith allocate -t raw.ome.zarr -z seg.ome.zarr --data_type label --dtype uint32 \\
           --crop "t=0:10;y=512:1536" --attrs '{"t_range": [0, 10]}'
-      zarrsmith allocate -o new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale 2 0.5 0.5
+      zarrsmith allocate -z new.ome.zarr --axes tczyx --size 5 2 100 2048 2048 --scale 2 0.5 0.5
 
     From a template, the output keeps its axes, level-0 size, dtype, pixel size, units, origin
     (translation), channels, chunks, shards, pyramid levels and zarr format, unless an option
@@ -778,24 +962,6 @@ ALLOCATE_HELP = """\
     Write tiles that start and end on the shard grid (the chunk grid without shards), e.g. with
     ZarrManager(..., mode="r+").write_image_region(tile, ..., aligned=True), so parallel writers
     never share a file.
-"""
-
-PYRAMID_HELP = """\
-    Build the pyramid of an OME-Zarr image in place: the levels after --start_level (default 0)
-    are created (or replaced) from it, each level from the one above it, one task per output
-    shard (chunk on zarr v2). The start level and the levels above it are kept as they are.
-    The format, codecs and chunks come from level 0; the multiscales metadata is updated.
-    --num_levels counts every level from level 0.
-
-    Examples:
-      zarrsmith pyramid -z probabilities.ome.zarr
-      zarrsmith pyramid -z seg.ome.zarr --num_levels 4 --downscale_factor 1 2 2
-      zarrsmith pyramid -z image.ome.zarr --start_level 2 --num_levels 6   # keep 0-2, rebuild 3-5
-      zarrsmith pyramid -z image.ome.zarr --group labels/nuclei --method mode
-      zarrsmith pyramid -z image.ome.zarr --group all
-
-    Methods: "mean" averages each block (default for intensity data), "nearest" keeps one pixel
-    of it (default for labels) and "mode" keeps its most frequent value (smoother label pyramids).
 """
 
 
@@ -839,85 +1005,110 @@ def parse_attrs_spec(value):
 
 
 def _add_allocate_arguments(parser):
-    src = parser.add_argument_group('Template (or --size/--axes)')
-    src.add_argument('-t', '--template', type=valid_input_path,
-                     help='OME-Zarr image whose root image gives the geometry and metadata.')
-    src.add_argument('-sz', '--size', nargs='+', type=int, metavar='N',
-                     help='Without a template: level-0 size, one value per axis of --axes.')
-    src.add_argument('-ax', '--axes', type=str.lower, help='Without a template: axes, e.g. tczyx or zyx.')
-    src.add_argument('-sc', '--scale', nargs='+', type=float, metavar='SIZE',
-                     help='Pixel size: one value, or one per spatial axis (e.g. Z Y X). Default: the '
-                          "template's, else 1.")
-    src.add_argument('-u', '--units', nargs='+', metavar='UNIT',
-                     help="Spatial unit(s). Default: the template's, else micrometer.")
-    src.add_argument('-ti', '--time_increment', type=float, help="Time step. Default: the template's, else 1.")
+    src = _section(parser, 'Template (or --size/--axes)')
+    _add(src, '-t', '--template', type=valid_input_path,
+         help='OME-Zarr image whose root image gives the geometry and metadata.')
+    _add(src, '-sl', '--start_level', default='0',
+         help="Level of the template (index or path) that becomes the output's level 0; --crop is in its pixels. "
+              'Default: 0 (full resolution).')
+    _add(src, '-cr', '--crop', nargs='+', type=str,
+         help='Part of the template to keep, as axis=start:stop, e.g. "t=0:10;y=512:1536".')
+    _add(src, '-sz', '--size', nargs='+', type=int, metavar='N',
+         help='Without a template: level-0 size, one value per axis of --axes.')
+    _add(src, '-ax', '--axes', type=str.lower, help='Without a template: axes, e.g. tczyx or zyx.')
+    _add(src, '-sc', '--scale', nargs='+', type=float, metavar='SIZE',
+         help="Pixel size: one value, or one per spatial axis (e.g. Z Y X). Default: the template's, else 1.")
+    _add(src, '-u', '--units', nargs='+', metavar='UNIT', help="Spatial unit(s). Default: the template's, else micrometer.")
+    _add(src, '-ti', '--time_increment', type=float, help="Time step. Default: the template's, else 1.")
 
-    out = parser.add_argument_group('Output')
-    out.add_argument('-o', '--out', '-z', '--zarr_path', dest='out', type=os.path.abspath, required=True,
-                     help='Path of the new .ome.zarr.')
-    out.add_argument('-dt', '--dtype', help="Data type, e.g. uint16, uint32, float32. Default: the template's.")
-    out.add_argument('-dty', '--data_type', choices=['intensity', 'label'],
-                     help="intensity (images, probabilities) or label. Default: the template's.")
-    out.add_argument('-cn', '--channel_names', nargs='+', help='Channel names (sets the number of channels).')
-    out.add_argument('-cc', '--channel_colors', nargs='+', type=parse_color, help='Channel colors.')
-    out.add_argument('-nc', '--num_channels', type=int, help='Number of channels; adds a c axis if needed.')
-    out.add_argument('-cr', '--crop', nargs='+', type=str,
-                     help='Part of the template to keep, as axis=start:stop, e.g. "t=0:10;y=512:1536".')
-    out.add_argument('-cs', '--chunk_size', nargs='+', type=int,
-                     help="Level-0 chunks, one per output axis. Default: the template's.")
-    out.add_argument('-sh', '--shards', nargs='+',
-                     help='"auto", a shard shape (one per output axis), or "none". Default: the template\'s '
-                          '(zarr v3), "auto" without a template. Not available on zarr v2.')
-    out.add_argument('-stm', '--shard_target_mb', type=float, default=DEFAULT_SHARD_TARGET_MB,
-                     help='Target shard size in MB for --shards auto.')
-    out.add_argument('-sl', '--start_level', default='0',
-                     help="Level of the template (index or path) that becomes the output's level 0; --crop is "
-                          'in its pixels. Default: 0 (full resolution).')
-    out.add_argument('-nl', '--num_levels', type=int, default=None,
-                     help="Levels to create; `zarrsmith pyramid` fills them once level 0 is written. Default: "
-                          "the template's levels from --start_level on, else 1.")
-    out.add_argument('-df', '--downscale_factor', nargs='+', type=int, default=None,
-                     help="Factor between levels: one value, or one per spatial axis. Default: the template's, "
-                          'else 2.')
-    out.add_argument('-tr', '--translation', nargs='*', type=float, metavar='ORIGIN',
-                     help='Without a value: keep the origin of the template, moved by --crop. With one value '
-                          'per spatial axis: the level-0 origin. An all-zero origin is not written (NGFF reads '
-                          'it the same way). Default: write one when the template has one, the crop moves it, or '
-                          'the coarser levels are averaged (intensity data with --num_levels > 1: they sit '
-                          'half a block further than level 0, from an origin of 0 without a template one).')
-    out.add_argument('-zf', '--zarr_format', type=int, choices=[2, 3],
-                     help="2 (NGFF 0.4) or 3 (NGFF 0.5). Default: the template's, else 3.")
-    out.add_argument('-cp', '--compressor', type=str.lower, choices=['blosc', 'gzip', 'none'], default='blosc',
-                     help='Codec; "gzip" needs --zarr_format 2.')
-    out.add_argument('-cpl', '--compressor_level', type=int, default=1, help='Compression level, 0 to 9.')
-    out.add_argument('-at', '--attrs', type=parse_attrs_spec,
-                     help='Custom group attributes as a JSON object (or a .json file), e.g. '
-                          '\'{"t_range": [0, 10]}\'. Stored next to the NGFF metadata.')
-    out.add_argument('-n', '--name', help="Name of the image in the metadata. Default: the template's.")
-    out.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
+    out = _section(parser, 'Output')
+    _add(out, '-z', '--zarr_path', dest='out', type=os.path.abspath, help='Path of the new .ome.zarr.')
+    _deprecated(out, '-o', '--out', dest='out', new='-z/--zarr_path', type=os.path.abspath)
+    _add(out, '-dt', '--dtype', help="Data type, e.g. uint16, uint32, float32. Default: the template's.")
+    _add(out, '-dty', '--data_type', choices=['intensity', 'label'],
+         help="intensity (images, probabilities) or label. Default: the template's.")
+    _add(out, '-nc', '--num_channels', type=int, help='Number of channels; adds a c axis if needed.')
+
+    _pyramid_section(parser, method=False,
+                     num_levels_help="Levels to create; `zarrsmith pyramid` fills them once level 0 is written. "
+                                     "Default: the template's levels from --start_level on, else 1.",
+                     factor_help="Factor between levels: one value, or one per spatial axis. Default: the "
+                                 "template's, else 2.")
+
+    storage = _section(parser, 'Storage layout', advanced=True)
+    _add(storage, '-zf', '--zarr_format', type=int, choices=[2, 3], advanced=False,
+         help="2 (NGFF 0.4) or 3 (NGFF 0.5). Default: the template's, else 3.")
+    _add(storage, '-cs', '--chunk_size', nargs='+', type=int, advanced=False,
+         help="Level-0 chunks, one per output axis. Default: the template's.")
+    _add(storage, '-sh', '--shards', nargs='+',
+         help='"auto", a shard shape (one per output axis), or "none". Default: the template\'s (zarr v3), "auto" '
+              'without a template. Not available on zarr v2.')
+    _add(storage, '-stm', '--shard_target_mb', type=float, default=DEFAULT_SHARD_TARGET_MB,
+         help='Target shard size in MB for --shards auto.')
+    _add(storage, '-cp', '--compressor', type=str.lower, choices=['blosc', 'gzip', 'none'], default='blosc',
+         help='Codec; "gzip" needs --zarr_format 2.')
+    _add(storage, '-cpl', '--compressor_level', type=int, default=1, help='Compression level, 0 to 9.')
+
+    meta = _channel_metadata_section(parser, names_help='Channel names (sets the number of channels).')
+    meta.title = 'Metadata'
+    _add(meta, '-tr', '--translation', nargs='*', type=float, metavar='ORIGIN',
+         help='Without a value: keep the origin of the template, moved by --crop. With one value per spatial axis: '
+              'the level-0 origin. An all-zero origin is not written (NGFF reads it the same way). Default: write '
+              'one when the template has one, the crop moves it, or the coarser levels are averaged (intensity data '
+              'with --num_levels > 1: they sit half a block further than level 0, from an origin of 0 without a '
+              'template one).')
+    _add(meta, '-at', '--attrs', type=parse_attrs_spec,
+         help='Custom group attributes as a JSON object (or a .json file), e.g. \'{"t_range": [0, 10]}\'. Stored '
+              'next to the NGFF metadata.')
+    _add(meta, '-n', '--name', help="Name of the image in the metadata. Default: the template's.")
+    _run_section(parser, dry_run=False)
+
+
+# ---- pyramid ----------------------------------------------------------------------------
+
+PYRAMID_HELP = """\
+    Build the pyramid of an OME-Zarr image in place: the levels after --start_level (default 0)
+    are created (or replaced) from it, each level from the one above it, one task per output
+    shard (chunk on zarr v2). The start level and the levels above it are kept as they are.
+    The format, codecs and chunks come from level 0; the multiscales metadata is updated.
+    --num_levels counts every level from level 0.
+
+    Examples:
+      zarrsmith pyramid -z probabilities.ome.zarr
+      zarrsmith pyramid -z seg.ome.zarr --num_levels 4 --downscale_factor 1 2 2
+      zarrsmith pyramid -z image.ome.zarr --start_level 2 --num_levels 6   # keep 0-2, rebuild 3-5
+      zarrsmith pyramid -z image.ome.zarr --group labels/nuclei --method mode
+      zarrsmith pyramid -z image.ome.zarr --group all
+
+    Methods: "mean" averages each block (default for intensity data), "nearest" keeps one pixel
+    of it (default for labels) and "mode" keeps its most frequent value (smoother label pyramids).
+"""
 
 
 def _add_pyramid_arguments(parser):
-    parser.add_argument('-z', '--zarr_path', type=valid_input_path, required=True,
-                        help='OME-Zarr store to update in place.')
-    parser.add_argument('-g', '--group', nargs='+', default=None,
-                        help='Image(s) to process: a group path such as labels/nuclei, or "all" for the root '
-                             'image, every image group and every label. Default: the root image.')
-    parser.add_argument('-nl', '--num_levels', type=int, default=None,
-                        help='Total number of levels, level 0 included. Default: the number the image already '
-                             'has (e.g. as allocated from a template); with a single level, downscale until no '
-                             'spatial axis is above 2048 pixels.')
-    parser.add_argument('-df', '--downscale_factor', nargs='+', type=int, default=None,
-                        help='Factor between levels: one value, or one per spatial axis (e.g. 1 2 2 keeps Z). '
-                             'Default: the factor between the existing levels, else 2.')
-    parser.add_argument('-me', '--method', choices=['mean', 'nearest', 'mode'], default=None,
-                        help='Downsampling method. Default: mean for intensity data, nearest for labels.')
-    parser.add_argument('-sl', '--start_level', default='0',
-                        help='Level to build from: its index, or its path in the store (e.g. 1). It and the '
-                             'levels above it are kept; the levels after it are rebuilt. Default: 0.')
-    parser.add_argument('-nw', '--num_workers', type=int, default=None,
-                        help='Number of threads. Default: half of the available cores, capped at 8.')
+    image = _section(parser, 'Image')
+    _add(image, '-z', '--zarr_path', type=valid_input_path, required=True, help='OME-Zarr store to update in place.')
+    _add(image, '-g', '--group', nargs='+', default=None,
+         help='Image(s) to process: a group path such as labels/nuclei, or "all" for the root image, every image '
+              'group and every label. Default: the root image.')
+    pyramid = _section(parser, 'Pyramid')
+    _add(pyramid, '-nl', '--num_levels', type=int, default=None,
+         help='Total number of levels, level 0 included. Default: the number the image already has (e.g. as '
+              'allocated from a template); with a single level, downscale until no spatial axis is above 2048 pixels.')
+    _add(pyramid, '-df', '--downscale_factor', nargs='+', type=int, default=None,
+         help='Factor between levels: one value, or one per spatial axis (e.g. 1 2 2 keeps Z). Default: the factor '
+              'between the existing levels, else 2.')
+    _add(pyramid, '-me', '--method', choices=['mean', 'nearest', 'mode'], default=None,
+         help='Downsampling method. Default: mean for intensity data, nearest for labels.')
+    _add(pyramid, '-sl', '--start_level', default='0',
+         help='Level to build from: its index, or its path in the store (e.g. 1). It and the levels above it are '
+              'kept; the levels after it are rebuilt. Default: 0.')
+    perf = _section(parser, 'Performance')
+    _add(perf, '-nw', '--num_workers', type=int, default=None,
+         help='Number of threads. Default: half of the available cores, capped at 8.')
 
+
+# ---- command line -----------------------------------------------------------------------
 
 #: Old command names, kept working: old name -> (mode, new spelling)
 RENAMED = {
@@ -928,144 +1119,59 @@ RENAMED = {
     'batchmosaic2zarr': ('fuse_batch', 'zarrsmith fuse --batch'),
 }
 
-
-def _add_convert_microscope(parser):
-    parser.add_argument(
-        '-m', '--microscope',
-        required=False,
-        default=None,
-        help='Microscope used for imaging. Leave empty to auto-detect from the input path.',
-        choices=['luxendo', 'opera', 'viventis', 'zeiss', 'evident', 'zarrv04', 'zarr', 'scape'],
-        type=str,
-    )
-
-
-def _add_fuse_microscope(parser):
-    parser.add_argument(
-        '-m', '--microscope',
-        required=False,
-        default=None,
-        choices=['luxendo', 'opera', 'zeiss', 'zarr'],
-        type=str,
-        help='Microscope of the mosaic. Leave empty to auto-detect (raw Luxendo acquisitions, Opera Harmony '
-             'exports with Images/Index.xml, Zeiss .czi files, folders of OME-Zarr stores placed at their '
-             'NGFF translation).',
-    )
-
-
-def _add_input_output(parser, *, required: bool, input_help: str, output_type):
-    group = parser.add_argument_group('Input and output' + ('' if required else ' (or --batch)'))
-    group.add_argument('-i', '--input_path', required=required, type=valid_input_path, help=input_help)
-    group.add_argument('-z', '--zarr_path', required=required, type=output_type, help='Path to the output .ome.zarr.')
-    if not required:
-        group.add_argument('--batch', metavar='CSV', type=valid_input_path,
-                           help='Run every row of this CSV file instead (see the description above).')
+#: The commands, by stage: (stage title, [(command, mode, one-line help, help text, builder)])
+STAGES = [
+    ('Make an OME-Zarr', [
+        ('convert', 'convert', 'one dataset or microscope file -> OME-Zarr (or a CSV batch with --batch)',
+         CONVERT_HELP, _add_convert_arguments),
+        ('fuse', 'fuse', 'the raw tiles of a microscope mosaic -> one OME-Zarr (or a CSV batch)',
+         FUSE_HELP, _add_fuse_arguments),
+    ]),
+    ('Correct an OME-Zarr', [
+        ('resample', 'resample', 'change the pixel size (or a CSV batch)', RESAMPLE_HELP, _add_resample_arguments),
+        ('chromatic-shift', 'chromatic_shift', 'measure and correct the z shift between channels (or a CSV batch)',
+         CHROMATIC_SHIFT_HELP, _add_chromatic_shift_arguments),
+    ]),
+    ('Process an OME-Zarr in tiles', [
+        ('plan-tiles', 'plan_tiles', 'cut an image into tiles: a CSV of tile bounds and neighbours',
+         PLAN_TILES_HELP, _add_plan_tiles_arguments),
+        ('allocate', 'allocate', 'create an empty OME-Zarr (e.g. the output of tiled jobs)',
+         ALLOCATE_HELP, _add_allocate_arguments),
+        ('fuse-labels', 'fuse_labels', 'stitch per-tile label stores into one label image',
+         FUSE_LABELS_HELP, _add_fuse_labels_arguments),
+        ('pyramid', 'pyramid', '(re)build the pyramid levels of an OME-Zarr in place',
+         PYRAMID_HELP, _add_pyramid_arguments),
+    ]),
+]
 
 
-def _add_batch_file(parser):
-    group = parser.add_argument_group('Required Named arguments.')
-    group.add_argument('-i', '--input_file', required=True, type=valid_input_path, help='Path to the batch .csv file.')
+def _overview() -> str:
+    width = max(len(name) for _, commands in STAGES for name, *_ in commands)
+    lines = ["Welcome fellow MIF users!", ""]
+    for title, commands in STAGES:
+        lines.append(f"{title}:")
+        lines += [f"  {name:<{width}}  {short}" for name, _, short, *_ in commands]
+        lines.append("")
+    lines.append("Run `zarrsmith <command> -h` for the options of a command, `--help-all` for every option.")
+    return "\n".join(lines)
 
 
-def _parse_arguments(argv=None):
-    """Build and parse the ZarrSmith command line interface arguments."""
+def _build_parser(show_all: bool = False):
+    """The ``zarrsmith`` parser and its subcommand parsers (``--help-all``: every option shown)."""
+    parser = argparse.ArgumentParser(prog='zarrsmith', description=_overview(),
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    # No `help` for the commands: the overview above lists them, grouped by stage.
+    subparsers = parser.add_subparsers(dest='command', metavar='<command>', required=True)
 
-    parser = argparse.ArgumentParser(
-        description="""\
-            Welcome fellow MIF users!
-        """,
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {__version__}"
-    )
+    for _, commands in STAGES:
+        for name, mode, short, text, builder in commands:
+            sub = subparsers.add_parser(name, description=textwrap.dedent(text),
+                                        formatter_class=MultilineDefaultsHelpFormatter)
+            sub.set_defaults(mode=mode, renamed_to=None)
+            builder(sub)
+            _finish_help(sub, name, show_all)
 
-    subparsers = parser.add_subparsers(
-        title='Commands',
-        description="Run `zarrsmith <command> -h` for the options of a command.",
-        dest='command',
-        metavar='{convert,fuse,chromatic-shift,resample,allocate,pyramid}',
-        required=True,
-    )
-
-    #####################################################################################
-    # convert: one dataset, or a CSV batch
-    convert = subparsers.add_parser(
-        'convert',
-        help='Convert a dataset to OME-Zarr (or a CSV batch of datasets with --batch).',
-        description=textwrap.dedent(CONVERT_HELP),
-        formatter_class=MultilineDefaultsHelpFormatter,
-    )
-    convert.set_defaults(mode='convert', renamed_to=None)
-    _add_convert_microscope(convert)
-    convert.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
-    _add_zarr_arguments(convert)
-    _add_input_output(convert, required=False, input_help='Path to the input dataset (file or folder).',
-                      output_type=os.path.abspath)
-
-    #####################################################################################
-    # fuse: one mosaic, or a CSV batch
-    fuse = subparsers.add_parser(
-        'fuse',
-        help='Fuse the raw tiles of a mosaic into one OME-Zarr image (or a CSV batch with --batch).',
-        description=textwrap.dedent(FUSE_HELP),
-        formatter_class=MultilineDefaultsHelpFormatter,
-    )
-    fuse.set_defaults(mode='fuse', renamed_to=None)
-    _add_fuse_microscope(fuse)
-    _add_mosaic_arguments(fuse)
-    _add_zarr_arguments(fuse)
-    _adapt_zarr_help_for_mosaic(fuse)
-    _add_input_output(fuse, required=False, input_help='Acquisition folder (for Luxendo: the folder containing raw/; '
-                                                       'for Opera: the Harmony export containing Images/).',
-                      output_type=os.path.abspath)
-
-    #####################################################################################
-    # chromatic-shift: one OME-Zarr image, or a CSV batch
-    chromatic = subparsers.add_parser(
-        'chromatic-shift',
-        help='Measure and correct the Z chromatic shift between channels of an OME-Zarr image '
-             '(or a CSV batch with --batch).',
-        description=textwrap.dedent(CHROMATIC_SHIFT_HELP),
-        formatter_class=MultilineDefaultsHelpFormatter,
-    )
-    chromatic.set_defaults(mode='chromatic_shift', renamed_to=None)
-    _add_chromatic_shift_arguments(chromatic)
-
-    #####################################################################################
-    # resample: one OME-Zarr image, or a CSV batch
-    resample = subparsers.add_parser(
-        'resample',
-        help='Change the pixel size of an OME-Zarr image (or a CSV batch with --batch).',
-        description=textwrap.dedent(RESAMPLE_HELP),
-        formatter_class=MultilineDefaultsHelpFormatter,
-    )
-    resample.set_defaults(mode='resample', renamed_to=None)
-    _add_resample_arguments(resample)
-
-    #####################################################################################
-    # allocate: an empty OME-Zarr image, from a template or an explicit geometry
-    allocate = subparsers.add_parser(
-        'allocate',
-        help='Create an empty OME-Zarr image from a template image or an explicit size.',
-        description=textwrap.dedent(ALLOCATE_HELP),
-        formatter_class=MultilineDefaultsHelpFormatter,
-    )
-    allocate.set_defaults(mode='allocate', renamed_to=None)
-    _add_allocate_arguments(allocate)
-
-    #####################################################################################
-    # pyramid: build the pyramid of an OME-Zarr image in place
-    pyramid = subparsers.add_parser(
-        'pyramid',
-        help='Build (or rebuild) the pyramid levels of an OME-Zarr image in place, from level 0.',
-        description=textwrap.dedent(PYRAMID_HELP),
-        formatter_class=MultilineDefaultsHelpFormatter,
-    )
-    pyramid.set_defaults(mode='pyramid', renamed_to=None)
-    _add_pyramid_arguments(pyramid)
-
-    #####################################################################################
     # Old names (not listed in the help), with their original arguments
     for old, (mode, new) in RENAMED.items():
         if old == 'batchmosaic2zarr':
@@ -1075,20 +1181,26 @@ def _parse_arguments(argv=None):
                                   formatter_class=MultilineDefaultsHelpFormatter)
         p.set_defaults(mode=mode, renamed_to=new)
         if mode == 'convert':
-            _add_convert_microscope(p)
-            p.add_argument('-ow', '--overwrite', action='store_true', help=_OVERWRITE_HELP)
-            _add_zarr_arguments(p)
-            _add_input_output(p, required=True, input_help='Path to input file.', output_type=os.path.abspath)
+            _add_convert_arguments(p, legacy=True)
         elif mode == 'fuse':
-            _add_fuse_microscope(p)
-            _add_mosaic_arguments(p, legacy=True)
-            _add_zarr_arguments(p)
-            _adapt_zarr_help_for_mosaic(p)
-            _add_input_output(p, required=True, input_help='Acquisition folder.', output_type=os.path.abspath)
+            _add_fuse_arguments(p, legacy=True)
         else:
-            _add_batch_file(p)
+            group = p.add_argument_group('Required Named arguments.')
+            group.add_argument('-i', '--input_file', required=True, type=valid_input_path,
+                               help='Path to the batch .csv file.')
+    return parser, subparsers
 
+
+def _parse_arguments(argv=None):
+    """Build and parse the ZarrSmith command line interface arguments."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    show_all = '--help-all' in argv
+    if show_all:
+        argv = ['-h' if a == '--help-all' else a for a in argv]
+    parser, subparsers = _build_parser(show_all)
     args = parser.parse_args(argv)
+    if hasattr(args, 'help_all'):
+        del args.help_all
 
     # convert / fuse: either -i and -z, or --batch
     if args.mode in ('convert', 'fuse') and args.renamed_to is None:
@@ -1132,9 +1244,11 @@ def _parse_arguments(argv=None):
         elif len(args.pixel_size) not in (1, 3):
             command.error('-ps/--pixel_size takes one value, or three values in Z Y X order.')
 
-    # allocate: a template, or --size and --axes
+    # allocate: an output, and a template or --size and --axes
     if args.mode == 'allocate':
         command = subparsers.choices['allocate']
+        if getattr(args, 'out', None) is None:
+            command.error('the following arguments are required: -z/--zarr_path')
         if args.template is not None and (args.size is not None or args.axes is not None):
             command.error('give either -t/--template or --size/--axes, not both.')
         if args.template is None and (args.size is None or args.axes is None):
@@ -1145,4 +1259,15 @@ def _parse_arguments(argv=None):
             args.crop = parse_crop_spec(args.crop)
         except argparse.ArgumentTypeError as error:
             command.error(str(error))
+
+    # fuse-labels: an integer dtype
+    if args.mode == 'fuse_labels':
+        import numpy as np
+
+        command = subparsers.choices['fuse-labels']
+        try:
+            if np.dtype(args.out_dtype).kind not in 'iu':
+                command.error(f'--dtype must be an integer type for labels, got {args.out_dtype}.')
+        except TypeError:
+            command.error(f'--dtype {args.out_dtype!r} is not a data type.')
     return args

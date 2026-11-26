@@ -504,3 +504,60 @@ def plan_tiles(
     if plan.max_load_voxels > limit:  # the search computes the loads exactly: should not happen
         raise RuntimeError(f"Tiles read {plan.max_load_voxels} voxels, more than the limit {limit:.0f}.")
     return plan
+
+
+#: Columns of :func:`write_tiles_csv` (and ``zarrsmith plan-tiles``).
+TILES_CSV_COLUMNS = [
+    "dataset_id", "source_dataset_id", "tile_id", "tile_index", "input_uri",
+    "x_min", "x_max", "y_min", "y_max", "z_min", "z_max", "resolution_level",
+    "tile_overlap_x", "tile_overlap_y", "tile_overlap_z",
+    "tile_size_x", "tile_size_y", "tile_size_z",
+    "right_dataset_id", "right_tile_index",
+    "bottom_dataset_id", "bottom_tile_index",
+    "behind_dataset_id", "behind_tile_index",
+]
+
+#: Forward neighbour of a tile along each axis, as the tile CSV names it.
+NEIGHBOR_DIRECTIONS = {"x": "right", "y": "bottom", "z": "behind"}
+
+
+def tiles_table(plan: TilePlan, source_id: str, input_uri: str = "") -> list[dict[str, Any]]:
+    """One row per tile of ``plan`` (the columns of :data:`TILES_CSV_COLUMNS`).
+
+    ``dataset_id`` is ``<source_id>__<tile_id>``. Bounds are pixels of the plan's level,
+    half-open; ``tile_size_<ax>``/``tile_overlap_<ax>`` are the planned values (an axis left
+    whole reports its ROI length and overlap 0). Each row also names its forward neighbours:
+    ``right_*`` (next tile along x), ``bottom_*`` (along y), ``behind_*`` (along z), blank at
+    the end of an axis, so every pair of touching tiles is listed once, from the lower tile.
+    Columns of an axis the image does not have are blank.
+    """
+    def dataset_id(tile: Tile) -> str:
+        return f"{source_id}__{tile.tile_id}"
+
+    rows = []
+    for tile in plan.tiles:
+        row: dict[str, Any] = {key: "" for key in TILES_CSV_COLUMNS}
+        row.update(dataset_id=dataset_id(tile), source_dataset_id=source_id, tile_id=tile.tile_id,
+                   tile_index=tile.index, input_uri=input_uri, resolution_level=plan.level)
+        for ax in plan.axes:
+            row[f"{ax}_min"], row[f"{ax}_max"] = tile.bounds[ax]
+            row[f"tile_overlap_{ax}"] = plan.overlap[ax]
+            row[f"tile_size_{ax}"] = plan.tile_size[ax]
+        for ax, neighbor in plan.neighbors(tile).items():
+            if neighbor is not None:
+                row[f"{NEIGHBOR_DIRECTIONS[ax]}_dataset_id"] = dataset_id(neighbor)
+                row[f"{NEIGHBOR_DIRECTIONS[ax]}_tile_index"] = neighbor.index
+        rows.append(row)
+    return rows
+
+
+def write_tiles_csv(plan: TilePlan, path, source_id: str, input_uri: str = "") -> int:
+    """Write :func:`tiles_table` to the CSV ``path``; returns the number of tiles."""
+    import csv
+
+    rows = tiles_table(plan, source_id, input_uri)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=TILES_CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)

@@ -974,9 +974,23 @@ def _relabel_tiles(tiles, offsets_csv: Optional[str], mapping_json: Optional[str
     print(f"Renumbered {len(tiles)} label tile(s): {len(offsets)} offset(s), {len(mapping)} mapped id(s)")
 
 
-def convert_mosaic_single(args):
-    """Runmode to fuse one mosaic to zarr."""
-    print(f"Fusing mosaic {args.input_path} -> {args.zarr_path}")
+def _apply_pyramid_like(kwargs: Dict[str, Any]) -> None:
+    """``--pyramid_like IMAGE --pyramid_start_level K``: the number of levels and the factor of
+    IMAGE from level K on, unless --num_levels/--downscale_factor are given (in place)."""
+    from zarrsmith.utils.dataset_ops import pyramid_like
+
+    like = kwargs.pop("pyramid_like", None)
+    start = int(kwargs.pop("pyramid_start_level", 0) or 0)
+    if like is None:
+        return
+    levels, factor = pyramid_like(mm.ZarrManager(str(like), mode="r").metadata, start)
+    kwargs.setdefault("num_levels", levels)
+    kwargs.setdefault("downscale_factor", list(factor))
+    print(f"Pyramid like {like} from level {start}: {kwargs['num_levels']} level(s), "
+          f"factor {kwargs['downscale_factor']}")
+
+
+def _fusion_kwargs(args) -> Dict[str, Any]:
     kwargs = {
         k: v
         for k, v in vars(args).items()
@@ -984,8 +998,69 @@ def convert_mosaic_single(args):
     }
     if "chunk_size" in kwargs:
         kwargs.pop("max_size", None)
+    _apply_pyramid_like(kwargs)
+    return kwargs
+
+
+def convert_mosaic_single(args):
+    """Runmode to fuse one mosaic to zarr."""
+    print(f"Fusing mosaic {args.input_path} -> {args.zarr_path}")
+    if not mosaic_convert(**_fusion_kwargs(args)):
+        raise SystemExit(1)
+
+
+def fuse_labels_single(args):
+    """``zarrsmith fuse-labels``: the label stores of a folder (one per tile), placed at their NGFF
+    translation, renumbered by --label_offsets/--label_mapping, fused without blending."""
+    print(f"Fusing label tiles {args.input_path} -> {args.zarr_path}")
+    kwargs = _fusion_kwargs(args)
+    kwargs["microscope"] = "zarr"
+    if "label_offsets" not in kwargs and "label_mapping" not in kwargs:
+        kwargs["data_type"] = "label"  # ids already agree: read the label stores as they are
     if not mosaic_convert(**kwargs):
         raise SystemExit(1)
+
+
+def _whole_voxels(value, name: str):
+    """Voxel lengths for plan_tiles must be whole: 512.0 is fine, 512.5 is refused."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {ax: _whole_voxels(v, f"{name} {ax}") for ax, v in value.items()}
+    if float(value) != int(value):
+        raise ValueError(f"{name} in voxels must be a whole number, got {value}; use --physical for units.")
+    return int(value)
+
+
+def plan_tiles_single(args):
+    """``zarrsmith plan-tiles``: plan the tiles of one level of an OME-Zarr image, write the tiles CSV."""
+    import math
+
+    from zarrsmith.utils.tiling import write_tiles_csv
+
+    image = mm.ZarrManager(str(args.input_path), mode="r")
+    level = int(args.level)
+    tile_size, overlap, halo, roi = args.tile_size, args.overlap, args.halo, args.roi
+    if not args.physical:
+        tile_size = _whole_voxels(tile_size, "--tile_size")
+        overlap = _whole_voxels(overlap, "--overlap")
+        halo = _whole_voxels(halo, "--halo")
+        if roi:  # voxel bounds widened to whole voxels
+            roi = {ax: (None if lo is None else math.floor(lo + 1e-9), None if hi is None else math.ceil(hi - 1e-9))
+                   for ax, (lo, hi) in roi.items()}
+    plan = image.plan_tiles(level, tile_size=tile_size, overlap=overlap, halo=halo, roi=roi,
+                            physical=bool(args.physical), max_tile_voxels=args.max_tile_voxels, resize=args.resize)
+
+    counts = " x ".join(f"{plan.counts[ax]} ({ax})" for ax in plan.axes)
+    print(f"{len(plan.tiles)} tile(s): {counts}; tile size {plan.tile_size}, overlap {plan.overlap}, "
+          f"halo {plan.halo}; largest read {plan.max_load_voxels} voxels (halo included)")
+    if args.dry_run:
+        print("Dry run: nothing written.")
+        return
+    name = Path(str(args.input_path).rstrip("/")).name
+    source_id = args.source_id or (name[:-len(".ome.zarr")] if name.endswith(".ome.zarr") else Path(name).stem)
+    write_tiles_csv(plan, args.output_csv, source_id, str(args.input_path))
+    print(f"Wrote {args.output_csv}")
 
 
 def _split_names(cell, column: str) -> List[str]:
@@ -1384,8 +1459,8 @@ def pyramid_single(args):
 
 
 def main(argv=None):
-    """Entry point of the ``zarrsmith`` command: ``convert``, ``fuse``, ``chromatic-shift``, ``resample``,
-    ``allocate`` or ``pyramid``."""
+    """Entry point of the ``zarrsmith`` command: ``convert``, ``fuse``, ``resample``, ``chromatic-shift``,
+    ``plan-tiles``, ``allocate``, ``fuse-labels`` or ``pyramid``."""
     args = _parse_arguments(argv)
     if args.renamed_to:
         print(f"Note: `zarrsmith {args.command}` is now `{args.renamed_to}`; the old name still works for now.",
@@ -1401,6 +1476,8 @@ def main(argv=None):
         "resample_batch": resample_batch,
         "allocate": allocate_single,
         "pyramid": pyramid_single,
+        "plan_tiles": plan_tiles_single,
+        "fuse_labels": fuse_labels_single,
     }
     runners[args.mode](args)
 
