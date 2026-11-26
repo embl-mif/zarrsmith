@@ -13,6 +13,7 @@ import zarrsmith.microscope_manager as mm
 from zarrsmith.utils.axes import UNRECORDED_SCALE_KEY, metadata_axes, metadata_axis_size
 from zarrsmith.utils.chunks import (default_chunk_size, default_num_levels, layout_summary, level0_layout,
                                     output_summary_line)
+from zarrsmith.utils.labels import resolve_channel
 from zarrsmith.utils.ngff import DEFAULT_COMPRESSOR, DEFAULT_SHARD_TARGET_MB
 from zarrsmith.utils.output_path import output_refusal
 from zarrsmith.cli.__arguments import (
@@ -1243,16 +1244,6 @@ def _timepoint_cell(value) -> Union[int, str]:
     return "all" if text == "all" else int(float(text))
 
 
-def _channel_index(channel, channel_names: List[str]) -> int:
-    """Channel given as an index (``1``) or a name (``"cFos-647"``)."""
-    text = str(channel).strip()
-    if text.lstrip("-").isdigit():
-        return int(text)
-    if text in channel_names:
-        return channel_names.index(text)
-    raise ValueError(f"Reference channel {channel!r} not found; channels are {channel_names}.")
-
-
 def _parse_shifts(value) -> Any:
     """``--shifts`` values or batch cell: one number per channel, or the path to a JSON report."""
     tokens = [str(v) for v in value] if isinstance(value, (list, tuple)) else str(value).split()
@@ -1324,7 +1315,7 @@ def chromatic_shift_correct(
         report = shifts if isinstance(shifts, dict) else _parse_shifts(shifts)
         print(f"Using the given shifts: {report['shifts'] if isinstance(report, dict) else report}")
     else:
-        ref = _channel_index(reference_channel, names)
+        ref = resolve_channel(reference_channel, names, metadata_axis_size(z.metadata, "c"))
         options = {k: v for k, v in estimate_kwargs.items() if k in _ESTIMATE_OPTIONS and v is not None}
         if options.get("refine_level") == "none":
             options["refine_level"] = None
