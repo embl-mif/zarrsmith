@@ -684,6 +684,11 @@ def _add_fuse_labels_arguments(parser):
          help='CSV store,offset: the offset added to every non-zero id of each store.')
     _add(labels, '-lm', '--label_mapping', metavar='JSON', type=valid_input_path,
          help='JSON {"id": new_id}, applied after the offsets (e.g. objects merged across tile edges).')
+    _add(labels, '--tiles_csv', metavar='CSV', type=valid_input_path,
+         help='Instead of --label_offsets: a CSV with the columns tile_index and segmented_tile_path (or store) of '
+              'every tile; each store gets the offset tile_index * --label_offset_step.')
+    _add(labels, '--label_offset_step', type=int, metavar='N',
+         help='With --tiles_csv: the step between the offsets of consecutive tiles.')
     _add(labels, '-dt', '--dtype', dest='out_dtype', default='uint32', help='Output dtype (an integer type).')
     _pyramid_section(parser, like=True)
     _storage_section(parser, **_MOSAIC_STORAGE_HELP,
@@ -1108,6 +1113,156 @@ def _add_pyramid_arguments(parser):
          help='Number of threads. Default: half of the available cores, capped at 8.')
 
 
+# ---- segment and measure: project, threshold, mask, measure, filter-labels ---------------
+
+PROJECT_HELP = """\
+    Project an OME-Zarr image along a spatial axis (default z): a maximum (or sum, or mean)
+    intensity projection, on every pyramid level. The axis is removed from the output, which
+    keeps the channels, the other axes and the pyramid of the input.
+
+    Examples:
+      zarrsmith project -i stack.ome.zarr -z mip.ome.zarr
+      zarrsmith project -i stack.ome.zarr -z sum.ome.zarr -p sum
+"""
+
+THRESHOLD_HELP = """\
+    Label the objects of one channel of an OME-Zarr image: a global threshold (Otsu, times
+    --factor) at one pyramid level, then connected components, per timepoint. The other levels
+    are that labelling resized with nearest neighbour, so an object keeps its id on every level.
+    The output is a label image without a channel axis.
+
+    Examples:
+      zarrsmith threshold -i image.ome.zarr -z nuclei.ome.zarr -c DAPI
+      zarrsmith threshold -i image.ome.zarr -z nuclei.ome.zarr -c 0 -lv 2 -fa 1.2
+"""
+
+MASK_HELP = """\
+    Zero one channel of an OME-Zarr image outside the objects of a label image (e.g. from
+    `zarrsmith threshold` or `filter-labels`), on every pyramid level, and add it to the image
+    as a new channel named <channel><suffix> (default _clean), or write it alone.
+
+    Examples:
+      zarrsmith mask -i image.ome.zarr -l nuclei.ome.zarr -c DAPI -z image_clean.ome.zarr
+      zarrsmith mask -i image.ome.zarr -l nuclei.ome.zarr -c 1 -z dapi_only.ome.zarr --masked_only
+"""
+
+MEASURE_HELP = """\
+    Measure every object of a label image against the channels of an intensity image
+    (skimage.measure.regionprops) and write one CSV row per label (and timepoint): area,
+    bounding box, centroid, solidity, extent (2D also perimeter, orientation, eccentricity,
+    axis lengths and form factor), plus per channel the mean, min and max intensity, as
+    <property>_ch<i>_<name> columns.
+
+    Examples:
+      zarrsmith measure -i image.ome.zarr -l nuclei.ome.zarr -oc features.csv
+      zarrsmith measure -i image.ome.zarr -l nuclei.ome.zarr -oc features.csv -ch DAPI GFP \\
+          --properties euler_number --intensity_properties weighted_centroid
+"""
+
+FILTER_LABELS_HELP = """\
+    Keep the objects of a label image whose measurements (a CSV with a label column, e.g. from
+    `zarrsmith measure`) are within limits, zero every other one on every pyramid level, and
+    renumber the kept objects 1..N (per timepoint). Also writes the kept rows, with the new label
+    and the old one as original_label.
+
+    Examples:
+      zarrsmith filter-labels -l nuclei.ome.zarr -tb features.csv -z kept.ome.zarr -oc kept.csv --min_area 50
+      zarrsmith filter-labels -l nuclei.ome.zarr -tb features.csv -z kept.ome.zarr -oc kept.csv \\
+          --filters "solidity:0.8:;mean_intensity_ch1_GFP:100:"
+"""
+
+
+def _derived_io(parser, *, input_help, labels=False, labels_help='Label OME-Zarr image.', output=True,
+                output_help='Path to the output .ome.zarr.'):
+    io = _section(parser, 'Input and output')
+    _add(io, '-i', '--input_path', required=True, type=valid_input_path, help=input_help)
+    if labels:
+        _add(io, '-l', '--labels', required=True, type=valid_input_path, help=labels_help)
+    if output:
+        _add(io, '-z', '--zarr_path', required=True, type=os.path.abspath, help=output_help)
+    return io
+
+
+def _derived_storage(parser):
+    storage = _section(parser, 'Storage layout')
+    _add(storage, '-zf', '--zarr_format', choices=[2, 3], type=int,
+         help='2 (NGFF 0.4) or 3 (NGFF 0.5). Default: as the input.')
+
+
+def _add_project_arguments(parser):
+    _derived_io(parser, input_help='OME-Zarr image to project.')
+    proj = _section(parser, 'Projection')
+    _add(proj, '-p', '--projection', choices=['max', 'sum', 'mean'], default='max', help='Projection.')
+    _add(proj, '--axis', choices=['z', 'y', 'x'], default='z', help='Spatial axis to project along.')
+    _derived_storage(parser)
+    _run_section(parser, dry_run=False)
+
+
+def _add_threshold_arguments(parser):
+    _derived_io(parser, input_help='OME-Zarr image with a channel axis.')
+    read = _section(parser, 'What to read')
+    _add(read, '-c', '--channel', required=True, help='Channel to threshold, by index or name.')
+    _add(read, '-lv', '--level', type=int, default=0,
+         help='Pyramid level the threshold and the labelling are made at; the other levels are derived from it.')
+    th = _section(parser, 'Threshold')
+    _add(th, '--threshold_method', choices=['otsu'], default='otsu', help='Global threshold.')
+    _add(th, '-fa', '--factor', type=float, default=1.0, help='Multiplier applied to the threshold.')
+    _add(th, '-dt', '--dtype', default='uint32', help='Label dtype (an integer type).')
+    pyr = _section(parser, 'Pyramid')
+    _add(pyr, '--levels', choices=['all', 'from_level'], default='all',
+         help='all: every level of the image (the finer ones upsampled), so the labels line up level for level '
+              'with it; from_level: --level and the coarser levels only.')
+    _derived_storage(parser)
+    _run_section(parser, dry_run=False)
+
+
+def _add_mask_arguments(parser):
+    _derived_io(parser, input_help='OME-Zarr intensity image.', labels=True,
+                labels_help='Label OME-Zarr image with the same pyramid as the image (no channel axis).')
+    read = _section(parser, 'What to read')
+    _add(read, '-c', '--channel', required=True, help='Channel to mask, by index or name.')
+    mask = _section(parser, 'Mask')
+    _add(mask, '--suffix', default='_clean', help='Appended to the channel name to name the masked channel.')
+    _add(mask, '--masked_only', action='store_true',
+         help='Write only the masked channel, instead of every channel plus the masked one.')
+    _derived_storage(parser)
+    _run_section(parser, dry_run=False)
+
+
+def _add_measure_arguments(parser):
+    io = _derived_io(parser, input_help='OME-Zarr intensity image.', labels=True, output=False)
+    _add(io, '-oc', '--output_csv', required=True, type=os.path.abspath, help='Path of the features CSV.')
+    read = _section(parser, 'What to read')
+    _add(read, '-ch', '--channels', nargs='+', help='Channels to measure, by index or name. Default: all.')
+    _add(read, '-lv', '--level', type=int, default=0, help='Pyramid level of the intensity image.')
+    _add(read, '-llv', '--labels_level', type=int, default=0, help='Pyramid level of the labels.')
+    props = _section(parser, 'Measurements')
+    _add(props, '--properties', nargs='+', default=[], metavar='PROPERTY',
+         help='Extra regionprops shape properties, measured once per label (e.g. euler_number).')
+    _add(props, '--intensity_properties', nargs='+', default=[], metavar='PROPERTY',
+         help='Extra regionprops intensity properties, measured per channel (e.g. weighted_centroid).')
+    _add(props, '--dataset_id', help='Value of a first dataset_id column. Default: no such column.')
+    _run_section(parser, dry_run=False, overwrite=False)
+
+
+def _add_filter_labels_arguments(parser):
+    io = _section(parser, 'Input and output')
+    _add(io, '-l', '--labels', required=True, type=valid_input_path, help='Label OME-Zarr image to filter.')
+    _add(io, '-tb', '--table', required=True, type=valid_input_path,
+         help='CSV of measurements with a label column (and timepoint for labels with a t axis).')
+    _add(io, '-z', '--zarr_path', required=True, type=os.path.abspath, help='Path of the filtered label .ome.zarr.')
+    _add(io, '-oc', '--output_csv', required=True, type=os.path.abspath, help='Path of the CSV of the kept rows.')
+    lim = _section(parser, 'Limits')
+    _add(lim, '--min_area', type=float, help='Smallest area kept (the area column, in voxels).')
+    _add(lim, '--max_area', type=float, help='Largest area kept.')
+    _add(lim, '--filters',
+         help='Limits on any column: "property:min:max" separated by semicolons, either bound may be empty, '
+              'e.g. "solidity:0.8:;mean_intensity_ch1:100:".')
+    _add(lim, '--keep_ids', action='store_true', help='Keep the original ids instead of renumbering 1..N.')
+    _derived_storage(parser)
+    _run_section(parser, dry_run=False)
+
+
 # ---- command line -----------------------------------------------------------------------
 
 #: Old command names, kept working: old name -> (mode, new spelling)
@@ -1141,6 +1296,18 @@ STAGES = [
          FUSE_LABELS_HELP, _add_fuse_labels_arguments),
         ('pyramid', 'pyramid', '(re)build the pyramid levels of an OME-Zarr in place',
          PYRAMID_HELP, _add_pyramid_arguments),
+    ]),
+    ('Segment and measure', [
+        ('project', 'project', 'max (or sum, mean) projection along an axis, on every level',
+         PROJECT_HELP, _add_project_arguments),
+        ('threshold', 'threshold', 'label the objects of one channel (Otsu threshold, connected components)',
+         THRESHOLD_HELP, _add_threshold_arguments),
+        ('mask', 'mask', 'zero one channel outside the objects of a label image, as a new channel',
+         MASK_HELP, _add_mask_arguments),
+        ('measure', 'measure', 'regionprops of every label against the channels of an image -> CSV',
+         MEASURE_HELP, _add_measure_arguments),
+        ('filter-labels', 'filter_labels', 'keep the labels whose measurements are within limits, renumbered',
+         FILTER_LABELS_HELP, _add_filter_labels_arguments),
     ]),
 ]
 
@@ -1260,11 +1427,15 @@ def _parse_arguments(argv=None):
         except argparse.ArgumentTypeError as error:
             command.error(str(error))
 
-    # fuse-labels: an integer dtype
+    # fuse-labels: offsets from a CSV or from the tiles CSV, and an integer dtype
     if args.mode == 'fuse_labels':
         import numpy as np
 
         command = subparsers.choices['fuse-labels']
+        if args.tiles_csv is not None and args.label_offsets is not None:
+            command.error('give either --label_offsets or --tiles_csv, not both.')
+        if (args.tiles_csv is None) != (args.label_offset_step is None):
+            command.error('--tiles_csv and --label_offset_step go together.')
         try:
             if np.dtype(args.out_dtype).kind not in 'iu':
                 command.error(f'--dtype must be an integer type for labels, got {args.out_dtype}.')

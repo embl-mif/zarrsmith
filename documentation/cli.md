@@ -12,6 +12,11 @@ The `zarrsmith` commands, grouped by the stage of a pipeline they belong to (`za
 | | `zarrsmith allocate` | create an empty OME-Zarr image from a template image, or from an explicit size, to fill tile by tile |
 | | `zarrsmith fuse-labels` | stitch the label stores of a segmentation run tile by tile into one label image |
 | | `zarrsmith pyramid` | build or rebuild the pyramid levels of an OME-Zarr image in place, from level 0 |
+| Segment and measure | `zarrsmith project` | max (or sum, mean) projection along a spatial axis, on every pyramid level |
+| | `zarrsmith threshold` | label the objects of one channel: Otsu threshold and connected components |
+| | `zarrsmith mask` | zero one channel outside the objects of a label image, and add it as a new channel |
+| | `zarrsmith measure` | regionprops of every label against the channels of an image, to a CSV |
+| | `zarrsmith filter-labels` | keep the labels whose measurements are within limits, renumbered 1..N |
 
 `zarrsmith <command> -h` shows the options of a command, with examples and the batch CSV columns, and `zarrsmith <command> --help-all` every option. `zarrsmith --version` prints the installed version.
 
@@ -300,9 +305,33 @@ zarrsmith fuse-labels -i tiles/ -z merged.ome.zarr -lo offsets.csv -lm mapping.j
 | `-lo`, `--label_offsets` | CSV with the columns `store` (store name, with or without `.ome.zarr`) and `offset`, added to every non-zero id of that store; every store needs one | none |
 | `-lm`, `--label_mapping` | JSON `{"id": new_id}` applied after the offsets, e.g. the objects a tile edge cut in two, merged by a label solver; ids not listed are kept | none |
 | `-dt`, `--dtype` | output dtype, an integer type | `uint32` |
+| `--tiles_csv` / `--label_offset_step` | instead of `-lo`: a CSV with the columns `tile_index` and `segmented_tile_path` (or `store`) of every tile, e.g. the tiles CSV of `plan-tiles` with the segmented store of each tile; each store gets the offset `tile_index * step` (written next to the output as `<name>.label_offsets.csv`) | |
 | `-pl`, `--pyramid_like` / `-psl`, `--pyramid_start_level` | make the pyramid follow this image from that level on: the same number of levels below it and the same factor, so level `k` of the labels matches level `start + k` of the image; `-nl`/`-df` override it | the convert defaults |
 
 The storage, performance and run options of `fuse` apply too (`--help-all`). Labels are never blended: every voxel is copied from one tile, overlaps are cut in their middle, and the pyramid levels sample voxels instead of averaging them. Each tile is given only the mapping entries between its offset and the next larger one, so the ids of a tile must stay below the next tile's offset (see [Renumbering label tiles](mosaic.md#renumbering-label-tiles)). Without `--label_offsets` and `--label_mapping` the ids must already agree across tiles, and only stores marked as labels are read.
+
+## Segment and measure
+
+These commands derive images and tables from an OME-Zarr image, keeping its pyramid level for level, so their outputs line up with it and with each other. An output is written in the format of its input (`-zf` changes it) and is not replaced without `--overwrite`.
+
+```console
+zarrsmith project -i stack.ome.zarr -z mip.ome.zarr                              # max over z, every level
+zarrsmith threshold -i mip.ome.zarr -z nuclei.ome.zarr -c DAPI -lv 1 -fa 1.1     # Otsu x 1.1 at level 1
+zarrsmith measure -i mip.ome.zarr -l nuclei.ome.zarr -oc features.csv
+zarrsmith filter-labels -l nuclei.ome.zarr -tb features.csv -z kept.ome.zarr -oc kept.csv --min_area 50 \
+    --filters "solidity:0.8:"
+zarrsmith mask -i mip.ome.zarr -l kept.ome.zarr -c DAPI -z mip_clean.ome.zarr    # adds DAPI_clean
+```
+
+| Command | Options | Default |
+|---|---|---|
+| `project` | `-p`, `--projection` `max`, `sum` or `mean`; `--axis` the spatial axis to remove (also from the scales, units and translations) | `max`, `z` |
+| `threshold` | `-c`, `--channel` (index or name); `-lv`, `--level` where the threshold and the labelling are made, the other levels being that labelling resized with nearest neighbour, so an object keeps its id on every level; `-fa`, `--factor` on the Otsu threshold; `-dt`, `--dtype`; `--levels all` (every level of the image, the finer ones upsampled) or `from_level` | level 0, factor 1, `uint32`, `all` |
+| `mask` | `-l`, `--labels` (same pyramid as the image; a level rounded differently is cropped or padded); `-c`, `--channel`; `--suffix` of the new channel's name; `--masked_only` writes only the masked channel | `_clean`, every channel plus the masked one |
+| `measure` | `-l`, `--labels`; `-oc`, `--output_csv`; `-ch`, `--channels` (indices or names); `-lv`/`-llv` the levels of the image and of the labels; `--properties` / `--intensity_properties` extra regionprops properties; `--dataset_id` a first column | every channel, level 0 |
+| `filter-labels` | `-l`, `--labels`; `-tb`, `--table` (a CSV with a `label` column, and `timepoint` for labels with a `t` axis); `-z` and `-oc` the filtered labels and the kept rows (with `original_label`); `--min_area`/`--max_area`; `--filters "property:min:max;..."` on any column; `--keep_ids` keeps the ids instead of renumbering | renumbered 1..N per timepoint |
+
+`measure` writes one row per label (and timepoint): `label`, `area`, `bbox-*`, `centroid-*`, `solidity`, `extent` (2D also `perimeter`, `orientation`, `eccentricity`, axis lengths and `form_factor`), and per channel `mean_intensity`, `min_intensity`, `max_intensity` as `<property>_ch<i>_<name>`. A `t` of 1 on the image alone is dropped.
 
 ## Old command names and flags
 

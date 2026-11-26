@@ -1015,10 +1015,111 @@ def fuse_labels_single(args):
     print(f"Fusing label tiles {args.input_path} -> {args.zarr_path}")
     kwargs = _fusion_kwargs(args)
     kwargs["microscope"] = "zarr"
+    tiles_csv, step = kwargs.pop("tiles_csv", None), kwargs.pop("label_offset_step", None)
+    if tiles_csv is not None:
+        kwargs["label_offsets"] = _offsets_from_tiles_csv(tiles_csv, int(step), args.input_path, args.zarr_path)
     if "label_offsets" not in kwargs and "label_mapping" not in kwargs:
         kwargs["data_type"] = "label"  # ids already agree: read the label stores as they are
     if not mosaic_convert(**kwargs):
         raise SystemExit(1)
+
+
+def _offsets_from_tiles_csv(tiles_csv, step: int, tiles_dir, zarr_path) -> str:
+    """``fuse-labels --tiles_csv --label_offset_step``: the offsets CSV (store, tile_index * step),
+    written next to the output, after checking that the CSV and the folder list the same stores."""
+    table = pd.read_csv(tiles_csv)
+    store_column = "segmented_tile_path" if "segmented_tile_path" in table.columns else "store"
+    missing = {"tile_index", store_column} - set(table.columns)
+    if missing:
+        raise ValueError(f"{tiles_csv} needs the columns tile_index and segmented_tile_path (or store); "
+                         f"missing {sorted(missing)}.")
+    if step < 1:
+        raise ValueError(f"--label_offset_step must be >= 1, got {step}.")
+    offsets = {Path(str(s)).name: int(i) * step for s, i in zip(table[store_column], table["tile_index"])}
+    stores = {p.name for p in Path(tiles_dir).iterdir() if p.is_dir()}
+    absent, extra = sorted(set(offsets) - stores), sorted(stores - set(offsets))
+    if absent or extra:
+        raise ValueError(f"The tile stores and {tiles_csv} disagree: missing stores {absent}, "
+                         f"stores not in the CSV {extra}.")
+    out = Path(str(zarr_path)).with_suffix("").with_suffix("")
+    path = out.parent / f"{out.name}.label_offsets.csv"
+    pd.DataFrame({"store": list(offsets), "offset": list(offsets.values())}).to_csv(path, index=False)
+    print(f"Offsets of {len(offsets)} tile store(s) (tile_index * {step}): {path}")
+    return str(path)
+
+
+def _derived_write(manager, args, source_metadata) -> None:
+    """Write an image derived from an input (project, threshold, mask, filter-labels): in the
+    input's format unless --zarr_format, axes kept as they are."""
+    zarr_format = int(args.zarr_format or source_metadata.get("zarr_format") or 3)
+    manager.to_zarr(str(args.zarr_path), zarr_format=zarr_format, ngff_version="0.4" if zarr_format == 2 else "0.5",
+                    drop_singleton=False, overwrite=bool(args.overwrite))
+    print(f"Wrote {args.zarr_path}: axes {manager.metadata['axes']}, {len(manager.data)} level(s)")
+
+
+def project_single(args):
+    """``zarrsmith project``."""
+    from zarrsmith.utils.labels import project
+
+    _refuse_output(args.zarr_path, overwrite=args.overwrite, input_path=args.input_path)
+    image = mm.ZarrManager(str(args.input_path), mode="r")
+    _derived_write(project(image, axis=args.axis, method=args.projection), args, image.metadata)
+
+
+def threshold_single(args):
+    """``zarrsmith threshold``."""
+    from zarrsmith.utils.labels import threshold_labels
+
+    _refuse_output(args.zarr_path, overwrite=args.overwrite, input_path=args.input_path)
+    image = mm.ZarrManager(str(args.input_path), mode="r")
+    labels = threshold_labels(image, args.channel, level=args.level, method=args.threshold_method,
+                              factor=args.factor, levels=args.levels, dtype=args.dtype)
+    n = int(np.asarray(labels.data[args.level if args.levels == "all" else 0]).max())
+    print(f"Channel {args.channel} at level {args.level}: {n} object(s) (highest id), threshold x {args.factor}")
+    _derived_write(labels, args, image.metadata)
+
+
+def mask_single(args):
+    """``zarrsmith mask``."""
+    from zarrsmith.utils.labels import mask_channel
+
+    _refuse_output(args.zarr_path, overwrite=args.overwrite, input_path=args.input_path)
+    image = mm.ZarrManager(str(args.input_path), mode="r")
+    labels = mm.ZarrManager(str(args.labels), mode="r")
+    out = mask_channel(image, labels, args.channel, suffix=args.suffix, append=not args.masked_only)
+    print(f"Masked channel {args.channel}: {(out.metadata.get('channel_names') or ['?'])[-1]}")
+    _derived_write(out, args, image.metadata)
+
+
+def measure_single(args):
+    """``zarrsmith measure``."""
+    from zarrsmith.utils.measure import measure_labels
+
+    image = mm.ZarrManager(str(args.input_path), mode="r")
+    labels = mm.ZarrManager(str(args.labels), mode="r")
+    table = measure_labels(image, labels, channels=args.channels, level=args.level, labels_level=args.labels_level,
+                           properties=args.properties, intensity_properties=args.intensity_properties,
+                           dataset_id=args.dataset_id)
+    table.to_csv(args.output_csv, index=False)
+    print(f"Wrote {len(table)} row(s) to {args.output_csv}")
+
+
+def filter_labels_single(args):
+    """``zarrsmith filter-labels``."""
+    from zarrsmith.utils.labels import filter_labels, parse_limits
+
+    _refuse_output(args.zarr_path, overwrite=args.overwrite, input_path=args.labels)
+    limits = parse_limits(args.filters)
+    for bound, value in (("min", args.min_area), ("max", args.max_area)):
+        if value is not None:
+            lo, hi = limits.get("area", (None, None))
+            limits["area"] = (value, hi) if bound == "min" else (lo, value)
+    table = pd.read_csv(args.table)
+    labels = mm.ZarrManager(str(args.labels), mode="r")
+    out, kept = filter_labels(labels, table, limits, relabel=not args.keep_ids)
+    _derived_write(out, args, labels.metadata)
+    kept.to_csv(args.output_csv, index=False)
+    print(f"Kept {len(kept)}/{len(table)} label(s); kept rows in {args.output_csv}")
 
 
 def _whole_voxels(value, name: str):
@@ -1478,6 +1579,11 @@ def main(argv=None):
         "pyramid": pyramid_single,
         "plan_tiles": plan_tiles_single,
         "fuse_labels": fuse_labels_single,
+        "project": project_single,
+        "threshold": threshold_single,
+        "mask": mask_single,
+        "measure": measure_single,
+        "filter_labels": filter_labels_single,
     }
     runners[args.mode](args)
 

@@ -189,6 +189,28 @@ plan.max_load_voxels   # largest tile read, halo included
 - A `tile_size` given for an axis is kept and counts towards the budget.
 - `resize` is the factor by which the tool enlarges each tile before processing: the budget is checked against `voxels * resize ** ndim`. Cellpose rescales objects to about 30 pixels, so use `30 / diameter`.
 
+## Project, threshold, mask, measure and filter labels
+
+The functions behind `zarrsmith project`, `threshold`, `mask`, `measure` and `filter-labels` take opened images and return an `ArrayManager` (or a table), keeping the pyramid of the input level for level:
+
+```python
+from zarrsmith.utils.labels import project, threshold_labels, mask_channel, filter_labels
+from zarrsmith.utils.measure import measure_labels
+
+img = mm.ZarrManager("stack.ome.zarr")
+mip = project(img, axis="z", method="max")                     # lazy, every level
+mip.to_zarr("mip.ome.zarr")
+mip = mm.ZarrManager("mip.ome.zarr")
+labels = threshold_labels(mip, "DAPI", level=1, factor=1.1)    # Otsu, connected components; same ids on every level
+labels.to_zarr("nuclei.ome.zarr")
+nuclei = mm.ZarrManager("nuclei.ome.zarr")
+table = measure_labels(mip, nuclei, channels=["DAPI", "GFP"])  # a DataFrame, one row per label
+kept_labels, kept_rows = filter_labels(nuclei, table, {"area": (50, None), "solidity": (0.8, None)})
+clean = mask_channel(mip, nuclei, "DAPI")                      # every channel plus DAPI_clean
+```
+
+`fit_shape(array, shape)` crops or zero-pads an array at the high end of each axis (levels of separately built pyramids can differ by a pixel), and `resolve_channel(spec, names, n)` turns a channel index or name into an index.
+
 ## Allocate an image and build its pyramid in place
 
 `allocate_zarr` creates an empty image from a template (what [`zarrsmith allocate`](cli.md) runs), with the template's pyramid levels by default. `populate_pyramid` fills or replaces the levels on disk after `start_level` (default 0, an index or a dataset path), from that level, one task per output shard (chunk on zarr v2). The start level and the levels above it are kept; `num_levels` counts every level from level 0. Without `num_levels` or `downscale_factor`, it keeps the levels the image already has:
