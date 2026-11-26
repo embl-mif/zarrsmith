@@ -8,12 +8,13 @@ pyramid of the input is kept level for level, so the outputs line up with it.
 from __future__ import annotations
 
 import copy
-from typing import Any, Mapping, Sequence
+from typing import Mapping, Sequence
 
 import dask.array as da
 import numpy as np
 
-SPATIAL = ("z", "y", "x")
+from .axes import SPATIAL_AXIS_SET, UNRECORDED_SCALE_KEY, metadata_axes, spatial_axes_in_order
+from .translation import drop_axes
 
 
 # ---------------------------------------------------------------------------
@@ -53,17 +54,13 @@ def resolve_channel(spec, names: Sequence[str] | None, n_channels: int) -> int:
     return index
 
 
-def _axes(metadata: Mapping[str, Any]) -> str:
-    return "".join(metadata["axes"]).lower()
-
-
 def _drop_axis_per_level(values, index: int):
     return [tuple(v for i, v in enumerate(level) if i != index) for level in values]
 
 
 def _drop_spatial(metadata: dict, axis: str) -> None:
     """Remove a spatial axis from the per-spatial-axis metadata (scales, units, translations)."""
-    spatial = [ax for ax in _axes(metadata) if ax in SPATIAL]
+    spatial = spatial_axes_in_order(metadata_axes(metadata))
     if axis not in spatial:
         return
     i = spatial.index(axis)
@@ -72,10 +69,7 @@ def _drop_spatial(metadata: dict, axis: str) -> None:
     if metadata.get("units") and len(metadata["units"]) == len(spatial):
         metadata["units"] = tuple(u for j, u in enumerate(metadata["units"]) if j != i)
     if metadata.get("translations"):
-        metadata["translations"] = [{k: v for k, v in level.items() if k != axis} if level else level
-                                    for level in metadata["translations"]]
-    from .axes import UNRECORDED_SCALE_KEY
-
+        metadata["translations"] = drop_axes(metadata["translations"], (axis,))
     if metadata.get(UNRECORDED_SCALE_KEY):
         metadata[UNRECORDED_SCALE_KEY] = tuple(a for a in metadata[UNRECORDED_SCALE_KEY] if a != axis)
 
@@ -103,8 +97,8 @@ def project(image, *, axis: str = "z", method: str = "max"):
     if method not in ("max", "sum", "mean"):
         raise ValueError(f"method must be max, sum or mean, got {method!r}.")
     metadata = copy.deepcopy(image.metadata)
-    axes = _axes(metadata)
-    if axis not in axes or axis not in SPATIAL:
+    axes = metadata_axes(metadata)
+    if axis not in axes or axis not in SPATIAL_AXIS_SET:
         raise ValueError(f"The image has no spatial axis {axis!r} to project along (axes {axes}).")
     k = axes.index(axis)
     levels = []
@@ -126,7 +120,8 @@ def project(image, *, axis: str = "z", method: str = "max"):
 # Threshold -> labels
 # ---------------------------------------------------------------------------
 
-def _plane(data, axes: str, fixed: Mapping[str, int]):
+def _plane(data, axes: str, fixed: Mapping[str, int]) -> np.ndarray:
+    """``data`` with the axes in ``fixed`` set to an index (e.g. ``{"c": 0, "t": 2}``), loaded."""
     index = tuple(fixed[ax] if ax in fixed else slice(None) for ax in axes)
     return np.asarray(data[index])
 
@@ -150,7 +145,7 @@ def threshold_labels(image, channel, *, level: int = 0, method: str = "otsu", fa
     if levels not in ("all", "from_level"):
         raise ValueError(f"levels must be 'all' or 'from_level', got {levels!r}.")
     metadata = copy.deepcopy(image.metadata)
-    axes = _axes(metadata)
+    axes = metadata_axes(metadata)
     if "c" not in axes:
         raise ValueError(f"The image has no channel axis: axes {axes}.")
     if not 0 <= level < len(image.data):
@@ -266,7 +261,7 @@ def filter_labels(labels, table, limits: Mapping[str, tuple[float | None, float 
         raise ValueError(f"The table has no 'label' column. Available columns: {sorted(table.columns)}")
     kept = select_rows(table, limits or {})
     metadata = copy.deepcopy(labels.metadata)
-    axes = _axes(metadata)
+    axes = metadata_axes(metadata)
     has_t = "t" in axes
     if has_t and "timepoint" not in kept.columns:
         raise ValueError(f"The labels have a time axis (axes {axes}) but the table has no 'timepoint' column.")
@@ -318,13 +313,13 @@ def mask_channel(image, labels, channel, *, suffix: str = "_clean", append: bool
     channel and adds the masked one (named ``<name><suffix>``, with the channel's colour);
     otherwise the output holds only the masked channel."""
     metadata = copy.deepcopy(image.metadata)
-    axes = _axes(metadata)
+    axes = metadata_axes(metadata)
     if "c" not in axes:
         raise ValueError(f"The image has no channel axis: axes {axes}.")
     c_axis = axes.index("c")
     n_channels = int(image.data[0].shape[c_axis])
     c = resolve_channel(channel, metadata.get("channel_names"), n_channels)
-    label_axes = _axes(labels.metadata)
+    label_axes = metadata_axes(labels.metadata)
     if len(image.data) != len(labels.data):
         raise ValueError(f"The image has {len(image.data)} pyramid level(s) but the labels have {len(labels.data)}: "
                          "they must share their pyramid (e.g. labels from `zarrsmith threshold` of this image).")

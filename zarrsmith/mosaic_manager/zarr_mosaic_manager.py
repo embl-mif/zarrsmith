@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import zarr
 
-from ..utils.axes import UNRECORDED_SCALE_KEY, normalize_axes
+from ..utils.axes import UNRECORDED_SCALE_KEY, normalize_axes, spatial_axes_in_order
 from ..utils.units import normalize_unit
 from .mosaic import MosaicManager
 from .tile import Tile
@@ -243,7 +243,7 @@ def store_tiles(store: str | Path, *, zm=None) -> Tuple[List[Tile], bool]:
     md = zm.metadata
     axes = md["axes"]
     shape = dict(zip(axes, zm.data[0].shape))
-    spatial = [ax for ax in axes if ax in "zyx"]
+    spatial = spatial_axes_in_order(axes)
     scale = dict(zip(spatial, md["scales"][0]))
     # axes without a recorded voxel size (a 1.0 placeholder), and z for 2D stores
     unrecorded = tuple(ax for ax in "zyx" if ax not in scale or ax in (md.get(UNRECORDED_SCALE_KEY) or ()))

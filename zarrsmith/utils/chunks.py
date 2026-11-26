@@ -8,7 +8,7 @@ from typing import Any
 import dask.array as da
 import numpy as np
 
-from .axes import metadata_axes, recorded_voxel_size, spatial_values_for_axes
+from .axes import metadata_axes, recorded_voxel_size, spatial_axes_in_order, spatial_values_for_axes
 
 #: The default number of levels stops when no spatial axis of the coarsest level is above this.
 MAX_COARSEST_SIZE = 2048
@@ -57,7 +57,7 @@ def _physical_size(axes: str, voxel_size) -> dict[str, float]:
     """Voxel size of each spatial axis of ``axes`` from ``voxel_size`` (a mapping axis -> size,
     or the sizes of the spatial axes in order), 1.0 where it is unknown (``None``) or unusable.
     With an unknown size, chunks are counted in voxels along that axis."""
-    spatial = [ax for ax in axes if ax in "zyx"]
+    spatial = spatial_axes_in_order(axes)
     if voxel_size is None:
         return {ax: 1.0 for ax in spatial}
     if not isinstance(voxel_size, dict):
@@ -245,11 +245,11 @@ def output_summary_line(axes: str, sizes: dict, dtype, voxel_size: Sequence[floa
     out_axes = "".join(ax for ax in axes if not (drop_singleton and ax in "tcz" and int(sizes[ax]) == 1))
     labels = {"t": "t", "c": "ch"}
     parts = [f"{sizes[ax]} {labels[ax]}" for ax in out_axes if ax in labels]
-    spatial = [ax for ax in out_axes if ax in "zyx"]
+    spatial = spatial_axes_in_order(out_axes)
     parts.append(" x ".join(str(sizes[ax]) for ax in spatial) + " px")
     nbytes = math.prod(int(sizes[ax]) for ax in out_axes) * np.dtype(dtype).itemsize
     size = f"{nbytes / 1e9:.2f} GB" if nbytes >= 1e8 else f"{nbytes / 1e6:.1f} MB"
-    all_spatial = [ax for ax in axes if ax in "zyx"]
+    all_spatial = spatial_axes_in_order(axes)
     vox = dict(zip(all_spatial, voxel_size or ()))
     unit_of = dict(zip(all_spatial, units or ()))
     voxel = " x ".join(f"{float(vox[ax]):.3g}" for ax in spatial if ax in vox)

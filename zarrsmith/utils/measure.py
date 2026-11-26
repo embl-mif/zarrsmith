@@ -8,7 +8,8 @@ from typing import Sequence
 
 import numpy as np
 
-from .labels import fit_shape, resolve_channel
+from .axes import metadata_axes
+from .labels import _plane as plane, fit_shape, resolve_channel
 
 #: Shape properties measured for every label (2D labels: also perimeter, orientation,
 #: eccentricity, axis lengths, and the form factor 4 pi area / perimeter^2).
@@ -59,8 +60,8 @@ def measure_labels(image, labels, *, channels: Sequence | None = None, level: in
     import pandas as pd
     from skimage.measure import regionprops_table
 
-    axes = "".join(image.metadata["axes"]).lower()
-    label_axes = "".join(labels.metadata["axes"]).lower()
+    axes = metadata_axes(image.metadata)
+    label_axes = metadata_axes(labels.metadata)
     if "c" not in axes:
         raise ValueError(f"The image has no channel axis: axes {axes}.")
     for name, manager, lv in (("image", image, level), ("labels", labels, labels_level)):
@@ -78,9 +79,6 @@ def measure_labels(image, labels, *, channels: Sequence | None = None, level: in
     if has_t and lab_t and data.shape[axes.index("t")] != lab_data.shape[label_axes.index("t")]:
         raise ValueError("The image and the labels have a different number of timepoints.")
     timepoints = list(range(int(lab_data.shape[label_axes.index("t")]))) if lab_t else [None]
-
-    def plane(array, array_axes, fixed):
-        return np.asarray(array[tuple(fixed[ax] if ax in fixed else slice(None) for ax in array_axes)])
 
     tables = []
     for t in timepoints:

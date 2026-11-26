@@ -16,6 +16,8 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+from .axes import spatial_axes_in_order
+
 _EPS = 1e-9
 
 PixelBounds = Mapping[str, tuple[int, int]]
@@ -234,8 +236,8 @@ class Region:
 
         source = self.source or {}
         axes = "".join(no_c)
-        spatial = [ax for ax in axes if ax in "zyx"]
-        src_spatial = [ax for ax in (source.get("axes") or self.axes) if ax in "zyx"]
+        spatial = spatial_axes_in_order(axes)
+        src_spatial = spatial_axes_in_order(source.get("axes") or self.axes)
         src_units = list(source.get("units") or ())
         units = dict(zip(src_spatial, src_units)) if len(src_units) == len(src_spatial) else {}
         translation = self.core_translation()
@@ -299,8 +301,6 @@ def read_region(
     units and converted with ``scale`` and ``translation`` (see
     :func:`physical_to_pixel_bounds`); ``t`` and ``c`` are always indices.
     """
-    from .axes import spatial_axes_in_order
-
     axes = "".join(axes)
     shape = dict(zip(axes, (int(n) for n in array.shape)))
     spatial = list(spatial_axes_in_order(axes))

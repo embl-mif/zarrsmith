@@ -1016,10 +1016,10 @@ class FusionPlan:
     def voxel_size(self) -> Dict[str, Optional[float]]:
         """Level-0 voxel size of every spatial axis, ``None`` where a tile's file did not record
         it (``Tile.attrs[UNRECORDED_SCALE_KEY]``; ``scale`` then holds a 1.0 placeholder)."""
-        from ..utils.axes import UNRECORDED_SCALE_KEY
+        from ..utils.axes import UNRECORDED_SCALE_KEY, spatial_axes_in_order
 
         unrecorded = {ax for t in self.tiles for ax in (t.attrs.get(UNRECORDED_SCALE_KEY) or ())}
-        spatial = [ax for ax in self.axes if ax in "zyx"]
+        spatial = spatial_axes_in_order(self.axes)
         return {ax: (None if ax in unrecorded else float(s)) for ax, s in zip(spatial, self.scale)}
 
     @property

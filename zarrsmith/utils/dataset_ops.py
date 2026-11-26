@@ -21,6 +21,7 @@ from .axes import (
     index_list_from_selection,
     normalize_axes,
     normalize_data_type,
+    spatial_axes_in_order,
 )
 
 logger = logging.getLogger("zarrsmith")
@@ -268,7 +269,7 @@ def pyramid_like(metadata: dict[str, Any], start_level: int = 0) -> tuple[int, t
     levels = len(scales) - start_level
     if levels == 1:
         return 1, (2, 2, 2)
-    spatial = [ax for ax in _axes_of(metadata) if ax in SPATIAL_AXIS_SET]
+    spatial = spatial_axes_in_order(_axes_of(metadata))
     ratio = {ax: scales[start_level + 1][i] / scales[start_level][i] for i, ax in enumerate(spatial)}
     return levels, tuple(max(1, int(round(ratio.get(ax, 1.0)))) for ax in "zyx")
 

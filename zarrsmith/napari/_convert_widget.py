@@ -12,7 +12,7 @@ from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton
 
 from zarrsmith.microscope_manager.readers import READERS
-from zarrsmith.utils.axes import recorded_voxel_size
+from zarrsmith.utils.axes import recorded_voxel_size, spatial_axes_in_order
 from zarrsmith.utils.chunks import default_num_levels, output_summary_line
 from ._batch_csv import append_batch_csv, same_path, split_zarr_name
 from ._layout import compact_row, compose_dock, enable_drag_and_drop, make_button_holder, make_log_pane, make_title
@@ -249,7 +249,7 @@ def output_summary(dataset, *, t_range, z_range, y_range, x_range, channels, dro
     axes = _dataset_axes(dataset)
     sizes = output_sizes(dataset, t_range=t_range, z_range=z_range, y_range=y_range, x_range=x_range,
                          channels=channels)
-    spatial = [ax for ax in axes if ax in "zyx"]
+    spatial = spatial_axes_in_order(axes)
     # the line zarrsmith convert --dry_run prints
     return output_summary_line(axes, sizes, dataset.data[0].dtype, _scale_for_axes(dataset, spatial),
                                dataset.metadata.get("units") or (), drop_singleton=drop_singleton)
