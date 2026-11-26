@@ -133,6 +133,33 @@ def _set_display_windows(group: zarr.Group, metadata: dict, axes, cfg: ZarrWrite
         logger.info("Display window per channel: %s", windows)
 
 
+def _prepare_write(data_levels, metadata, cfg, *, is_label=None):
+    """The levels, axes, metadata and configuration to write: singleton axes dropped (if asked),
+    the metadata completed for the output and checked against the levels."""
+    if not data_levels:
+        raise ValueError("data_levels cannot be empty.")
+    data_levels, metadata, cfg = _drop_singleton_axes(data_levels, metadata, cfg)
+    axes = normalize_axes(metadata.get("axes"), ndim=data_levels[0].ndim)
+    effective_metadata = _metadata_for_write(metadata, axes, config=cfg, is_label=is_label)
+    _validate_metadata(data_levels, effective_metadata, axes)
+    return data_levels, axes, effective_metadata, cfg
+
+
+def _write_levels(group, data_levels, metadata, axes, cfg, *, zarr_format, ngff_version, desc, name,
+                  label_source=None):
+    """Write the pyramid levels into ``group`` (as zarr v2 or v3), then its NGFF metadata and the
+    channels' display windows. Returns the delayed writes (computed already unless ``cfg.compute``
+    is off)."""
+    if zarr_format == 3:
+        delayed = _write_pyramid_v3(root=group, data_levels=data_levels, cfg=cfg, axes=axes, desc=desc)
+    else:
+        delayed = _write_pyramid_v2(root=group, data_levels=data_levels, cfg=cfg, desc=desc)
+    _write_ngff_metadata(group, metadata, axes, data_levels[0], ngff_version=ngff_version, name=name,
+                         label_source=label_source)
+    _set_display_windows(group, metadata, axes, cfg)
+    return delayed
+
+
 def to_zarr(
     path: str | Path,
     data_levels: Sequence[da.Array],
@@ -158,14 +185,7 @@ def to_zarr(
     sources : iterable of paths
         Paths ``data_levels`` is read from: the output must not replace them.
     """
-    cfg = config or ZarrWriteConfig()
-    if not data_levels:
-        raise ValueError("data_levels cannot be empty.")
-
-    data_levels, metadata, cfg = _drop_singleton_axes(data_levels, metadata, cfg)
-    axes = normalize_axes(metadata.get("axes"), ndim=data_levels[0].ndim)
-    effective_metadata = _metadata_for_write(metadata, axes, config=cfg)
-    _validate_metadata(data_levels, effective_metadata, axes)
+    data_levels, axes, effective_metadata, cfg = _prepare_write(data_levels, metadata, config or ZarrWriteConfig())
 
     ngff_version, zarr_format = _resolve_format(cfg)
     check_output_path(path, overwrite=cfg.overwrite, sources=sources)
@@ -174,20 +194,10 @@ def to_zarr(
         mode="w" if cfg.overwrite else "w-",
         zarr_format=zarr_format,
     )
-
-    if zarr_format == 3:
-        delayed = _write_pyramid_v3(root=root, data_levels=data_levels, cfg=cfg, axes=axes, desc=Path(path).name)
-    else:
-        delayed = _write_pyramid_v2(root=root, data_levels=data_levels, cfg=cfg, desc=Path(path).name)
-
     # A standalone label store has no source image, hence no ``label_source``.
-    _write_ngff_metadata(
-        root, effective_metadata, axes, data_levels[0],
-        ngff_version=ngff_version,
-        name=effective_metadata.get("name") or "dataset",
-    )
-    _set_display_windows(root, effective_metadata, axes, cfg)
-
+    delayed = _write_levels(root, data_levels, effective_metadata, axes, cfg, zarr_format=zarr_format,
+                            ngff_version=ngff_version, desc=Path(path).name,
+                            name=effective_metadata.get("name") or "dataset")
     return root if cfg.compute else delayed
 
 
@@ -205,19 +215,9 @@ def write_multiscale_to_group(
     Used by :class:`zarrsmith.microscope_manager.ZarrManager` for raw data, image
     subgroups and label groups.  The axes may be any subset of ``tczyx``.
     """
-    cfg = config or ZarrWriteConfig()
-    if not data_levels:
-        raise ValueError("data_levels cannot be empty.")
-
-    data_levels, metadata, cfg = _drop_singleton_axes(data_levels, metadata, cfg)
-    axes = normalize_axes(metadata.get("axes"), ndim=data_levels[0].ndim)
-    effective_metadata = _metadata_for_write(
-        metadata,
-        axes,
-        config=cfg,
-        is_label=True if is_label else None,
+    data_levels, axes, effective_metadata, cfg = _prepare_write(
+        data_levels, metadata, config or ZarrWriteConfig(), is_label=True if is_label else None
     )
-    _validate_metadata(data_levels, effective_metadata, axes)
 
     ngff_version, zarr_format = _resolve_format(cfg)
 
@@ -226,20 +226,9 @@ def write_multiscale_to_group(
             if str(key).isdigit():
                 del group[key]
 
-    if zarr_format == 3:
-        label = name or group.name.strip('/') or 'raw'
-        delayed = _write_pyramid_v3(root=group, data_levels=data_levels, cfg=cfg, axes=axes, desc=label)
-    else:
-        label = name or group.name.strip('/') or 'raw'
-        delayed = _write_pyramid_v2(root=group, data_levels=data_levels, cfg=cfg, desc=label)
-
     # Only labels nested in ``<image>/labels/<name>`` have a source image.
-    _write_ngff_metadata(
-        group, effective_metadata, axes, data_levels[0],
-        ngff_version=ngff_version,
-        name=name or effective_metadata.get("name") or "dataset",
-        label_source={"source": {"image": "../../"}} if is_label else None,
-    )
-    _set_display_windows(group, effective_metadata, axes, cfg)
-
+    delayed = _write_levels(group, data_levels, effective_metadata, axes, cfg, zarr_format=zarr_format,
+                            ngff_version=ngff_version, desc=name or group.name.strip('/') or 'raw',
+                            name=name or effective_metadata.get("name") or "dataset",
+                            label_source={"source": {"image": "../../"}} if is_label else None)
     return group if cfg.compute else delayed

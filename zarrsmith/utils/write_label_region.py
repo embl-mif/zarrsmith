@@ -7,7 +7,7 @@ import numpy as np
 import zarr
 
 from .downsampling import SpatialFactor
-from .write_image_region import _scale_index as _scale_index_general, _write_region
+from .write_image_region import _write_region
 
 
 def write_label_region(
@@ -59,7 +59,3 @@ def write_label_region(
         expected_data_type="label",
         aligned=aligned,
     )
-
-def _scale_index(index_tuple, shape, scale_factor: SpatialFactor, axes="tzyx"):
-    """Compatibility wrapper for tests and legacy callers."""
-    return _scale_index_general(index_tuple, shape, scale_factor, axes=axes)

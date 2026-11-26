@@ -60,7 +60,7 @@ from skimage.segmentation import find_boundaries
 import zarrsmith.microscope_manager as mm
 from zarrsmith.microscope_manager.zarr_manager import ZarrDataset
 from zarrsmith.utils.visualize import add_layers, channel_names, layer_geometry
-from ._dataset_helpers import dataset_axes
+from ._dataset_helpers import dataset_axes, spatial_axes
 from ._layout import compose_dock, enable_drag_and_drop, make_button_holder, make_section, make_title
 
 try:
@@ -190,10 +190,6 @@ class RepeatedLabelsError(ValueError):
 
 # A dataset is a ZarrManager or a ZarrDataset (a label group): ``.data`` holds its resolution levels
 # (lazy dask arrays), ``.metadata`` its axes and the voxel sizes (µm) of its spatial axes at every level.
-
-def spatial_axes(dataset):
-    return [a for a in dataset_axes(dataset) if a in "zyx"]
-
 
 def voxel_sizes(dataset):
     """Voxel size (µm) of the spatial axes, at every level."""

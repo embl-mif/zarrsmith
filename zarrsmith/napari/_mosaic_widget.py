@@ -21,9 +21,9 @@ from ._layout import (compact_row, compose_dock, enable_drag_and_drop, make_butt
 from ._log import EmittingStream, make_log_appender
 from ._output_check import confirm_batch_output, output_allowed
 from ._zarr_options import (  # noqa: F401  (re-exported: part of this module's helpers)
-    DEFAULT_CHUNK_MB, DEFAULT_SHARD_MB, FUSION_SHARD_MB, NGFF_FORMATS, PYRAMID_METHODS, auto_channel_names, auto_chunks,
-    block_count, channel_error, channel_option_problems, channel_warning_text, chunk_shard_layout,
-    follow_auto_value, layout_summary, manual_chunks, parse_channel_colors, parse_channel_names,
+    DEFAULT_CHUNK_MB, FUSION_SHARD_MB, NGFF_FORMATS, PYRAMID_METHODS, auto_channel_names,
+    channel_error, channel_option_problems, channel_warning_text, chunk_shard_layout,
+    follow_auto_value, layout_summary, parse_channel_colors, parse_channel_names,
 )
 
 #: Mosaic readers offered in the widget.
@@ -590,16 +590,6 @@ def shown_contrast_limits(layers, mosaic) -> dict:
     (their contrast is linked per channel), to keep it when tiles are shown again."""
     return {mosaic.tiles[layer.metadata["mosaic_tile"]].channel: tuple(float(v) for v in layer.contrast_limits)
             for layer in tile_layers(layers, mosaic.path)}
-
-
-def apply_display_windows(layers, windows, dtype=None) -> None:
-    """Give the last image layers its display windows (one per channel, in layer order), with
-    the slider over the whole range of their data type (``dtype`` is no longer needed: the
-    layers' own is used)."""
-    from zarrsmith.utils.display_window import apply_display_windows as _apply
-
-    images = [layer for layer in layers if hasattr(layer, "contrast_limits")]
-    _apply(images[-len(windows):] if windows else [], windows)
 
 
 def show_first_timepoint(viewer, axes: str) -> None:

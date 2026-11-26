@@ -88,6 +88,7 @@ def _expected_shifts(displacements=DISPLACEMENTS):
 # Estimation
 # ----------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_estimate_recovers_subplane_z_shift(store):
     report = store.estimate_chromatic_shift(max_shift=10.0)
 
@@ -99,6 +100,7 @@ def test_estimate_recovers_subplane_z_shift(store):
     assert {r["surface"] for r in report["regions"]} == {"lower", "upper"}
 
 
+@pytest.mark.slow
 def test_estimate_with_z_downsampled_pyramid(tmp_path):
     arr = _synthetic_sample(shape=(64, 96, 96))
     z = _write_store(tmp_path / "zdown.zarr", arr, downscale=2)
@@ -108,6 +110,7 @@ def test_estimate_with_z_downsampled_pyramid(tmp_path):
     np.testing.assert_allclose(report["shifts"], _expected_shifts(), atol=0.25 * SPACING[0])
 
 
+@pytest.mark.slow
 def test_estimate_other_reference_channel(store):
     report = store.estimate_chromatic_shift(reference_channel=1, max_shift=10.0)
 
@@ -124,6 +127,7 @@ def test_coarse_only_estimate(store):
     np.testing.assert_allclose(report["shifts"], _expected_shifts(), atol=0.5 * SPACING[0])
 
 
+@pytest.mark.slow
 def test_default_search_range_is_relative_to_stack_depth(store):
     report = store.estimate_chromatic_shift()
 
@@ -203,6 +207,7 @@ def _array_layout(arr: zarr.Array):
     }
 
 
+@pytest.mark.slow
 def test_apply_preserves_structure_and_metadata(tmp_path, store):
     shifts = _expected_shifts()
     out = store.apply_chromatic_shift(tmp_path / "out.zarr", shifts, progress=False)
@@ -232,6 +237,7 @@ def test_apply_preserves_structure_and_metadata(tmp_path, store):
     assert provenance["extent"] == "union"
 
 
+@pytest.mark.slow
 def test_apply_aligns_channels(tmp_path, store):
     report = store.estimate_chromatic_shift(max_shift=10.0)
     out = store.apply_chromatic_shift(tmp_path / "out.zarr", report, progress=False)
@@ -241,6 +247,7 @@ def test_apply_aligns_channels(tmp_path, store):
     assert out.root.attrs[PROVENANCE_KEY]["estimate"]["n_regions_used"] == report["n_regions_used"]
 
 
+@pytest.mark.slow
 def test_apply_integer_shift_is_exact(tmp_path, store, sample):
     out = store.apply_chromatic_shift(
         tmp_path / "out.zarr", [0.0, 4.0, -2.0], order=0, extent="same", progress=False
@@ -255,6 +262,7 @@ def test_apply_integer_shift_is_exact(tmp_path, store, sample):
     np.testing.assert_array_equal(data[2, -1], 0)
 
 
+@pytest.mark.slow
 def test_apply_intersection_crops(tmp_path, store, sample):
     out = store.apply_chromatic_shift(
         tmp_path / "out.zarr", [0.0, 4.0, -2.0], order=0, extent="intersection", progress=False
@@ -266,6 +274,7 @@ def test_apply_intersection_crops(tmp_path, store, sample):
     np.testing.assert_array_equal(data[0], sample[0, 2:-1])
 
 
+@pytest.mark.slow
 def test_apply_pads_labels_with_reference(tmp_path, sample):
     store = _write_store(tmp_path / "in.zarr", sample, labels=True)
     out = store.apply_chromatic_shift(tmp_path / "out.zarr", [0.0, -5.2, 2.6], order=0, progress=False)
@@ -287,6 +296,7 @@ def test_apply_pads_labels_with_reference(tmp_path, sample):
         assert _array_layout(dst) == _array_layout(src)
 
 
+@pytest.mark.slow
 def test_apply_zarr_v2(tmp_path, sample):
     store = _write_store(tmp_path / "in_v2.zarr", sample, ngff_version="0.4")
     out = store.apply_chromatic_shift(tmp_path / "out_v2.zarr", [0.0, 4.0, -2.0], order=0, progress=False)
@@ -312,6 +322,7 @@ def test_apply_rejects_bad_input(tmp_path, store):
         store.apply_chromatic_shift(tmp_path / "out2.zarr", [0.0, 0.0, 0.0], progress=False)
 
 
+@pytest.mark.slow
 def test_correct_chromatic_shift_one_call(tmp_path, store):
     out = store.correct_chromatic_shift(tmp_path / "out.zarr", max_shift=10.0, progress=False)
 
@@ -348,6 +359,7 @@ def timelapse(tmp_path_factory):
     return _write_timelapse(tmp_path_factory.mktemp("timelapse") / "t.ome.zarr")
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("timepoint", [0, 1])
 def test_estimate_measures_the_chosen_timepoint(timelapse, timepoint):
     _, z = timelapse
@@ -358,6 +370,7 @@ def test_estimate_measures_the_chosen_timepoint(timelapse, timepoint):
     np.testing.assert_allclose(report["shifts"], expected, atol=0.25 * SPACING[0])
 
 
+@pytest.mark.slow
 def test_estimate_timepoint_and_reference_channel_together(timelapse):
     _, z = timelapse
     report = z.estimate_chromatic_shift(reference_channel=1, timepoint=1, max_shift=20.0)
@@ -379,6 +392,7 @@ def test_estimate_refuses_a_timepoint_that_does_not_exist(timelapse, store):
     assert store.estimate_chromatic_shift(timepoint=0, max_shift=10.0, refine_level=None)["timepoint"] is None
 
 
+@pytest.mark.slow
 def test_apply_gives_every_timepoint_the_same_shift(timelapse, tmp_path):
     arr, z = timelapse
     out = z.apply_chromatic_shift(tmp_path / "out.zarr", [0.0, 4.0, -2.0], order=0, extent="same", progress=False)
@@ -391,6 +405,7 @@ def test_apply_gives_every_timepoint_the_same_shift(timelapse, tmp_path):
         np.testing.assert_array_equal(data[t, 2, :-1], arr[t, 2, 1:])
 
 
+@pytest.mark.slow
 def test_correct_records_the_timepoint_it_measured(timelapse, tmp_path):
     arr, z = timelapse
     out = z.correct_chromatic_shift(tmp_path / "out.zarr", 0, timepoint=1, max_shift=10.0, progress=False)
@@ -405,6 +420,7 @@ def test_correct_records_the_timepoint_it_measured(timelapse, tmp_path):
     np.testing.assert_allclose(moved["shifts"], expected, atol=0.25 * SPACING[0])
 
 
+@pytest.mark.slow
 def test_correct_a_fused_timelapse(tmp_path):
     """The whole path: tiles at several timepoints, fused, then corrected on one timepoint."""
     from zarrsmith.mosaic_manager import Tile, fuse_tiles

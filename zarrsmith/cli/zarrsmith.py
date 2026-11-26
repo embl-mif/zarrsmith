@@ -13,6 +13,7 @@ import zarrsmith.microscope_manager as mm
 from zarrsmith.utils.axes import UNRECORDED_SCALE_KEY, metadata_axes, metadata_axis_size
 from zarrsmith.utils.chunks import (default_chunk_size, default_num_levels, layout_summary, level0_layout,
                                     output_summary_line)
+from zarrsmith.utils.downsampling import normalize_spatial_factor
 from zarrsmith.utils.labels import resolve_channel
 from zarrsmith.utils.ngff import DEFAULT_COMPRESSOR, DEFAULT_SHARD_TARGET_MB
 from zarrsmith.utils.output_path import output_refusal
@@ -46,16 +47,6 @@ def _check_chunk_size(chunk_size, metadata):
             f"Provide one chunk size per axis, in {axes.upper()} order."
         )
     return chunk_size
-
-
-def _normalize_downscale_factor(value):
-    if value is None:
-        return tuple([2] * 3)
-    if isinstance(value, (list, tuple)):
-        if len(value) == 1:
-            return tuple([int(value[0])] * 3)
-        return tuple(int(v) for v in value)
-    return tuple([int(value)] * 3)
 
 
 def _present(value):
@@ -307,7 +298,7 @@ def zarr_convert(
     manager, resolved_microscope = _resolve_zarr_manager(input_path, microscope)
     print(f'\n--->Using manager: {manager.__name__} ({resolved_microscope})')
 
-    downscale_factor = _normalize_downscale_factor(downscale_factor)
+    downscale_factor = _int_triplet(downscale_factor, default=(2, 2, 2))
     
     # --- Figure out chunks dimensions ---
     if resolved_microscope.lower() in ("zeiss", "evident"):
@@ -515,6 +506,26 @@ def _batch_row_kwargs(v, columns) -> Dict[str, Any]:
 _NOT_CONVERSION_OPTIONS = {"runmode", "mode", "command", "renamed_to", "batch", "input_file"}
 
 
+def _options(args, *, drop_unset: bool = True) -> Dict[str, Any]:
+    """The parsed options to pass on to a command's function: not the command line's own
+    (command, mode, batch, ...), and with ``drop_unset`` not those left unset or empty, so the
+    function's defaults apply."""
+    return {
+        k: v
+        for k, v in vars(args).items()
+        if k not in _NOT_CONVERSION_OPTIONS
+        and not (drop_unset and (v is None or (isinstance(v, str) and v.strip() == "")))
+    }
+
+
+def _write_options(args) -> Dict[str, Any]:
+    """:func:`_options` for convert and fuse: an explicit chunk size wins over ``max_size``."""
+    kwargs = _options(args)
+    if "chunk_size" in kwargs:
+        kwargs.pop("max_size", None)
+    return kwargs
+
+
 def convert_batch(args):
     """Runmode to convert batch of imaged to zarr
 
@@ -572,14 +583,7 @@ def convert_single(args):
         f'{" --overwrite" if args.overwrite else ""}'
     )
     print(f'Converting single file.\nRunning through: {cli}')
-    exclude = _NOT_CONVERSION_OPTIONS
-    conv_kwargs = {
-        k: v
-        for k, v in vars(args).items()
-        if k not in exclude and v is not None and not (isinstance(v, str) and v.strip() == "")
-    }
-    if "chunk_size" in conv_kwargs:
-        conv_kwargs.pop("max_size", None)
+    conv_kwargs = _write_options(args)
 
     # Convert 2 zarr
     zarr_convert(**conv_kwargs)
@@ -618,21 +622,18 @@ def _resolve_mosaic_manager(input_path: str, microscope: Optional[str] = None):
 
 
 def _int_triplet(value, default=(1, 1, 1)) -> Tuple[int, int, int]:
-    """``None`` -> default, ``n`` -> ``(n, n, n)``, ``(y, x)`` -> ``(1, y, x)``, ``(z, y, x)`` as is."""
+    """``None`` -> default, ``n`` -> ``(n, n, n)``, ``(y, x)`` -> ``(1, y, x)``, ``(z, y, x)`` as is; positive integers only."""
     if value is None:
         return tuple(default)
     if isinstance(value, str):
         value = parse_downscale_factor(value)
-    if isinstance(value, (int, np.integer)):
-        return (int(value),) * 3
-    value = tuple(int(v) for v in value)
-    if len(value) == 1:
-        return value * 3
-    if len(value) == 2:
-        return (1,) + value
-    if len(value) == 3:
-        return value
-    raise ValueError(f"Expected 1, 2 or 3 integers, got {value}.")
+    if not isinstance(value, (int, np.integer)):
+        value = tuple(value)
+        if len(value) == 1:
+            value = value[0]
+        elif len(value) == 2:
+            value = (1, *value)
+    return normalize_spatial_factor(value, name="factor", allow_float=False)
 
 
 def _subset_to_crop(subset, channel_names: List[str]):
@@ -849,7 +850,7 @@ def mosaic_convert(
         print(f"\tUsing max_size={max_size if max_size is not None else 'default'} MB: "
               f"chunk size {chunks}, {size_mb:.1f} MB.")
 
-    factor = _normalize_downscale_factor(downscale_factor)
+    factor = _int_triplet(downscale_factor, default=(2, 2, 2))
     if num_levels is None:
         num_levels = default_fusion_levels(plan, factor)  # as fuse_tiles and the napari widget
 
@@ -992,13 +993,7 @@ def _apply_infer_downscale_factors(kwargs: Dict[str, Any]) -> None:
 
 
 def _fusion_kwargs(args) -> Dict[str, Any]:
-    kwargs = {
-        k: v
-        for k, v in vars(args).items()
-        if k not in _NOT_CONVERSION_OPTIONS and v is not None and not (isinstance(v, str) and v.strip() == "")
-    }
-    if "chunk_size" in kwargs:
-        kwargs.pop("max_size", None)
+    kwargs = _write_options(args)
     _apply_infer_downscale_factors(kwargs)
     return kwargs
 
@@ -1355,11 +1350,7 @@ def chromatic_shift_correct(
 
 
 def _chromatic_shift_kwargs(args) -> Dict[str, Any]:
-    kwargs = {
-        k: v
-        for k, v in vars(args).items()
-        if k not in _NOT_CONVERSION_OPTIONS and v is not None and not (isinstance(v, str) and v.strip() == "")
-    }
+    kwargs = _options(args)
     if "report" in kwargs:
         kwargs["report_path"] = kwargs.pop("report")
     return kwargs
@@ -1443,7 +1434,7 @@ def resample_zarr(
 
 def resample_single(args):
     """Runmode to resample one OME-Zarr image."""
-    resample_zarr(**{k: v for k, v in vars(args).items() if k not in _NOT_CONVERSION_OPTIONS})
+    resample_zarr(**_options(args, drop_unset=False))
 
 
 def resample_batch(args):

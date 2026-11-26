@@ -7,11 +7,9 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
-import numpy as np
-
 from zarrsmith.mosaic_manager.fusion import FUSION_SHARD_TARGET_MB
 from zarrsmith.utils.chunks import (  # noqa: F401  (re-exported for the widgets)
-    DEFAULT_CHUNK_MB, auto_chunk_shape, block_count, chunk_shard_layout, layout_summary, manual_chunks,
+    DEFAULT_CHUNK_MB, auto_chunk_shape, chunk_shard_layout, layout_summary,
 )
 from zarrsmith.utils.ngff import DEFAULT_SHARD_TARGET_MB
 

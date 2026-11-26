@@ -127,6 +127,7 @@ def test_single_timepoint_keeps_its_axes_and_attributes(tmp_path):
 @pytest.mark.parametrize("blend,kw", [("sigmoid", {}), ("max", {}), ("sum", {}), ("midline", {}),
                                       ("sigmoid", {"projection": "max"}), ("midline", {"projection": "sum"}),
                                       ("sigmoid", {"ds": (2, 2, 2)}), ("max", {"crop": {"x": slice(10, 50)}})])
+@pytest.mark.slow
 def test_every_frame_matches_a_fusion_of_that_timepoint_alone(tmp_path, blend, kw):
     """Same stage positions at every timepoint: a frame is exactly the single-timepoint result."""
     rng = np.random.default_rng(0)

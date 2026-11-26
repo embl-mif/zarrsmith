@@ -14,7 +14,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 import numpy as np
 import zarr
 
-from .axes import SPATIAL_AXIS_SET, normalize_axes
+from .axes import normalize_axes, spatial_axes_in_order
 
 #: Percentiles of the values used as the display window (blank, zero voxels ignored).
 DISPLAY_PERCENTILES: Tuple[float, float] = (0.5, 99.9)
@@ -47,7 +47,7 @@ def _central_box(shape: dict, max_voxels: int, n_timepoints: int, chunks: Option
     would cost several times its size. The read is then at most about ``max_voxels``,
     or one chunk per axis when a chunk is bigger.
     """
-    spatial = [ax for ax in shape if ax in SPATIAL_AXIS_SET]
+    spatial = spatial_axes_in_order(list(shape))
     total = n_timepoints * math.prod(shape[ax] for ax in spatial)
     budget = max_voxels / max(1, n_timepoints)
     factor = min(1.0, (budget * n_timepoints / total) ** (1.0 / len(spatial))) if spatial and total else 1.0

@@ -19,6 +19,7 @@ from .axes import (
     SPATIAL_AXIS_SET,
     UNRECORDED_SCALE_KEY,
     index_list_from_selection,
+    metadata_axes,
     normalize_axes,
     normalize_data_type,
     spatial_axes_in_order,
@@ -27,17 +28,13 @@ from .axes import (
 logger = logging.getLogger("zarrsmith")
 
 
-def _axes_of(metadata: dict[str, Any]) -> str:
-    return str(metadata.get("axes", "")).lower()
-
-
 def _n_spatial(metadata: dict[str, Any]) -> int:
-    return sum(1 for ax in _axes_of(metadata) if ax in SPATIAL_AXIS_SET)
+    return sum(1 for ax in metadata_axes(metadata) if ax in SPATIAL_AXIS_SET)
 
 
 def channel_count(data: Sequence[da.Array], metadata: dict[str, Any]) -> Optional[int]:
     """Number of channels of the base level, or ``None`` without a channel axis."""
-    axes = _axes_of(metadata)
+    axes = metadata_axes(metadata)
     return int(data[0].shape[axes.index("c")]) if "c" in axes else None
 
 
@@ -107,7 +104,7 @@ def _check_translations(key, value, *, data, metadata, label):
     from .translation import normalize_translations
 
     try:
-        return normalize_translations(value, _axes_of(metadata), len(data)), None
+        return normalize_translations(value, metadata_axes(metadata), len(data)), None
     except (TypeError, ValueError) as e:
         raise type(e)(f"Invalid 'translations' for {label}: {e}") from e
 
@@ -224,7 +221,7 @@ def reorder_channels(
     """Return ``data`` with channels permuted; ``metadata`` is updated in place."""
     if not data:
         raise ValueError("No data loaded.")
-    axes = _axes_of(metadata)
+    axes = metadata_axes(metadata)
     if "c" not in axes:
         if skip_if_no_channel_axis:
             return list(data)
@@ -273,7 +270,7 @@ def infer_downscale_factors(metadata: dict[str, Any], start_level: int = 0) -> t
     levels = n_levels - start_level
     if levels == 1:
         return 1, (2, 2, 2)
-    axes = _axes_of(metadata)
+    axes = metadata_axes(metadata)
     if by_scale:
         spatial = spatial_axes_in_order(axes)
         ratio = {ax: scales[start_level + 1][i] / scales[start_level][i] for i, ax in enumerate(spatial)}
@@ -302,7 +299,7 @@ def subset_levels(
     if not data:
         raise ValueError("No data loaded.")
 
-    axes = _axes_of(metadata)
+    axes = metadata_axes(metadata)
     normalize_axes(axes, ndim=data[0].ndim)
     shape = data[0].shape
     selections = {

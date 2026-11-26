@@ -30,6 +30,8 @@ def test_parse_shards_spec_empty_and_none():
     assert parse_shards_spec(None) is None
     assert parse_shards_spec("") is None
     assert parse_shards_spec("none") is None
+    assert parse_shards_spec(["none"]) is None  # list form, as in the CLI
+    assert parse_shards_spec(["auto"]) == "auto"
 
 
 def test_parse_shards_spec_invalid_raises():
@@ -75,6 +77,7 @@ def test_normalize_shard_exclude_axes():
 
 # --- zarr_convert end-to-end with sharding ---
 
+@pytest.mark.slow
 def test_zarr_convert_with_auto_shards(tmp_path):
     """The CLI conversion helper must thread shards through to the written zarr store."""
     src = tmp_path / "source.zarr"
@@ -219,8 +222,3 @@ def test_zarr_convert_zarr_v2_warns_and_disables_sharding(tmp_path):
             chunk_size=[1, 1, 8, 64, 64], zarr_format=2, num_levels=1,
         )
     assert zarr.open_group(str(out), mode="r")["0"].metadata.zarr_format == 2
-
-
-def test_parse_shards_spec_none_in_list_form():
-    assert parse_shards_spec(["none"]) is None
-    assert parse_shards_spec(["auto"]) == "auto"

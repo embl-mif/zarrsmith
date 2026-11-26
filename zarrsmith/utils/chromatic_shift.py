@@ -99,7 +99,7 @@ def _channel_volume(
         else:
             index.append(zyx[ax])
     vol = level[tuple(index)]
-    order = [ax for ax in axes if ax in "zyx"]
+    order = spatial_axes_in_order(axes)
     return vol.transpose([order.index(ax) for ax in "zyx"])
 
 
@@ -755,9 +755,9 @@ def write_chromatic_shift_corrected(
     reference channel: they are only padded or cropped to the new Z extent.
     Image datasets with a different channel count are skipped with a warning.
     """
-    datasets = list(datasets)
-    if not datasets:
-        raise ValueError("No datasets to write.")
+    from .store_copy import copy_group, datasets_on_disk, open_store_copy
+
+    datasets = datasets_on_disk(datasets)
     raw_name, raw = datasets[0]
     raw_axes = normalize_axes(raw.metadata.get("axes"), ndim=raw.data[0].ndim)
     _require_axes(raw_axes, "czyx", "Chromatic shift correction")
@@ -771,27 +771,11 @@ def write_chromatic_shift_corrected(
     )
 
     from .ngff import ZarrWriteConfig, _run_stores
-    from .output_path import check_output_path
 
-    check_output_path(path, overwrite=overwrite, sources=[getattr(source_root.store, "root", None)])
     cfg = ZarrWriteConfig(num_workers=num_workers, progress=progress)
-    root = zarr.open_group(
-        str(Path(path)),
-        mode="w" if overwrite else "w-",
-        zarr_format=source_root.metadata.zarr_format,
-    )
-    root.attrs.update(source_root.attrs.asdict())
-    if any(name.startswith("labels/") for name, _ in datasets) and "labels" in source_root:
-        root.require_group("labels").attrs.update(source_root["labels"].attrs.asdict())
+    root = open_store_copy(source_root, path, datasets, overwrite=overwrite)
 
     for name, dataset in datasets:
-        if not dataset.data:
-            continue
-        if dataset.zarr_data is None or len(dataset.zarr_data) != len(dataset.data):
-            raise ValueError(
-                f"Dataset {name!r} has in-memory changes that are not on disk, so its "
-                "on-disk structure is unknown. Write it with to_zarr() first."
-            )
         axes = normalize_axes(dataset.metadata.get("axes"), ndim=dataset.data[0].ndim)
         if "z" not in axes:
             warnings.warn(f"Skipping dataset {name!r}: it has no 'z' axis.", UserWarning, stacklevel=2)
@@ -810,10 +794,7 @@ def write_chromatic_shift_corrected(
 
         levels = shift_levels(dataset.data, dataset.metadata, dataset_shifts, pad_below, pad_total, order=order)
 
-        group_path = (dataset.path or "/").strip("/")
-        group = root if not group_path else root.require_group(group_path)
-        if group_path:
-            group.attrs.update(source_root[group_path].attrs.asdict())
+        group = copy_group(root, source_root, dataset)
 
         tasks = []
         block_bytes = 0

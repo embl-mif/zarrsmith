@@ -477,6 +477,24 @@ class ZarrManager(MicroscopeManager):
             for name, dataset in self.labels.items():
                 yield f"labels/{name}", dataset
 
+    def _transform_datasets(self, transform, *, include_groups: bool = True, include_labels: bool = True,
+                            done: str = "") -> None:
+        """Replace the data and metadata of every dataset that holds data (the raw image, and the
+        image groups and labels if included) with ``transform(name, dataset)`` -> ``(data, metadata)``,
+        lazily: the datasets no longer match their arrays on disk."""
+        for name, dataset in self._iter_datasets(
+            include_raw=True,
+            include_groups=include_groups,
+            include_labels=include_labels,
+        ):
+            if not dataset.data:
+                continue
+            dataset.data, dataset.metadata = transform(name, dataset)
+            self._invalidate_zarr_data(dataset)
+        self._sync_raw_aliases()
+        if done:
+            logger.info(done)
+
     def _invalidate_zarr_data(self, dataset: ZarrDataset) -> None:
         """
         After lazy in-memory transformations, dataset.data no longer necessarily
@@ -842,26 +860,18 @@ class ZarrManager(MicroscopeManager):
         """
         from ..utils.dataset_ops import subset_levels
 
-        for name, dataset in self._iter_datasets(
-            include_raw=True,
-            include_groups=include_groups,
-            include_labels=include_labels,
-        ):
-            if not dataset.data:
-                continue
-
-            dataset.data, dataset.metadata = subset_levels(
+        self._transform_datasets(
+            lambda name, dataset: subset_levels(
                 dataset.data,
                 dataset.metadata,
                 T=T, C=C, Z=Z, Y=Y, X=X,
                 rebuild_pyramid=rebuild_pyramid,
                 label=f"dataset {name!r}",
-            )
-            self._invalidate_zarr_data(dataset)
-
-        self._sync_raw_aliases()
-
-        logger.info("Zarr datasets subset complete.")
+            ),
+            include_groups=include_groups,
+            include_labels=include_labels,
+            done="Zarr datasets subset complete.",
+        )
 
     def resample_dataset(
         self,
@@ -881,22 +891,12 @@ class ZarrManager(MicroscopeManager):
         """
         from ..utils.resample import resample_levels
 
-        for name, dataset in self._iter_datasets(
-            include_raw=True,
+        self._transform_datasets(
+            lambda name, dataset: resample_levels(dataset.data, dataset.metadata, target_scale, fast=fast),
             include_groups=include_groups,
             include_labels=include_labels,
-        ):
-            if not dataset.data:
-                continue
-
-            dataset.data, dataset.metadata = resample_levels(
-                dataset.data, dataset.metadata, target_scale, fast=fast
-            )
-            self._invalidate_zarr_data(dataset)
-
-        self._sync_raw_aliases()
-
-        logger.info("Zarr datasets resampled to %s.", target_scale)
+            done=f"Zarr datasets resampled to {target_scale}.",
+        )
 
     def resample_to_zarr(
         self,
@@ -955,28 +955,19 @@ class ZarrManager(MicroscopeManager):
         """
         from ..utils.pyramid import build_pyramid as _build_pyramid
 
-        for name, dataset in self._iter_datasets(
-            include_raw=True,
-            include_groups=include_groups,
-            include_labels=include_labels,
-        ):
-            if not dataset.data:
-                continue
-
-            dataset.data, dataset.metadata = _build_pyramid(
+        self._transform_datasets(
+            lambda name, dataset: _build_pyramid(
                 dataset.data,
                 dataset.metadata,
                 num_levels=num_levels,
                 downscale_factor=downscale_factor,
                 start_level=start_level,
                 method=method,
-            )
-
-            self._invalidate_zarr_data(dataset)
-
-        self._sync_raw_aliases()
-
-        logger.info("Zarr pyramids rebuilt.")
+            ),
+            include_groups=include_groups,
+            include_labels=include_labels,
+            done="Zarr pyramids rebuilt.",
+        )
 
     def populate_pyramid(
         self,
@@ -1037,26 +1028,21 @@ class ZarrManager(MicroscopeManager):
         """
         from ..utils.dataset_ops import reorder_channels as _reorder_channels
 
-        for name, dataset in self._iter_datasets(
-            include_raw=True,
+        self._transform_datasets(
+            lambda name, dataset: (
+                _reorder_channels(
+                    dataset.data,
+                    dataset.metadata,  # updated in place
+                    new_order,
+                    label=f"dataset {name!r}",
+                    skip_if_no_channel_axis=True,
+                ),
+                dataset.metadata,
+            ),
             include_groups=include_groups,
             include_labels=False,
-        ):
-            if not dataset.data:
-                continue
-
-            dataset.data = _reorder_channels(
-                dataset.data,
-                dataset.metadata,
-                new_order,
-                label=f"dataset {name!r}",
-                skip_if_no_channel_axis=True,
-            )
-            self._invalidate_zarr_data(dataset)
-
-        self._sync_raw_aliases()
-
-        logger.info("Channels reordered to %s.", list(new_order))
+            done=f"Channels reordered to {list(new_order)}.",
+        )
 
     def estimate_chromatic_shift(
         self,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any, Dict, Iterable, List, TYPE_CHECKING, Union
+from typing import Any, Dict, List, TYPE_CHECKING, Union
 
 import dask.array as da
 

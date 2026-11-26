@@ -263,6 +263,7 @@ def test_read_dataset_of_several_images(multi_dataset):
     assert data["table"]["image_path"].tolist()[2:4] == ["images/b.ome.zarr"] * 2
 
 
+@pytest.mark.slow
 def test_widget_loads_and_goes_to_an_object(app, dataset, monkeypatch):
     viewer, explorer, plotter = _explorer(monkeypatch)
     image_path, table = dataset
@@ -340,6 +341,7 @@ def test_repeated_labels_prompt_the_user(app, dataset, monkeypatch):
     assert explorer.session is None and len(viewer.layers) == 0
 
 
+@pytest.mark.slow
 def test_widget_with_several_images(app, multi_dataset, monkeypatch):
     viewer, explorer, plotter = _explorer(monkeypatch)
     explorer.table_field.value = multi_dataset
@@ -488,6 +490,7 @@ def test_format_value():
     assert ew.format_value("a") == "a"
 
 
+@pytest.mark.slow
 def test_click_in_the_viewer_marks_the_object_and_lists_its_features(app, dataset, monkeypatch):
     viewer, explorer, plotter = _explorer(monkeypatch)
     image_path, table = dataset
@@ -584,6 +587,7 @@ def _plot_event(plotter, name, point=None, offset=(0, 0), button=None):
     return MouseEvent(name, canvas.canvas, x, y, button=button)
 
 
+@pytest.mark.slow
 def test_hover_moves_the_marker_and_a_click_keeps_the_thumbnail(app, dataset, monkeypatch):
     viewer, explorer, plotter = _explorer(monkeypatch)
     image_path, table = dataset

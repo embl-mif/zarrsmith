@@ -163,6 +163,16 @@ Shared helpers live in one place each, so readers, writers and the napari viewer
 | `dataset_ops` | validation and in-place edits shared by `MicroscopeManager` and `ZarrManager` (`subset_levels`, `reorder_channels`, `apply_metadata_updates`) |
 | `ngff` | `ZarrWriteConfig`, array creation (`_array_create_kwargs`), sharding, NGFF metadata (`_write_ngff_metadata`, through ome-zarr-py) and the pyramid writers |
 | `chromatic_shift` | Z chromatic shift estimation (`estimate_chromatic_shift`) and the writer of corrected stores that copies the input's array layout (`write_chromatic_shift_corrected`); see [Chromatic shift correction](chromatic-shift.md) |
+| `store_copy` | shared steps of the writers that copy a store with its structure (chromatic shift, resampling) |
+
+## Running the tests
+
+```bash
+pytest -q                  # everything (about 4.5 minutes); CI runs this
+pytest -q -m "not slow"    # skip the tests marked slow (about 1.5 minutes), while you work
+```
+
+Tests that take a second or more (real shift estimates, camera registrations, resampling) are marked `@pytest.mark.slow`; mark a new one the same way.
 
 ## Documentation
 

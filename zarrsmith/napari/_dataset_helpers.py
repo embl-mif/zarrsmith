@@ -1,13 +1,18 @@
 """Dataset helpers shared by the napari widgets (no Qt dependency, so unit-testable)."""
 from __future__ import annotations
 
-from zarrsmith.utils.axes import metadata_axes, metadata_axis_size
+from zarrsmith.utils.axes import metadata_axes, metadata_axis_size, spatial_axes_in_order
 from zarrsmith.utils.visualize import units_for_axes
 
 
 def dataset_axes(dataset) -> str:
     """Return normalized dataset axes, defaulting to legacy TCZYX metadata."""
     return metadata_axes(dataset.metadata)
+
+
+def spatial_axes(dataset) -> tuple[str, ...]:
+    """The spatial axes of the dataset, in order."""
+    return spatial_axes_in_order(dataset_axes(dataset))
 
 
 def axis_index(dataset, axis):
@@ -24,8 +29,8 @@ def axis_size(dataset, axis, default=1):
 def scale_for_axes(dataset, requested_axes):
     """Return a napari scale tuple for the requested spatial axis labels."""
     axes = dataset_axes(dataset)
-    spatial_axes = [ax for ax in axes if ax in "zyx"]
-    scale_map = dict(zip(spatial_axes, dataset.metadata.get("scales", [(1,) * len(spatial_axes)])[0]))
+    spatial = spatial_axes(dataset)
+    scale_map = dict(zip(spatial, dataset.metadata.get("scales", [(1,) * len(spatial)])[0]))
     return tuple(scale_map.get(ax, 1) for ax in requested_axes if ax in axes)
 
 

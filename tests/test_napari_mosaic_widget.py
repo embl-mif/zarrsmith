@@ -314,10 +314,12 @@ def test_widget_leaves_hidden_tiles_blank(app, monkeypatch):
 def test_apply_display_windows():
     from napari.components import ViewerModel
 
+    from zarrsmith.utils.display_window import apply_display_windows
+
     v = ViewerModel()
     v.add_image(np.zeros((4, 4), np.uint16))
     v.add_image(np.zeros((4, 4), np.uint16))
-    mw.apply_display_windows(v.layers, [(100.0, 1200.0), (5.0, 50.0)], "uint16")
+    apply_display_windows(v.layers, [(100.0, 1200.0), (5.0, 50.0)])
     assert tuple(v.layers[0].contrast_limits) == (100.0, 1200.0)
     assert tuple(v.layers[1].contrast_limits) == (5.0, 50.0)
     assert tuple(v.layers[0].contrast_limits_range) == (0, 65535)
@@ -726,6 +728,7 @@ class _SyncWorker:
             f(result)
 
 
+@pytest.mark.slow
 def test_widget_registers_cameras(app, tmp_path, monkeypatch):
     """MuVi SPIM: the registration options appear with two cameras, run before the
     fusion (here: before writing the transforms), go to the batch CSV, and the tiles go
@@ -790,6 +793,7 @@ def test_widget_registers_cameras(app, tmp_path, monkeypatch):
     assert not isinstance(tile.data, AffineArray) and not dock.state["registered"]
 
 
+@pytest.mark.slow
 def test_run_fusion_registers_then_fuses(tmp_path):
     import functools
 

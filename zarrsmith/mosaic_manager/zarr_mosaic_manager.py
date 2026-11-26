@@ -10,21 +10,12 @@ import numpy as np
 import zarr
 
 from ..utils.axes import UNRECORDED_SCALE_KEY, normalize_axes, spatial_axes_in_order
+from ..utils.output_path import is_zarr_store
 from ..utils.units import normalize_unit
 from .mosaic import MosaicManager
 from .tile import Tile
 
 logger = logging.getLogger("zarrsmith")
-
-#: Files that make a folder a Zarr group (v3, then v2).
-_GROUP_FILES = ("zarr.json", ".zgroup", ".zattrs")
-
-
-def is_zarr_store(path: str | Path) -> bool:
-    """Whether ``path`` is a Zarr group (an OME-Zarr store), from its metadata files."""
-    path = Path(path)
-    return path.is_dir() and any((path / name).is_file() for name in _GROUP_FILES)
-
 
 def zarr_stores(folder: str | Path) -> List[Path]:
     """The Zarr stores directly inside ``folder``, by name."""

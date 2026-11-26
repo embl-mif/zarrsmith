@@ -41,6 +41,7 @@ def _metadata(scales, axes="zyx", **extra):
         {2: 13.0},  # a factor larger than the chunks
     ],
 )
+@pytest.mark.slow
 def test_result_does_not_depend_on_chunks(factors):
     image = _smooth_image()
     reference = resample_array(da.from_array(image, chunks=-1), factors).compute()
@@ -54,6 +55,7 @@ def test_result_does_not_depend_on_chunks(factors):
         assert np.abs(computed.astype(int) - reference.astype(int)).max() <= 1
 
 
+@pytest.mark.slow
 def test_blocks_match_their_announced_chunks():
     image = _smooth_image()
     result = resample_array(da.from_array(image, chunks=(1, 7, 31)), {0: 0.3, 1: 4.1, 2: 1.7})
@@ -241,6 +243,7 @@ def test_array_manager_end_to_end(tmp_path):
     np.testing.assert_array_equal(reread.data[0].compute(), manager.data[0].compute())
 
 
+@pytest.mark.slow
 def test_zarr_manager_resamples_image_and_labels(tmp_path, image_pyramid, metadata):
     source = tmp_path / "source.zarr"
     mm.ArrayManager(image_pyramid, metadata).to_zarr(str(source), drop_singleton=False)
@@ -312,6 +315,7 @@ def test_a_small_leftover_is_merged_when_it_cannot_hold_the_overlap():
 
 # --- regions and batches ------------------------------------------------------
 
+@pytest.mark.slow
 @pytest.mark.parametrize("nearest", [False, True])
 @pytest.mark.parametrize("factors", [{0: 0.7, 1: 1.3, 2: 3.7}, {1: 2.0, 2: 2.0}, {0: 0.25}])
 def test_regions_reassemble_the_full_result(factors, nearest):
@@ -386,6 +390,7 @@ def _store(path, shape=(2, 2, 16, 64, 64), chunks=(1, 1, 8, 32, 32), num_levels=
     return image
 
 
+@pytest.mark.slow
 def test_store_matches_the_lazy_result_and_keeps_the_codecs(tmp_path):
     image = _store(tmp_path / "in.zarr", shards=None)
     z = mm.ZarrManager(str(tmp_path / "in.zarr"))
@@ -453,6 +458,7 @@ def test_coarse_levels_skip_pixels_of_the_level_below(tmp_path):
     np.testing.assert_array_equal(level2, level1[:, :, :, ::2, ::2])
 
 
+@pytest.mark.slow
 def test_batches_do_not_change_the_store(tmp_path, monkeypatch):
     _store(tmp_path / "in.zarr", shards=None)
     z = mm.ZarrManager(str(tmp_path / "in.zarr"))
@@ -465,6 +471,7 @@ def test_batches_do_not_change_the_store(tmp_path, monkeypatch):
         assert np.abs(a.compute().astype(int) - b.compute().astype(int)).max() <= 1
 
 
+@pytest.mark.slow
 def test_sharded_store_with_small_batches(tmp_path, monkeypatch):
     # With shards along z, a batch is whole shards: a race would lose pixels.
     shape, chunks = (1, 1, 32, 64, 64), (1, 1, 4, 16, 16)
@@ -489,6 +496,7 @@ def test_zarr_v2_store(tmp_path):
     assert tuple(out.metadata["scales"][0]) == (1.0, 1.0, 1.0)
 
 
+@pytest.mark.slow
 def test_store_labels_and_groups(tmp_path, image_pyramid, metadata):
     source = tmp_path / "source.zarr"
     mm.ArrayManager(image_pyramid, metadata).to_zarr(str(source), drop_singleton=False)

@@ -66,13 +66,6 @@ def normalize_spatial_factor_for_axes(
     return spatial_values_for_axes(value, axes, name=name, allow_float=allow_float)
 
 
-def spatial_factor_power(factor: SpatialFactor, exponent: int) -> SpatialScale:
-    values = normalize_spatial_factor(factor, allow_float=True)
-    if exponent >= 0:
-        return tuple(v**exponent for v in values)
-    return tuple(1.0 / (v ** (-exponent)) for v in values)
-
-
 def spatial_factor_power_for_axes(
     factor: SpatialFactor,
     axes: str | Sequence[str],

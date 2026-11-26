@@ -72,6 +72,7 @@ def test_handover_is_the_middle_of_the_z_overlap():
     assert handover_z(left, right) == pytest.approx(12.0)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model", ["translation", "rigid"])
 def test_estimate_recovers_a_known_shift_of_the_mirrored_view(model):
     left = _blobs()
@@ -83,6 +84,7 @@ def test_estimate_recovers_a_known_shift_of_the_mirrored_view(model):
     assert r.to_dict()["moving_camera"] == "right"
 
 
+@pytest.mark.slow
 def test_estimate_recovers_a_rotation():
     left = _blobs(shape=(40, 160, 160), n=900)
     centre = (40.0, 40.0, 40.0)
@@ -130,6 +132,7 @@ def test_registered_tile_translation_moves_rotation_resamples():
     assert np.corrcoef(aligned.data[...][inner].ravel(), left[inner].ravel())[0, 1] > 0.98
 
 
+@pytest.mark.slow
 def test_register_cameras_reference_channel_applies_to_every_channel():
     left = _blobs()
     right = _right_of(left)
@@ -152,6 +155,7 @@ def test_register_cameras_reference_channel_applies_to_every_channel():
         register_cameras(tiles, reference_channel="RFP")
 
 
+@pytest.mark.slow
 def test_register_cameras_every_channel_on_its_own():
     """``reference_channel="all"``: a channel offset differently (chromatic) gets its own
     transform; a channel without structure takes the best registered one."""
@@ -172,6 +176,7 @@ def test_register_cameras_every_channel_on_its_own():
     assert out[5].origin in (out[1].origin, out[3].origin)
 
 
+@pytest.mark.slow
 def test_register_cameras_timepoints_follow_the_reference():
     """One transform measured at the reference timepoint holds for every timepoint;
     ``"all"`` measures each timepoint."""
@@ -195,6 +200,7 @@ def test_register_cameras_timepoints_follow_the_reference():
         register_cameras(tiles, reference_timepoint=5, **opts)
 
 
+@pytest.mark.slow
 def test_mosaic_register_cameras_fuse_records_and_reset(tmp_path):
     left = _blobs()
     m = LuxendoMosaicManager(_muvi(tmp_path, left=left, right=_right_of(left)), progress=False)
@@ -233,6 +239,7 @@ def test_mosaic_register_cameras_fuse_records_and_reset(tmp_path):
     assert not any("registration" in t.attrs for t in m.tiles)
 
 
+@pytest.mark.slow
 def test_cli_register_cameras(tmp_path, capsys, monkeypatch):
     import functools
 

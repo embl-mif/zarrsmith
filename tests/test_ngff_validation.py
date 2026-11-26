@@ -54,6 +54,7 @@ def assert_valid_ome_zarr(path, ngff_version: str) -> list[str]:
     return sorted(checked)  # group iteration order differs between zarr v2 and v3
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("ngff_version,zarr_format", FORMATS)
 def test_image_with_labels_and_subgroup_is_valid(tmp_path, image_pyramid, metadata,
                                                  ngff_version, zarr_format):

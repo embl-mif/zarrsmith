@@ -14,8 +14,9 @@ def has_zarr_name(path: str | Path) -> bool:
 
 
 def is_zarr_store(path: str | Path) -> bool:
-    """Whether the folder ``path`` holds Zarr metadata at its root."""
-    return any((Path(path) / name).is_file() for name in ZARR_METADATA_FILES)
+    """Whether ``path`` is a Zarr store: a folder with Zarr metadata (a group or an array, v2 or v3) at its root."""
+    path = Path(path)
+    return path.is_dir() and any((path / name).is_file() for name in ZARR_METADATA_FILES)
 
 
 def has_content(path: str | Path) -> bool:

@@ -113,3 +113,8 @@ fallback_version = "0.0.0"
 [tool.setuptools_scm.scm.git]
 # Ignore the legacy calendar tags (v2026.x.y) so they never become the version base.
 describe_command = "git describe --dirty --tags --long --abbrev=40 --match v*.*.* --exclude v20[0-9][0-9].*"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: takes a second or more (real estimates, registrations, resampling); skip with -m \"not slow\"",
+]

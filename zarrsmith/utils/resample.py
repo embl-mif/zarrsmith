@@ -349,32 +349,17 @@ def write_resampled(
     output, keeping the downscale factors of the input.
     """
     from .ngff import ZarrWriteConfig
-    from .output_path import check_output_path
+    from .store_copy import copy_group, datasets_on_disk, open_store_copy
 
     # Everything that can be refused is checked before the output is touched.
-    datasets = [(name, dataset) for name, dataset in datasets if dataset.data]
-    if not datasets:
-        raise ValueError("No datasets to write.")
+    datasets = datasets_on_disk(datasets)
     targets = {}
     for name, dataset in datasets:
-        if dataset.zarr_data is None or len(dataset.zarr_data) != len(dataset.data):
-            raise ValueError(
-                f"Dataset {name!r} has in-memory changes that are not on disk, so its "
-                "on-disk structure is unknown. Write it with to_zarr() first."
-            )
         axes = normalize_axes(dataset.metadata.get("axes"), ndim=dataset.data[0].ndim)
         targets[name] = _normalize_target_scale(target_scale, axes, dataset.metadata["scales"][0])
-    check_output_path(path, overwrite=overwrite, sources=[getattr(source_root.store, "root", None)])
 
     cfg = ZarrWriteConfig(num_workers=num_workers, progress=progress)
-    root = zarr.open_group(
-        str(Path(path)),
-        mode="w" if overwrite else "w-",
-        zarr_format=source_root.metadata.zarr_format,
-    )
-    root.attrs.update(source_root.attrs.asdict())
-    if any(name.startswith("labels/") for name, _ in datasets) and "labels" in source_root:
-        root.require_group("labels").attrs.update(source_root["labels"].attrs.asdict())
+    root = open_store_copy(source_root, path, datasets, overwrite=overwrite)
 
     for name, dataset in datasets:
         axes = normalize_axes(dataset.metadata.get("axes"), ndim=dataset.data[0].ndim)
@@ -383,10 +368,7 @@ def write_resampled(
         target = targets[name]
         nearest = _is_label(dataset.metadata)
 
-        group_path = (dataset.path or "/").strip("/")
-        group = root if not group_path else root.require_group(group_path)
-        if group_path:
-            group.attrs.update(source_root[group_path].attrs.asdict())
+        group = copy_group(root, source_root, dataset)
 
         level = _source_level(source_scales, target, use_pyramid=fast or nearest)
         source = dataset.data[level]

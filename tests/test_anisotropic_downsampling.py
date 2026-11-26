@@ -4,9 +4,6 @@ from zarrsmith.utils.pyramid import build_pyramid
 from zarrsmith.utils.write_image_region import (
     _scale_index as _scale_image_index,
 )
-from zarrsmith.utils.write_label_region import (
-    _scale_index as _scale_label_index,
-)
 
 
 def test_anisotropic_build_pyramid_shapes_and_scales():
@@ -91,7 +88,7 @@ def test_scale_label_index_anisotropic():
     )
     shape = (1, 1, 10, 10)
 
-    scaled = _scale_label_index(index, shape, (1, 2, 2))
+    scaled = _scale_image_index(index, shape, (1, 2, 2), axes="tzyx")  # a label image: no c axis
 
     assert scaled == (
         0,

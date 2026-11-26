@@ -33,6 +33,7 @@ def _fused(tmp_path, name, tiles, **kw):
 
 @pytest.mark.parametrize("blend,axis", [("sigmoid", "x"), ("sigmoid", "z"), ("max", "x"),
                                         ("sum", "x"), ("midline", "z")])
+@pytest.mark.slow
 def test_z_slabs_match_whole_depth(tmp_path, monkeypatch, blend, axis):
     tiles = _noise_tiles(tmp_path)
     if axis == "z":  # groups stacked along z instead of x
@@ -91,6 +92,7 @@ def test_region_shape_follows_source_chunks(monkeypatch):
     assert fusion._region_shape([plane], (200, 4000, 4000), (1, 1, 1), True) == (200, 2048, 2048)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("executor", ["thread", "process"])
 def test_parallel_regions_match_serial(tmp_path, monkeypatch, executor):
     tiles = _noise_tiles(tmp_path, zarr_chunks=(1, 40, 40))  # zarr arrays pickle to processes
@@ -103,6 +105,7 @@ def test_parallel_regions_match_serial(tmp_path, monkeypatch, executor):
     np.testing.assert_array_equal(serial, parallel)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("workers", [1, 3])
 def test_shards_merged_in_pieces_match_unsharded(tmp_path, monkeypatch, workers):
     """A shard is one region, merged a piece at a time: same result as one chunk per region."""
@@ -132,6 +135,7 @@ def test_level0_is_written_once_into_the_output(tmp_path, monkeypatch):
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
 
 
+@pytest.mark.slow
 def test_pyramid_method_of_the_fused_levels(tmp_path):
     from zarrsmith.utils.downsampling import downsample_numpy
 

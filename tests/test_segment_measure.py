@@ -96,6 +96,7 @@ def test_measure_filter_and_mask(tmp_path):
     assert only.metadata["channel_names"] == ["DAPI_clean"] and only.data[0].shape[0] == 1
 
 
+@pytest.mark.slow
 def test_command_line_chain(tmp_path):
     img = tmp_path / "img.ome.zarr"
     _image(img, axes="tczyx", shape=(2, 2, 8, 64, 96))

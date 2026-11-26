@@ -1,9 +1,8 @@
 # tests/test_zarr_read_write.py
 from __future__ import annotations
 
-import zarr
-import numpy as np
 import pytest
+import zarr
 
 import zarrsmith.microscope_manager as mm
 
@@ -20,86 +19,29 @@ def _assert_metadata_equal_basic(m1, m2):
     assert len(m2["scales"]) == len(m1["scales"])
 
 
-def test_write_v04_and_reopen(tmp_path, image_pyramid, metadata):
-    out = tmp_path / "test_v04.zarr"
+def _assert_ngff_attrs(attrs, ngff_version):
+    """The NGFF blocks sit at the root of the attributes in 0.4, under ``ome`` in 0.5."""
+    if ngff_version == "0.4":
+        assert "multiscales" in attrs and "omero" in attrs and "ome" not in attrs
+    else:
+        assert attrs["ome"]["version"] == ngff_version
+        assert "multiscales" in attrs["ome"] and "omero" in attrs["ome"]
 
-    writer = mm.ArrayManager(image_pyramid, metadata)
 
-    writer.to_zarr(
+@pytest.mark.parametrize("ngff_version, zarr_format", [("0.4", 2), ("0.5", 3)])
+def test_write_and_reopen(tmp_path, image_pyramid, metadata, ngff_version, zarr_format):
+    out = tmp_path / f"test_v{ngff_version}.zarr"
+    mm.ArrayManager(image_pyramid, metadata).to_zarr(
         str(out),
-        ngff_version="0.4",
-        zarr_format=2,
+        ngff_version=ngff_version,
+        zarr_format=zarr_format,
         compressor="blosc",
         compressor_level=1,
         overwrite=True,
     )
-
     # low-level structural check
-    root = zarr.open_group(str(out), mode="r")
-    attrs = root.attrs.asdict()
-    assert "multiscales" in attrs
-    assert "omero" in attrs
-    assert "ome" not in attrs
-
+    _assert_ngff_attrs(zarr.open_group(str(out), mode="r").attrs.asdict(), ngff_version)
     # high-level reopen
     d = mm.ZarrManager(str(out), mode="r")
     assert len(d.data) == 3
     _assert_metadata_equal_basic(metadata, d.metadata)
-
-
-def test_write_v05_and_reopen(tmp_path, image_pyramid, metadata):
-    out = tmp_path / "test_v05.zarr"
-
-    writer = mm.ArrayManager(image_pyramid, metadata)
-    
-    writer.to_zarr(
-        str(out),
-        ngff_version="0.5",
-        zarr_format=3,
-        compressor="blosc",
-        compressor_level=1,
-        overwrite=True,
-    )
-
-    root = zarr.open_group(str(out), mode="r")
-    attrs = root.attrs.asdict()
-    assert "ome" in attrs
-    assert attrs["ome"]["version"] == "0.5"
-    assert "multiscales" in attrs["ome"]
-    assert "omero" in attrs["ome"]
-
-    d = mm.ZarrManager(str(out), mode="r")
-    assert len(d.data) == 3
-    _assert_metadata_equal_basic(metadata, d.metadata)
-
-
-def test_round_trip_metadata_v04(tmp_path, image_pyramid, metadata):
-    out = tmp_path / "roundtrip_v04.zarr"
-
-    writer = mm.ArrayManager(image_pyramid, metadata)
-
-    writer.to_zarr(
-        str(out),
-        ngff_version="0.4",
-        zarr_format=2,
-        overwrite=True,
-    )
-
-    reread = mm.ZarrManager(str(out), mode="r")
-    _assert_metadata_equal_basic(metadata, reread.metadata)
-
-
-def test_round_trip_metadata_v05(tmp_path, image_pyramid, metadata):
-    out = tmp_path / "roundtrip_v05.zarr"
-
-    writer = mm.ArrayManager(image_pyramid, metadata)
-
-    writer.to_zarr(
-        str(out),
-        ngff_version="0.5",
-        zarr_format=3,
-        overwrite=True,
-    )
-
-    reread = mm.ZarrManager(str(out), mode="r")
-    _assert_metadata_equal_basic(metadata, reread.metadata)

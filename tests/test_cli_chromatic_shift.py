@@ -31,6 +31,7 @@ def _run(monkeypatch, *argv):
     cli.main()
 
 
+@pytest.mark.slow
 def test_estimate_and_correct(store, tmp_path, monkeypatch, capsys):
     out, report = tmp_path / "out.ome.zarr", tmp_path / "shift.json"
     _run(monkeypatch, "chromatic-shift", "-i", store, "-z", out, "-r", report, "-mxs", 10)
@@ -52,6 +53,7 @@ def test_measure_only(store, tmp_path, monkeypatch):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["in.ome.zarr", "shift.json"]
 
 
+@pytest.mark.slow
 def test_given_shifts_and_report_file(store, tmp_path, monkeypatch, sample):
     out = tmp_path / "out.ome.zarr"
     _run(monkeypatch, "chromatic-shift", "-i", store, "-z", out, "-sf", 0, 4, -2, "-o", 0, "-e", "same")
@@ -66,6 +68,7 @@ def test_given_shifts_and_report_file(store, tmp_path, monkeypatch, sample):
     np.testing.assert_array_equal(np.asarray(mm.ZarrManager(str(out2)).data[0]), data)
 
 
+@pytest.mark.slow
 def test_reference_channel_by_name(store, tmp_path, monkeypatch):
     report = tmp_path / "shift.json"
     _run(monkeypatch, "chromatic-shift", "-i", store, "-r", report, "-rc", "ch1", "-mxs", 10)
@@ -74,6 +77,7 @@ def test_reference_channel_by_name(store, tmp_path, monkeypatch):
     assert data["reference_channel"] == 1 and data["shifts"][1] == 0.0
 
 
+@pytest.mark.slow
 def test_existing_output_needs_overwrite(store, tmp_path, monkeypatch):
     out = tmp_path / "out.ome.zarr"
     out.mkdir()  # an empty folder holds nothing to lose
@@ -94,6 +98,7 @@ def test_fail_on_warning_writes_nothing(store, tmp_path, monkeypatch):
     assert json.loads(report.read_text())["warnings"]
 
 
+@pytest.mark.slow
 def test_batch(store, tmp_path, monkeypatch):
     out = tmp_path / "out.ome.zarr"
     report_a, report_b = tmp_path / "a.json", tmp_path / "b.json"
@@ -118,6 +123,7 @@ def test_argument_errors(store, tmp_path, monkeypatch):
         _run(monkeypatch, "chromatic-shift", "--batch", store / "zarr.json", "-i", store)
 
 
+@pytest.mark.slow
 def test_reference_channel_and_timepoint(tmp_path, monkeypatch, capsys):
     from .test_chromatic_shift import TIMELAPSE_DISPLACEMENTS, _write_timelapse
 

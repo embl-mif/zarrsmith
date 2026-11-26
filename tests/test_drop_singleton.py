@@ -91,27 +91,15 @@ def _write_source(path):
     _manager().to_zarr(str(path), ngff_version="0.5", zarr_format=3, drop_singleton=False)
 
 
-def test_zarr_convert_drop_singleton(tmp_path):
+@pytest.mark.parametrize("options, axes", [({}, "cyx"), ({"drop_singleton": False}, "tczyx")])
+def test_zarr_convert_drop_singleton(tmp_path, options, axes):
     src, out = tmp_path / "src.zarr", tmp_path / "out.zarr"
     _write_source(src)
     zarr_convert(
         input_path=str(src), zarr_path=str(out), microscope="zarr",
-        chunk_size=[1, 1, 1, 32, 32], zarr_format=3, num_levels=1,
+        chunk_size=[1, 1, 1, 32, 32], zarr_format=3, num_levels=1, **options,
     )
-    axes, _ = _axes_of(out)
-    assert axes == "cyx"
-
-
-def test_zarr_convert_keep_singleton(tmp_path):
-    src, out = tmp_path / "src.zarr", tmp_path / "out.zarr"
-    _write_source(src)
-    zarr_convert(
-        input_path=str(src), zarr_path=str(out), microscope="zarr",
-        chunk_size=[1, 1, 1, 32, 32], zarr_format=3, num_levels=1,
-        drop_singleton=False,
-    )
-    axes, _ = _axes_of(out)
-    assert axes == "tczyx"
+    assert _axes_of(out)[0] == axes
 
 
 def test_batch_csv_drop_singleton_column(tmp_path):

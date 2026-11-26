@@ -9,7 +9,7 @@ from napari import current_viewer
 from napari.layers.utils import layer_utils
 from napari.qt.threading import thread_worker
 from qtpy.QtCore import Qt, QTimer
-from qtpy.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QToolButton
+from qtpy.QtWidgets import QWidget, QVBoxLayout, QLabel, QToolButton
 
 from zarrsmith.microscope_manager.readers import READERS
 from zarrsmith.utils.axes import recorded_voxel_size, spatial_axes_in_order

@@ -47,6 +47,7 @@ import numpy as np
 import zarr
 
 from ..utils.allocate import build_allocation_metadata
+from ..utils.axes import spatial_axes_in_order
 from ..utils.chunks import auto_chunk_shape
 from ..utils.create_empty_dataset import create_empty_dataset
 from ..utils.downsampling import resolve_downsampling_method
@@ -1016,7 +1017,7 @@ class FusionPlan:
     def voxel_size(self) -> Dict[str, Optional[float]]:
         """Level-0 voxel size of every spatial axis, ``None`` where a tile's file did not record
         it (``Tile.attrs[UNRECORDED_SCALE_KEY]``; ``scale`` then holds a 1.0 placeholder)."""
-        from ..utils.axes import UNRECORDED_SCALE_KEY, spatial_axes_in_order
+        from ..utils.axes import UNRECORDED_SCALE_KEY
 
         unrecorded = {ax for t in self.tiles for ax in (t.attrs.get(UNRECORDED_SCALE_KEY) or ())}
         spatial = spatial_axes_in_order(self.axes)
@@ -1779,7 +1780,7 @@ def fuse_tiles(
     drop = [i for i, ax in enumerate(plan.axes) if cfg.drop_singleton and ax in "tcz" and plan.shape[i] == 1]
     keep = [i for i in range(len(plan.axes)) if i not in drop]
     out_axes = "".join(plan.axes[i] for i in keep)
-    spatial = [ax for ax in plan.axes if ax in "zyx"]
+    spatial = spatial_axes_in_order(plan.axes)
     factor = _spatial_factor(downscale_factor, flat or "z" not in out_axes)
     metadata, _, _ = build_allocation_metadata(
         size=[plan.shape[i] for i in keep],
